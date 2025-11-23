@@ -1,4 +1,4 @@
-// src/routes/matching.js
+// src/routes/matching.js - FIXED VERSION
 const express = require("express");
 const router = express.Router();
 
@@ -6,7 +6,7 @@ const { db } = require("../app");
 const { calculateRouteSimilarity, isLocationAlongRoute, generateRouteHash, hasCapacity, updateDriverCapacity } = require("../utils/routeMatching");
 const { createMatchProposal } = require("../utils/matchProposal");
 
-// Unified search endpoint for both driver and passenger
+// Unified search endpoint for both driver and passenger - FIXED: Simplified queries to avoid index issues
 router.post("/search", async (req, res) => {
   try {
     const userData = req.body;
@@ -49,11 +49,11 @@ router.post("/search", async (req, res) => {
     const matches = [];
 
     if (userType === 'passenger') {
-      // Passenger searching for drivers
-      matches.push(...await findDriversForPassenger(db, userData, routeHash, rideType));
+      // Passenger searching for drivers - FIXED: Use simplified query
+      matches.push(...await findDriversForPassengerSimplified(db, userData, routeHash, rideType));
     } else {
-      // Driver searching for passengers
-      matches.push(...await findPassengersForDriver(db, userData, routeHash, rideType));
+      // Driver searching for passengers - FIXED: Use simplified query
+      matches.push(...await findPassengersForDriverSimplified(db, userData, routeHash, rideType));
     }
 
     // Create match proposals for top matches
@@ -78,48 +78,67 @@ router.post("/search", async (req, res) => {
 
   } catch (error) {
     console.error('❌ Error in unified search:', error);
+    
+    // Better error handling for index issues
+    if (error.code === 9 || error.message.includes('index')) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Search system is being optimized. Please try again in a moment.',
+        details: 'Database index is building'
+      });
+    }
+    
     res.status(500).json({ 
       success: false, 
-      error: error.message,
-      details: 'Search failed due to server error'
+      error: 'Search failed due to server error',
+      details: error.message
     });
   }
 });
 
-// Passenger searching for drivers
-async function findDriversForPassenger(db, passengerData, routeHash, rideType) {
+// FIXED: Simplified driver search to avoid composite index requirements
+async function findDriversForPassengerSimplified(db, passengerData, routeHash, rideType) {
   const matches = [];
 
   try {
-    let query = db.collection('active_searches')
+    console.log(`🔍 Simplified search for passenger: ${passengerData.userId}`);
+    
+    // Step 1: Get all active drivers first (simple query)
+    let driversQuery = db.collection('active_searches')
       .where('isActive', '==', true)
-      .where('userType', '==', 'driver')
-      .where('searchType', '==', rideType === 'immediate' ? 'real_time' : 'scheduled');
+      .where('userType', '==', 'driver');
 
-    // Check capacity
-    query = query.where('passengerCapacity', '>=', passengerData.passengerCount || 1);
+    const driversSnapshot = await driversQuery.limit(50).get(); // Increased limit for manual filtering
 
-    // For scheduled rides, add time filter
-    if (rideType === 'scheduled' && passengerData.scheduledTime) {
-      const scheduledTime = new Date(passengerData.scheduledTime);
-      const flexibility = passengerData.flexibility || 15; // minutes
-      const startTime = new Date(scheduledTime.getTime() - flexibility * 60000);
-      const endTime = new Date(scheduledTime.getTime() + flexibility * 60000);
-      
-      query = query
-        .where('scheduledTime', '>=', startTime.toISOString())
-        .where('scheduledTime', '<=', endTime.toISOString());
-    }
-
-    const driversSnapshot = await query.limit(20).get();
+    console.log(`📊 Found ${driversSnapshot.size} active drivers, filtering manually...`);
 
     for (const driverDoc of driversSnapshot.docs) {
       const driverData = driverDoc.data();
 
-      // Check available capacity
+      // Manual filtering for search type
+      const driverSearchType = rideType === 'immediate' ? 'real_time' : 'scheduled';
+      if (driverData.searchType !== driverSearchType) {
+        continue;
+      }
+
+      // Manual filtering for capacity
       const availableSeats = driverData.passengerCapacity - (driverData.currentPassengers || 0);
       if (availableSeats < (passengerData.passengerCount || 1)) {
         continue;
+      }
+
+      // Manual filtering for scheduled time
+      if (rideType === 'scheduled' && passengerData.scheduledTime) {
+        if (!driverData.scheduledTime) continue;
+        
+        const passengerTime = new Date(passengerData.scheduledTime);
+        const driverTime = new Date(driverData.scheduledTime);
+        const flexibility = passengerData.flexibility || 15; // minutes
+        const timeDiff = Math.abs(driverTime - passengerTime) / (1000 * 60); // minutes
+        
+        if (timeDiff > flexibility) {
+          continue;
+        }
       }
 
       // Calculate route similarity
@@ -154,7 +173,7 @@ async function findDriversForPassenger(db, passengerData, routeHash, rideType) {
       if (similarity >= similarityThreshold && pickupAlongRoute && dropoffAlongRoute) {
         matches.push({
           matchId: `match_${Date.now()}_${driverDoc.id}_${passengerData.userId}`,
-          driverId: driverData.driverId || driverDoc.id,
+          driverId: driverData.driverId || driverData.userId || driverDoc.id,
           passengerId: passengerData.userId,
           similarity: similarity,
           driverData: {
@@ -167,49 +186,64 @@ async function findDriversForPassenger(db, passengerData, routeHash, rideType) {
           proposedFare: calculateProposedFare(driverData, passengerData),
           scheduledTime: passengerData.scheduledTime || driverData.scheduledTime,
           timestamp: new Date(),
-          status: 'proposed'
+          status: 'proposed',
+          rideType: rideType
         });
       }
     }
 
-    console.log(`✅ Found ${matches.length} drivers for passenger ${passengerData.userId}`);
+    console.log(`✅ Found ${matches.length} suitable drivers for passenger ${passengerData.userId}`);
   } catch (error) {
-    console.error('❌ Error finding drivers for passenger:', error);
+    console.error('❌ Error in simplified driver search:', error);
   }
 
   return matches.sort((a, b) => b.similarity - a.similarity);
 }
 
-// Driver searching for passengers
-async function findPassengersForDriver(db, driverData, routeHash, rideType) {
+// FIXED: Simplified passenger search to avoid composite index requirements
+async function findPassengersForDriverSimplified(db, driverData, routeHash, rideType) {
   const matches = [];
 
   try {
-    let query = db.collection('active_searches')
+    console.log(`🔍 Simplified search for driver: ${driverData.userId}`);
+    
+    // Step 1: Get all active passengers first (simple query)
+    let passengersQuery = db.collection('active_searches')
       .where('isActive', '==', true)
-      .where('userType', '==', 'passenger')
-      .where('searchType', '==', rideType === 'immediate' ? 'real_time' : 'scheduled');
+      .where('userType', '==', 'passenger');
 
-    // Check passenger count doesn't exceed capacity
-    const availableSeats = driverData.capacity - (driverData.currentPassengers || 0);
-    query = query.where('passengerCount', '<=', availableSeats);
+    const passengersSnapshot = await passengersQuery.limit(50).get(); // Increased limit for manual filtering
 
-    // For scheduled rides, add time filter
-    if (rideType === 'scheduled' && driverData.scheduledTime) {
-      const scheduledTime = new Date(driverData.scheduledTime);
-      const flexibility = driverData.flexibility || 15; // minutes
-      const startTime = new Date(scheduledTime.getTime() - flexibility * 60000);
-      const endTime = new Date(scheduledTime.getTime() + flexibility * 60000);
-      
-      query = query
-        .where('scheduledTime', '>=', startTime.toISOString())
-        .where('scheduledTime', '<=', endTime.toISOString());
-    }
-
-    const passengersSnapshot = await query.limit(20).get();
+    console.log(`📊 Found ${passengersSnapshot.size} active passengers, filtering manually...`);
 
     for (const passengerDoc of passengersSnapshot.docs) {
       const passengerData = passengerDoc.data();
+
+      // Manual filtering for search type
+      const passengerSearchType = rideType === 'immediate' ? 'real_time' : 'scheduled';
+      if (passengerData.searchType !== passengerSearchType) {
+        continue;
+      }
+
+      // Manual filtering for capacity
+      const availableSeats = driverData.capacity - (driverData.currentPassengers || 0);
+      if ((passengerData.passengerCount || 1) > availableSeats) {
+        continue;
+      }
+
+      // Manual filtering for scheduled time
+      if (rideType === 'scheduled' && driverData.scheduledTime) {
+        if (!passengerData.scheduledTime) continue;
+        
+        const driverTime = new Date(driverData.scheduledTime);
+        const passengerTime = new Date(passengerData.scheduledTime);
+        const flexibility = driverData.flexibility || 15; // minutes
+        const timeDiff = Math.abs(passengerTime - driverTime) / (1000 * 60); // minutes
+        
+        if (timeDiff > flexibility) {
+          continue;
+        }
+      }
 
       // Calculate route similarity
       const passengerRoute = passengerData.routePoints || [
@@ -244,7 +278,7 @@ async function findPassengersForDriver(db, driverData, routeHash, rideType) {
         matches.push({
           matchId: `match_${Date.now()}_${driverData.userId}_${passengerDoc.id}`,
           driverId: driverData.userId,
-          passengerId: passengerData.userId || passengerDoc.id,
+          passengerId: passengerData.userId || passengerData.passengerId || passengerDoc.id,
           similarity: similarity,
           driverData: driverData,
           passengerData: {
@@ -256,14 +290,117 @@ async function findPassengersForDriver(db, driverData, routeHash, rideType) {
           proposedFare: calculateProposedFare(driverData, passengerData),
           scheduledTime: driverData.scheduledTime || passengerData.scheduledTime,
           timestamp: new Date(),
-          status: 'proposed'
+          status: 'proposed',
+          rideType: rideType
         });
       }
     }
 
-    console.log(`✅ Found ${matches.length} passengers for driver ${driverData.userId}`);
+    console.log(`✅ Found ${matches.length} suitable passengers for driver ${driverData.userId}`);
   } catch (error) {
-    console.error('❌ Error finding passengers for driver:', error);
+    console.error('❌ Error in simplified passenger search:', error);
+  }
+
+  return matches.sort((a, b) => b.similarity - a.similarity);
+}
+
+// FIXED: Alternative optimized search with single-field queries
+async function findDriversForPassengerOptimized(db, passengerData, routeHash, rideType) {
+  const matches = [];
+
+  try {
+    console.log(`🔍 Optimized search for passenger: ${passengerData.userId}`);
+    
+    // Query by single field first, then filter manually
+    const driversSnapshot = await db.collection('active_searches')
+      .where('isActive', '==', true)
+      .limit(100) // Increased limit
+      .get();
+
+    const matchingDrivers = [];
+    
+    driversSnapshot.forEach(doc => {
+      const driverData = doc.data();
+      
+      // Manual filtering for all conditions
+      if (driverData.userType === 'driver' &&
+          driverData.searchType === (rideType === 'immediate' ? 'real_time' : 'scheduled') &&
+          driverData.passengerCapacity >= (passengerData.passengerCount || 1)) {
+        
+        // Additional filtering for scheduled rides
+        if (rideType === 'scheduled' && passengerData.scheduledTime && driverData.scheduledTime) {
+          const passengerTime = new Date(passengerData.scheduledTime);
+          const driverTime = new Date(driverData.scheduledTime);
+          const timeDiff = Math.abs(driverTime - passengerTime) / (1000 * 60);
+          
+          if (timeDiff > (passengerData.flexibility || 15)) {
+            return;
+          }
+        }
+
+        // Check available capacity
+        const availableSeats = driverData.passengerCapacity - (driverData.currentPassengers || 0);
+        if (availableSeats >= (passengerData.passengerCount || 1)) {
+          matchingDrivers.push({
+            driverData: driverData,
+            documentId: doc.id
+          });
+        }
+      }
+    });
+
+    console.log(`📊 After initial filtering: ${matchingDrivers.length} drivers`);
+
+    // Now calculate route similarity for filtered drivers
+    for (const { driverData, documentId } of matchingDrivers) {
+      const passengerRoute = passengerData.routePoints || [
+        passengerData.pickupLocation, 
+        passengerData.destinationLocation
+      ];
+      
+      const driverRoute = driverData.routePoints || [
+        driverData.pickupLocation, 
+        driverData.destinationLocation
+      ];
+
+      const similarity = calculateRouteSimilarity(passengerRoute, driverRoute);
+
+      const pickupAlongRoute = isLocationAlongRoute(
+        passengerData.pickupLocation,
+        driverRoute,
+        passengerData.maxWalkDistance || 0.5
+      );
+
+      const dropoffAlongRoute = isLocationAlongRoute(
+        passengerData.destinationLocation,
+        driverRoute,
+        passengerData.maxWalkDistance || 0.5
+      );
+
+      const similarityThreshold = rideType === 'immediate' ? 0.6 : 0.7;
+
+      if (similarity >= similarityThreshold && pickupAlongRoute && dropoffAlongRoute) {
+        matches.push({
+          matchId: `match_${Date.now()}_${documentId}_${passengerData.userId}`,
+          driverId: driverData.driverId || driverData.userId || documentId,
+          passengerId: passengerData.userId,
+          similarity: similarity,
+          driverData: { ...driverData, documentId },
+          passengerData: passengerData,
+          pickupLocation: passengerData.pickupLocation,
+          destinationLocation: passengerData.destinationLocation,
+          proposedFare: calculateProposedFare(driverData, passengerData),
+          scheduledTime: passengerData.scheduledTime || driverData.scheduledTime,
+          timestamp: new Date(),
+          status: 'proposed',
+          rideType: rideType
+        });
+      }
+    }
+
+    console.log(`✅ Found ${matches.length} optimized matches for passenger`);
+  } catch (error) {
+    console.error('❌ Error in optimized driver search:', error);
   }
 
   return matches.sort((a, b) => b.similarity - a.similarity);
@@ -413,7 +550,7 @@ router.post("/reject", async (req, res) => {
   }
 });
 
-// Get user's active matches
+// FIXED: Get user's active matches with proper query
 router.get("/user-matches/:userId", async (req, res) => {
   try {
     const { userId } = req.params;
@@ -421,25 +558,40 @@ router.get("/user-matches/:userId", async (req, res) => {
 
     console.log(`📋 Getting matches for user: ${userId} with status: ${status}`);
 
-    const matchesQuery = await db.collection('match_proposals')
+    // FIXED: Use separate queries instead of $or which may require indexes
+    const driverMatchesQuery = await db.collection('match_proposals')
       .where('status', '==', status)
-      .where('$or', [
-        { driverId: userId },
-        { passengerId: userId }
-      ])
+      .where('driverId', '==', userId)
       .orderBy('timestamp', 'desc')
       .limit(parseInt(limit))
       .get();
 
-    const matches = matchesQuery.docs.map(doc => ({
+    const passengerMatchesQuery = await db.collection('match_proposals')
+      .where('status', '==', status)
+      .where('passengerId', '==', userId)
+      .orderBy('timestamp', 'desc')
+      .limit(parseInt(limit))
+      .get();
+
+    const driverMatches = driverMatchesQuery.docs.map(doc => ({
       id: doc.id,
       ...doc.data()
     }));
 
+    const passengerMatches = passengerMatchesQuery.docs.map(doc => ({
+      id: doc.id,
+      ...doc.data()
+    }));
+
+    // Combine and sort by timestamp
+    const allMatches = [...driverMatches, ...passengerMatches]
+      .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+      .slice(0, parseInt(limit));
+
     res.json({
       success: true,
-      matches: matches,
-      total: matches.length
+      matches: allMatches,
+      total: allMatches.length
     });
 
   } catch (error) {
@@ -547,5 +699,35 @@ async function notifyMatchAcceptance(match, acceptedByUserId) {
     console.error('Error sending match acceptance notification:', error);
   }
 }
+
+// Emergency fallback search endpoint
+router.post("/search-fallback", async (req, res) => {
+  try {
+    const userData = req.body;
+    const { userId, userType } = userData;
+
+    console.log(`🔄 Using fallback search for: ${userType} ${userId}`);
+
+    // Simple fallback - return empty matches but success response
+    res.json({
+      success: true,
+      matches: [],
+      totalMatches: 0,
+      searchId: `fallback_${Date.now()}_${userId}`,
+      userType: userType,
+      message: 'Using fallback search mode while system optimizes'
+    });
+
+  } catch (error) {
+    console.error('❌ Error in fallback search:', error);
+    res.json({
+      success: true,
+      matches: [],
+      totalMatches: 0,
+      searchId: `error_${Date.now()}`,
+      message: 'Search temporarily unavailable'
+    });
+  }
+});
 
 module.exports = router;
