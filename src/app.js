@@ -1,4 +1,4 @@
-// src/app.js - FIXED 404 handler
+// src/app.js - FIXED CORS for Flutter Web
 const express = require("express");
 const admin = require("firebase-admin");
 const cors = require("cors");
@@ -6,32 +6,88 @@ require("dotenv").config();
 
 const app = express();
 
-// Enhanced CORS configuration
+// FIXED: Enhanced CORS configuration for Flutter Web
 app.use(cors({
   origin: function (origin, callback) {
     // Allow requests with no origin (like mobile apps, Postman, etc.)
-    if (!origin) return callback(null, true);
+    if (!origin) {
+      console.log('🌐 No origin - allowing request (mobile app)');
+      return callback(null, true);
+    }
     
+    // Extensive list of allowed origins for Flutter Web
     const allowedOrigins = [
+      // Flutter Web development ports
       'http://localhost:3000',
       'http://localhost:3001',
       'http://localhost:5000',
       'http://localhost:5001',
+      'http://localhost:5354',
+      'http://localhost:59873',
+      'http://localhost:12345',
+      'http://127.0.0.1:3000',
+      'http://127.0.0.1:3001',
+      'http://127.0.0.1:5000',
+      'http://127.0.0.1:5001',
+      'http://127.0.0.1:5354',
+      'http://127.0.0.1:59873',
+      'https://localhost:3000',
+      'https://localhost:3001',
+      'https://localhost:5000',
+      'https://localhost:5001',
+      
+      // Your production domains
       'https://yourdomain.com',
-      process.env.FRONTEND_URL
+      process.env.FRONTEND_URL,
+      
+      // Allow all in development
+      ...(process.env.NODE_ENV === 'development' ? ['*'] : [])
     ].filter(Boolean);
 
-    if (allowedOrigins.indexOf(origin) !== -1 || process.env.NODE_ENV === 'development') {
+    console.log('🌐 Checking CORS for origin:', origin);
+    
+    // Check if origin is allowed
+    const isAllowed = allowedOrigins.some(allowed => {
+      if (allowed === '*') return true;
+      return origin === allowed;
+    });
+
+    if (isAllowed) {
+      console.log('✅ CORS allowed for origin:', origin);
       callback(null, true);
     } else {
       console.log('🚫 CORS blocked origin:', origin);
-      callback(new Error('Not allowed by CORS'));
+      console.log('💡 Allowed origins:', allowedOrigins);
+      
+      // In development, allow anyway with warning
+      if (process.env.NODE_ENV === 'development') {
+        console.log('⚠️  Allowing in development mode');
+        callback(null, true);
+      } else {
+        callback(new Error(`Not allowed by CORS. Origin: ${origin}`));
+      }
     }
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept']
+  allowedHeaders: [
+    'Content-Type', 
+    'Authorization', 
+    'X-Requested-With', 
+    'Accept',
+    'Origin',
+    'Access-Control-Request-Method',
+    'Access-Control-Request-Headers',
+    'User-Agent'
+  ],
+  exposedHeaders: [
+    'Content-Length',
+    'Authorization'
+  ]
 }));
+
+// Handle preflight requests globally
+app.options('*', cors());
 
 // Enhanced body parsing
 app.use(express.json({ 
@@ -49,8 +105,14 @@ app.use((req, res, next) => {
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('X-XSS-Protection', '1; mode=block');
   
+  // CORS headers (additional safety)
+  if (req.headers.origin) {
+    res.setHeader('Access-Control-Allow-Origin', req.headers.origin);
+  }
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  
   // Request logging
-  console.log(`📨 ${new Date().toISOString()} ${req.method} ${req.path}`);
+  console.log(`📨 ${new Date().toISOString()} ${req.method} ${req.path} - Origin: ${req.headers.origin || 'No Origin'}`);
   
   next();
 });
@@ -85,7 +147,11 @@ app.get("/", (req, res) => {
   res.json({ 
     status: "🚀 ShareWay Backend is running!",
     timestamp: new Date().toISOString(),
-    environment: process.env.NODE_ENV || 'development'
+    environment: process.env.NODE_ENV || 'development',
+    cors: {
+      enabled: true,
+      allowedOrigins: 'All Flutter Web ports + configured domains'
+    }
   });
 });
 
@@ -96,8 +162,13 @@ app.get("/health", async (req, res) => {
       status: "healthy",
       timestamp: new Date().toISOString(),
       uptime: process.uptime(),
+      environment: process.env.NODE_ENV || 'development',
       firebase: {
         connected: false
+      },
+      cors: {
+        requestOrigin: req.headers.origin || 'No Origin',
+        allowed: true
       }
     };
 
@@ -105,7 +176,8 @@ app.get("/health", async (req, res) => {
     try {
       await db.collection('health_checks').doc('ping').set({
         timestamp: new Date(),
-        message: 'Health check'
+        message: 'Health check',
+        origin: req.headers.origin
       }, { merge: true });
       
       healthCheck.firebase.connected = true;
@@ -127,12 +199,27 @@ app.get("/health", async (req, res) => {
   }
 });
 
+// CORS test endpoint
+app.get("/cors-test", (req, res) => {
+  res.json({
+    success: true,
+    message: "CORS is working!",
+    yourOrigin: req.headers.origin || 'No Origin Provided',
+    timestamp: new Date().toISOString(),
+    environment: process.env.NODE_ENV || 'development'
+  });
+});
+
 // API information endpoint
 app.get("/api", (req, res) => {
   res.json({
     name: "ShareWay API",
     version: "1.0.0",
     description: "Ride sharing and matching service API",
+    cors: {
+      enabled: true,
+      yourOrigin: req.headers.origin || 'No Origin'
+    },
     endpoints: {
       matching: {
         search: "POST /api/match/search",
@@ -151,6 +238,10 @@ app.get("/api", (req, res) => {
       passenger: {
         start_search: "POST /api/passenger/start-search",
         stop_search: "POST /api/passenger/stop-search"
+      },
+      test: {
+        cors_test: "GET /cors-test",
+        health: "GET /health"
       }
     }
   });
@@ -184,6 +275,16 @@ try {
 app.use((error, req, res, next) => {
   console.error('🔥 Global Error Handler:', error.message);
 
+  // CORS error specific handling
+  if (error.message.includes('CORS')) {
+    return res.status(403).json({
+      success: false,
+      error: 'CORS Error: ' + error.message,
+      yourOrigin: req.headers.origin,
+      fix: 'Contact admin to add your origin to allowed list'
+    });
+  }
+
   if (process.env.NODE_ENV === 'production') {
     return res.status(500).json({
       success: false,
@@ -194,7 +295,8 @@ app.use((error, req, res, next) => {
   res.status(500).json({
     success: false,
     error: error.message,
-    stack: error.stack
+    stack: error.stack,
+    yourOrigin: req.headers.origin
   });
 });
 
@@ -205,8 +307,10 @@ app.use((req, res) => {
     error: 'Route not found',
     path: req.originalUrl,
     method: req.method,
+    yourOrigin: req.headers.origin,
     availableEndpoints: [
       '/health',
+      '/cors-test',
       '/api',
       '/api/match/search',
       '/api/user/start-search',
@@ -226,16 +330,18 @@ if (require.main === module) {
 📍 Port: ${PORT}
 🌍 Environment: ${process.env.NODE_ENV || 'development'}
 📅 Started at: ${new Date().toISOString()}
+🔧 CORS: ENABLED for Flutter Web
 
 Available Endpoints:
 ✅ Health: GET /health
+✅ CORS Test: GET /cors-test  
 ✅ API Info: GET /api
 ✅ Matching: POST /api/match/search
 ✅ User: POST /api/user/start-search
 ✅ Driver: POST /api/driver/start-search  
 ✅ Passenger: POST /api/passenger/start-search
 
-Ready to accept requests! 🎉
+Ready to accept Flutter Web requests! 🎉
     `);
   });
 
