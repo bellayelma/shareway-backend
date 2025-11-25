@@ -1,4 +1,4 @@
-// src/app.js - UPDATED WITH WEB SOCKET SUPPORT
+// src/app.js - COMPLETE SCRIPT WITH BOTH IMMEDIATE & SCHEDULED SEARCHES
 const express = require("express");
 const admin = require("firebase-admin");
 const cors = require("cors");
@@ -71,8 +71,10 @@ const setupWebSocket = (server) => {
 
 // In-memory storage to minimize Firestore reads/writes
 const activeSearches = new Map();
+const scheduledSearches = new Map();
 const processedMatches = new Map();
 const MAX_MATCH_AGE = 300000; // 5 minutes
+const SCHEDULED_SEARCH_CHECK_INTERVAL = 60000; // 1 minute
 
 // Clean old data from memory
 setInterval(() => {
@@ -106,6 +108,8 @@ const storeMatchInFirestore = async (matchData) => {
       destinationName: matchData.destinationName || 'Unknown',
       pickupLocation: matchData.pickupLocation,
       destinationLocation: matchData.destinationLocation,
+      rideType: matchData.rideType || 'immediate',
+      scheduledTime: matchData.scheduledTime,
       overlayTriggered: true,
       createdAt: admin.firestore.FieldValue.serverTimestamp()
     };
@@ -185,109 +189,10 @@ const handleWebSocketMatchDecision = async (matchId, decision, userId) => {
   }
 };
 
-// ========== OPTIMIZED MATCHING SERVICE ==========
-
-const startOptimizedMatching = () => {
-  console.log('🔄 Starting Optimized Matching Service...');
-  
-  // Run every 30 seconds for better responsiveness
-  setInterval(async () => {
-    try {
-      // Get drivers and passengers from memory
-      const drivers = Array.from(activeSearches.values())
-        .filter(search => search.userType === 'driver' && search.status === 'searching');
-      
-      const passengers = Array.from(activeSearches.values())
-        .filter(search => search.userType === 'passenger' && search.status === 'searching');
-
-      console.log(`📊 Matching: ${drivers.length} drivers vs ${passengers.length} passengers`);
-      
-      if (drivers.length === 0 || passengers.length === 0) {
-        console.log(`💤 No matches possible - Drivers: ${drivers.length}, Passengers: ${passengers.length}`);
-        return;
-      }
-
-      // Log actual search details
-      console.log('🚗 Drivers:', drivers.map(d => `${d.driverName || 'Unknown'} (${d.userId})`));
-      console.log('👤 Passengers:', passengers.map(p => `${p.passengerName || 'Unknown'} (${p.userId})`));
-      
-      let matchesCreated = 0;
-      
-      // Optimized matching
-      for (const driver of drivers) {
-        for (const passenger of passengers) {
-          // Quick validation
-          if (!driver.routePoints || !passenger.routePoints || 
-              driver.routePoints.length === 0 || passenger.routePoints.length === 0) {
-            continue;
-          }
-
-          // Check capacity
-          const passengerCount = passenger.passengerCount || 1;
-          const hasSeats = routeMatching.hasCapacity(driver, passengerCount);
-          if (!hasSeats) continue;
-
-          // Calculate similarity
-          const similarity = routeMatching.calculateRouteSimilarity(
-            passenger.routePoints,
-            driver.routePoints,
-            { 
-              similarityThreshold: 0.001, 
-              maxDistanceThreshold: 50.0 // Increased for testing
-            }
-          );
-
-          console.log(`🔍 ${driver.driverName || 'Driver'} ↔ ${passenger.passengerName || 'Passenger'}: Score=${similarity.toFixed(3)}`);
-
-          // Process matches with lower threshold for testing
-          if (similarity > 0.1) {
-            const matchKey = generateMatchKey(driver.userId, passenger.userId);
-            
-            if (!processedMatches.has(matchKey)) {
-              const matchData = {
-                matchId: `match_${driver.userId}_${passenger.userId}_${Date.now()}`,
-                driverId: driver.userId,
-                driverName: driver.driverName || 'Unknown Driver',
-                passengerId: passenger.userId,
-                passengerName: passenger.passengerName || 'Unknown Passenger',
-                similarityScore: similarity,
-                pickupName: passenger.pickupName || driver.pickupName || 'Unknown Location',
-                destinationName: passenger.destinationName || driver.destinationName || 'Unknown Destination',
-                pickupLocation: passenger.pickupLocation || driver.pickupLocation,
-                destinationLocation: passenger.destinationLocation || driver.destinationLocation,
-                passengerCount: passenger.passengerCount || 1,
-                capacity: driver.capacity || 4,
-                vehicleType: driver.vehicleType || 'car',
-                timestamp: new Date().toISOString()
-              };
-
-              // Create overlay match (now uses WebSocket)
-              await createActiveMatchForOverlay(matchData);
-              matchesCreated++;
-              processedMatches.set(matchKey, Date.now());
-              
-              console.log(`🎉 MATCH CREATED: ${driver.driverName || 'Driver'} ↔ ${passenger.passengerName || 'Passenger'} (Score: ${similarity.toFixed(3)})`);
-            }
-          }
-        }
-      }
-
-      if (matchesCreated > 0) {
-        console.log(`📱 Created ${matchesCreated} overlay matches`);
-      } else {
-        console.log('ℹ️  No matches found - similarity too low or duplicates');
-      }
-      
-    } catch (error) {
-      console.error('❌ Matching error:', error);
-    }
-  }, 30000); // Reduced to 30 seconds for better testing
-};
-
-// ========== CORE SEARCH STORAGE FUNCTION ==========
+// ========== ENHANCED SEARCH STORAGE FUNCTION ==========
 
 const storeSearchInMemory = (searchData) => {
-  const { userId, userType } = searchData;
+  const { userId, userType, rideType = 'immediate' } = searchData;
   
   if (!userId) throw new Error('userId is required');
 
@@ -309,25 +214,79 @@ const storeSearchInMemory = (searchData) => {
     passengerCount: searchData.passengerCount || 1,
     capacity: searchData.capacity || 4,
     vehicleType: searchData.vehicleType || 'car',
-    status: 'searching',
-    lastUpdated: Date.now()
+    rideType: rideType, // ✅ Store ride type
+    scheduledTime: searchData.scheduledTime, // ✅ Store scheduled time
+    searchId: searchData.searchId, // ✅ Store search ID
+    status: rideType === 'scheduled' ? 'scheduled' : 'searching', // ✅ Different statuses
+    lastUpdated: Date.now(),
+    createdAt: searchData.createdAt || new Date().toISOString()
   };
 
-  // Store in memory
-  activeSearches.set(userId, enhancedSearchData);
+  // Store in appropriate memory store
+  if (rideType === 'scheduled') {
+    scheduledSearches.set(userId, enhancedSearchData);
+    console.log(`📅 SCHEDULED search stored: ${driverName || passengerName} (ID: ${userId}) for ${searchData.scheduledTime}`);
+  } else {
+    activeSearches.set(userId, enhancedSearchData);
+    console.log(`🎯 IMMEDIATE search stored: ${driverName || passengerName} (ID: ${userId})`);
+  }
   
-  const displayName = actualUserType === 'driver' ? driverName : passengerName;
-  console.log(`✅ ${actualUserType} search stored: ${displayName} (ID: ${userId})`);
-  console.log(`📊 Total active searches: ${activeSearches.size}`);
+  console.log(`📊 Memory Stats - Immediate: ${activeSearches.size}, Scheduled: ${scheduledSearches.size}`);
   
   return enhancedSearchData;
 };
 
-// ========== MATCH SEARCH ENDPOINT ==========
+// ========== SCHEDULED SEARCH MANAGEMENT ==========
+
+// Helper function for scheduled matching timing
+const calculateNextMatchingTime = (scheduledTime) => {
+  const scheduledDate = new Date(scheduledTime);
+  const now = new Date();
+  
+  // If scheduled time is within 30 minutes, start matching now
+  if ((scheduledDate - now) <= 30 * 60 * 1000) {
+    return 'immediate';
+  }
+  
+  // Otherwise, calculate when to start matching (e.g., 30 minutes before scheduled time)
+  const matchingStartTime = new Date(scheduledDate.getTime() - 30 * 60 * 1000);
+  return matchingStartTime.toISOString();
+};
+
+// Check and activate scheduled searches
+const activateScheduledSearches = () => {
+  const now = new Date();
+  let activatedCount = 0;
+
+  for (const [userId, search] of scheduledSearches.entries()) {
+    if (search.status === 'scheduled' && search.scheduledTime) {
+      const scheduledTime = new Date(search.scheduledTime);
+      const timeUntilRide = scheduledTime - now;
+      
+      // Activate if within 30 minutes of scheduled time
+      if (timeUntilRide <= 30 * 60 * 1000) {
+        // Move from scheduled to active searches
+        search.status = 'searching';
+        search.lastUpdated = Date.now();
+        activeSearches.set(userId, search);
+        scheduledSearches.delete(userId);
+        activatedCount++;
+        
+        console.log(`🔄 Activated scheduled search: ${search.driverName || search.passengerName} for ride at ${scheduledTime.toISOString()}`);
+      }
+    }
+  }
+
+  if (activatedCount > 0) {
+    console.log(`✅ Activated ${activatedCount} scheduled searches`);
+  }
+};
+
+// ========== IMMEDIATE MATCH SEARCH ENDPOINT ==========
 
 app.post("/api/match/search", async (req, res) => {
   try {
-    console.log('🎯 === MATCH SEARCH ENDPOINT CALLED ===');
+    console.log('🎯 === IMMEDIATE MATCH SEARCH ENDPOINT CALLED ===');
     
     const { 
       userId, 
@@ -341,7 +300,10 @@ app.post("/api/match/search", async (req, res) => {
       destinationName,
       routePoints,
       capacity,
-      passengerCount
+      passengerCount,
+      rideType = 'immediate',
+      scheduledTime,
+      searchId
     } = req.body;
     
     // Determine the actual user ID to use
@@ -366,7 +328,10 @@ app.post("/api/match/search", async (req, res) => {
       destinationName: destinationName,
       routePoints: routePoints,
       capacity: capacity,
-      passengerCount: passengerCount
+      passengerCount: passengerCount,
+      rideType: rideType,
+      scheduledTime: scheduledTime,
+      searchId: searchId || `search_${actualUserId}_${Date.now()}`
     };
 
     storeSearchInMemory(searchData);
@@ -374,22 +339,329 @@ app.post("/api/match/search", async (req, res) => {
     // Return success response
     res.json({
       success: true,
-      message: 'Search started successfully',
-      searchId: `search_${actualUserId}_${Date.now()}`,
+      message: 'Immediate search started successfully',
+      searchId: searchData.searchId,
       userId: actualUserId,
+      rideType: rideType,
       matches: [],
       matchCount: 0,
       matchingAlgorithm: 'enhanced_route_similarity_v2'
     });
     
   } catch (error) {
-    console.error('❌ Error in match search:', error);
+    console.error('❌ Error in immediate match search:', error);
     res.status(500).json({ 
       success: false, 
       error: error.message 
     });
   }
 });
+
+// ========== SCHEDULED SEARCH ENDPOINT ==========
+
+app.post("/api/match/scheduled-search", async (req, res) => {
+  try {
+    console.log('📅 === SCHEDULED SEARCH ENDPOINT CALLED ===');
+    
+    const { 
+      userId, 
+      userType, 
+      driverId,
+      driverName,
+      passengerName,
+      pickupLocation,
+      destinationLocation,
+      pickupName,
+      destinationName,
+      routePoints,
+      capacity,
+      passengerCount,
+      scheduledTime, // Required for scheduled searches
+      searchId
+    } = req.body;
+    
+    // Validate scheduled time
+    if (!scheduledTime) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'scheduledTime is required for scheduled searches' 
+      });
+    }
+
+    const actualUserId = userId || driverId;
+    
+    if (!actualUserId) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'userId or driverId is required' 
+      });
+    }
+
+    // Store in memory with scheduled flag
+    const searchData = {
+      userId: actualUserId,
+      userType: userType,
+      driverName: driverName,
+      passengerName: passengerName,
+      pickupLocation: pickupLocation,
+      destinationLocation: destinationLocation,
+      pickupName: pickupName,
+      destinationName: destinationName,
+      routePoints: routePoints,
+      capacity: capacity,
+      passengerCount: passengerCount,
+      rideType: 'scheduled', // ✅ Explicitly set to scheduled
+      scheduledTime: scheduledTime,
+      searchId: searchId || `scheduled_${actualUserId}_${Date.now()}`
+    };
+
+    storeSearchInMemory(searchData);
+
+    const nextMatchingTime = calculateNextMatchingTime(scheduledTime);
+
+    res.json({
+      success: true,
+      message: 'Scheduled search created successfully',
+      searchId: searchData.searchId,
+      userId: actualUserId,
+      rideType: 'scheduled',
+      scheduledTime: scheduledTime,
+      nextMatchingTime: nextMatchingTime,
+      status: 'scheduled',
+      matches: []
+    });
+    
+  } catch (error) {
+    console.error('❌ Error in scheduled search:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message 
+    });
+  }
+});
+
+// ========== STOP SEARCH ENDPOINT (BOTH TYPES) ==========
+
+app.post("/api/match/stop-search", async (req, res) => {
+  try {
+    console.log('🛑 === STOP SEARCH ENDPOINT CALLED ===');
+    
+    const { 
+      userId, 
+      userType, 
+      driverId,
+      rideType = 'immediate'
+    } = req.body;
+    
+    const actualUserId = userId || driverId;
+    
+    if (!actualUserId) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'userId or driverId is required' 
+      });
+    }
+
+    let stoppedFrom = '';
+    
+    // Remove from appropriate memory store
+    if (rideType === 'scheduled') {
+      if (scheduledSearches.has(actualUserId)) {
+        scheduledSearches.delete(actualUserId);
+        stoppedFrom = 'scheduled searches';
+      }
+    } else {
+      if (activeSearches.has(actualUserId)) {
+        activeSearches.delete(actualUserId);
+        stoppedFrom = 'active searches';
+      }
+    }
+
+    console.log(`✅ Stopped ${rideType} search for user ${actualUserId} from ${stoppedFrom}`);
+
+    res.json({
+      success: true,
+      message: `${rideType} search stopped successfully`,
+      userId: actualUserId,
+      rideType: rideType,
+      memoryStats: {
+        activeSearches: activeSearches.size,
+        scheduledSearches: scheduledSearches.size
+      }
+    });
+    
+  } catch (error) {
+    console.error('❌ Error stopping search:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message 
+    });
+  }
+});
+
+// ========== GET SEARCH STATUS ENDPOINT ==========
+
+app.get("/api/match/search-status/:userId", async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { rideType } = req.query;
+    
+    let searchData = null;
+    let searchType = '';
+    
+    if (rideType === 'scheduled') {
+      searchData = scheduledSearches.get(userId);
+      searchType = 'scheduled';
+    } else {
+      searchData = activeSearches.get(userId);
+      searchType = 'immediate';
+    }
+
+    if (!searchData) {
+      return res.json({
+        success: true,
+        isSearching: false,
+        userId: userId,
+        rideType: rideType || 'immediate',
+        message: 'No active search found'
+      });
+    }
+
+    res.json({
+      success: true,
+      isSearching: searchData.status === 'searching',
+      searchData: {
+        userId: searchData.userId,
+        userType: searchData.userType,
+        rideType: searchData.rideType,
+        status: searchData.status,
+        searchId: searchData.searchId,
+        scheduledTime: searchData.scheduledTime,
+        lastUpdated: searchData.lastUpdated,
+        pickupName: searchData.pickupName,
+        destinationName: searchData.destinationName
+      },
+      memoryStats: {
+        activeSearches: activeSearches.size,
+        scheduledSearches: scheduledSearches.size
+      }
+    });
+    
+  } catch (error) {
+    console.error('❌ Error getting search status:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message 
+    });
+  }
+});
+
+// ========== OPTIMIZED MATCHING SERVICE ==========
+
+const startOptimizedMatching = () => {
+  console.log('🔄 Starting Optimized Matching Service...');
+  
+  // Run every 30 seconds for better responsiveness
+  setInterval(async () => {
+    try {
+      // First, activate any scheduled searches that are due
+      activateScheduledSearches();
+
+      // Get drivers and passengers from memory
+      const drivers = Array.from(activeSearches.values())
+        .filter(search => search.userType === 'driver' && search.status === 'searching');
+      
+      const passengers = Array.from(activeSearches.values())
+        .filter(search => search.userType === 'passenger' && search.status === 'searching');
+
+      console.log(`📊 Matching: ${drivers.length} drivers vs ${passengers.length} passengers`);
+      
+      if (drivers.length === 0 || passengers.length === 0) {
+        console.log(`💤 No matches possible - Drivers: ${drivers.length}, Passengers: ${passengers.length}`);
+        return;
+      }
+
+      // Log actual search details
+      console.log('🚗 Active Drivers:', drivers.map(d => `${d.driverName || 'Unknown'} (${d.userId}) - ${d.rideType}`));
+      console.log('👤 Active Passengers:', passengers.map(p => `${p.passengerName || 'Unknown'} (${p.userId}) - ${p.rideType}`));
+      
+      let matchesCreated = 0;
+      
+      // Optimized matching
+      for (const driver of drivers) {
+        for (const passenger of passengers) {
+          // Quick validation
+          if (!driver.routePoints || !passenger.routePoints || 
+              driver.routePoints.length === 0 || passenger.routePoints.length === 0) {
+            continue;
+          }
+
+          // Check capacity
+          const passengerCount = passenger.passengerCount || 1;
+          const hasSeats = routeMatching.hasCapacity(driver, passengerCount);
+          if (!hasSeats) continue;
+
+          // Calculate similarity
+          const similarity = routeMatching.calculateRouteSimilarity(
+            passenger.routePoints,
+            driver.routePoints,
+            { 
+              similarityThreshold: 0.001, 
+              maxDistanceThreshold: 50.0
+            }
+          );
+
+          console.log(`🔍 ${driver.driverName || 'Driver'} ↔ ${passenger.passengerName || 'Passenger'}: Score=${similarity.toFixed(3)}`);
+
+          // Process matches with threshold
+          if (similarity > 0.1) {
+            const matchKey = generateMatchKey(driver.userId, passenger.userId);
+            
+            if (!processedMatches.has(matchKey)) {
+              const matchData = {
+                matchId: `match_${driver.userId}_${passenger.userId}_${Date.now()}`,
+                driverId: driver.userId,
+                driverName: driver.driverName || 'Unknown Driver',
+                passengerId: passenger.userId,
+                passengerName: passenger.passengerName || 'Unknown Passenger',
+                similarityScore: similarity,
+                pickupName: passenger.pickupName || driver.pickupName || 'Unknown Location',
+                destinationName: passenger.destinationName || driver.destinationName || 'Unknown Destination',
+                pickupLocation: passenger.pickupLocation || driver.pickupLocation,
+                destinationLocation: passenger.destinationLocation || driver.destinationLocation,
+                passengerCount: passenger.passengerCount || 1,
+                capacity: driver.capacity || 4,
+                vehicleType: driver.vehicleType || 'car',
+                rideType: driver.rideType || passenger.rideType || 'immediate',
+                scheduledTime: driver.scheduledTime || passenger.scheduledTime,
+                timestamp: new Date().toISOString()
+              };
+
+              // Create overlay match (now uses WebSocket)
+              await createActiveMatchForOverlay(matchData);
+              matchesCreated++;
+              processedMatches.set(matchKey, Date.now());
+              
+              console.log(`🎉 MATCH CREATED: ${driver.driverName || 'Driver'} ↔ ${passenger.passengerName || 'Passenger'} (Score: ${similarity.toFixed(3)})`);
+            }
+          }
+        }
+      }
+
+      if (matchesCreated > 0) {
+        console.log(`📱 Created ${matchesCreated} overlay matches`);
+      } else {
+        console.log('ℹ️  No matches found - similarity too low or duplicates');
+      }
+      
+    } catch (error) {
+      console.error('❌ Matching error:', error);
+    }
+  }, 30000); // Reduced to 30 seconds for better testing
+
+  // Schedule check for scheduled searches every minute
+  setInterval(activateScheduledSearches, SCHEDULED_SEARCH_CHECK_INTERVAL);
+};
 
 // ========== WEB SOCKET ENDPOINTS ==========
 
@@ -408,6 +680,7 @@ app.get("/api/websocket/status", (req, res) => {
     connectedUsers: websocketServer.getConnectedUsers(),
     serverTime: new Date().toISOString(),
     totalActiveSearches: activeSearches.size,
+    totalScheduledSearches: scheduledSearches.size,
     totalProcessedMatches: processedMatches.size
   });
 });
@@ -443,12 +716,14 @@ app.post("/api/websocket/test/:userId", (req, res) => {
 app.get("/", (req, res) => {
   const drivers = Array.from(activeSearches.values()).filter(s => s.userType === 'driver');
   const passengers = Array.from(activeSearches.values()).filter(s => s.userType === 'passenger');
+  const scheduled = Array.from(scheduledSearches.values());
   
   res.json({ 
     status: "🚀 Server running (WebSocket Mode)",
     timestamp: new Date().toISOString(),
     memoryStats: {
       activeSearches: activeSearches.size,
+      scheduledSearches: scheduledSearches.size,
       drivers: drivers.length,
       passengers: passengers.length,
       processedMatches: processedMatches.size,
@@ -458,13 +733,22 @@ app.get("/", (req, res) => {
       id: d.userId,
       name: d.driverName,
       type: d.userType,
+      rideType: d.rideType,
       routePoints: d.routePoints?.length || 0
     })),
     passengers: passengers.map(p => ({
       id: p.userId, 
       name: p.passengerName,
       type: p.userType,
+      rideType: p.rideType,
       routePoints: p.routePoints?.length || 0
+    })),
+    scheduledSearches: scheduled.map(s => ({
+      id: s.userId,
+      name: s.driverName || s.passengerName,
+      type: s.userType,
+      scheduledTime: s.scheduledTime,
+      status: s.status
     }))
   });
 });
@@ -473,33 +757,48 @@ app.get("/", (req, res) => {
 app.get("/api/debug/memory", (req, res) => {
   const drivers = Array.from(activeSearches.values()).filter(s => s.userType === 'driver');
   const passengers = Array.from(activeSearches.values()).filter(s => s.userType === 'passenger');
+  const scheduled = Array.from(scheduledSearches.values());
   
   res.json({
     success: true,
     memoryStats: {
-      totalSearches: activeSearches.size,
+      totalActiveSearches: activeSearches.size,
+      totalScheduledSearches: scheduledSearches.size,
       drivers: drivers.length,
       passengers: passengers.length,
       processedMatches: processedMatches.size,
       websocketConnections: websocketServer ? websocketServer.getConnectedCount() : 0
     },
-    drivers: drivers.map(d => ({
+    activeDrivers: drivers.map(d => ({
       userId: d.userId,
       driverName: d.driverName,
       userType: d.userType,
+      rideType: d.rideType,
       lastUpdated: new Date(d.lastUpdated).toISOString(),
       routePoints: d.routePoints ? `${d.routePoints.length} points` : 'none',
       pickup: d.pickupName,
       destination: d.destinationName
     })),
-    passengers: passengers.map(p => ({
+    activePassengers: passengers.map(p => ({
       userId: p.userId,
       passengerName: p.passengerName, 
       userType: p.userType,
+      rideType: p.rideType,
       lastUpdated: new Date(p.lastUpdated).toISOString(),
       routePoints: p.routePoints ? `${p.routePoints.length} points` : 'none',
       pickup: p.pickupName,
       destination: p.destinationName
+    })),
+    scheduledSearches: scheduled.map(s => ({
+      userId: s.userId,
+      name: s.driverName || s.passengerName,
+      userType: s.userType,
+      rideType: s.rideType,
+      scheduledTime: s.scheduledTime,
+      status: s.status,
+      lastUpdated: new Date(s.lastUpdated).toISOString(),
+      pickup: s.pickupName,
+      destination: s.destinationName
     }))
   });
 });
@@ -574,13 +873,15 @@ if (require.main === module) {
 💾 Memory Cache: ENABLED
 🔌 WebSocket: ENABLED
 🔄 Matching: Every 30 seconds
+📅 Scheduled: Supported
 
 📊 Current Stats:
 - Active Searches: ${activeSearches.size} (in memory)
+- Scheduled Searches: ${scheduledSearches.size} (in memory)
 - Processed Matches: ${processedMatches.size} (in memory)
 - WebSocket Connections: ${websocketServer ? websocketServer.getConnectedCount() : 0}
 
-Ready for matching! 🎉
+Ready for both immediate & scheduled matching! 🎉
     `);
   });
 
