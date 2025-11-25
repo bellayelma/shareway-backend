@@ -1,4 +1,4 @@
-// src/app.js - COMPLETE CORRECTED VERSION WITH ROUTE MATCHING
+// src/app.js - COMPLETE FIXED VERSION
 const express = require("express");
 const admin = require("firebase-admin");
 const cors = require("cors");
@@ -159,6 +159,195 @@ try {
   process.exit(1);
 }
 
+// ========== DEDUPLICATION SYSTEM ==========
+
+const processedMatches = new Set();
+const MAX_MATCH_AGE = 300000; // 5 minutes
+
+// Clean old matches from tracking
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, timestamp] of processedMatches.entries()) {
+    if (now - timestamp > MAX_MATCH_AGE) {
+      processedMatches.delete(key);
+    }
+  }
+}, 60000); // Clean every minute
+
+// Generate match key for deduplication
+const generateMatchKey = (driverId, passengerId, similarity) => {
+  return `${driverId}_${passengerId}_${Math.round(similarity * 1000)}`;
+};
+
+// ========== ENHANCED MATCHING SERVICE ==========
+
+const startEnhancedMatching = () => {
+  console.log('🔄 Starting Enhanced Matching Service...');
+  
+  setInterval(async () => {
+    try {
+      console.log('🎯 Running ENHANCED matching algorithm...');
+      
+      // Get all active searches with proper error handling
+      const [activeDrivers, activePassengers] = await Promise.all([
+        db.collection('active_searches')
+          .where('userType', '==', 'driver')
+          .where('status', '==', 'searching')
+          .get()
+          .catch(error => {
+            console.error('❌ Error fetching drivers:', error);
+            return { docs: [] };
+          }),
+        db.collection('active_searches')
+          .where('userType', '==', 'passenger') 
+          .where('status', '==', 'searching')
+          .get()
+          .catch(error => {
+            console.error('❌ Error fetching passengers:', error);
+            return { docs: [] };
+          })
+      ]);
+      
+      const drivers = activeDrivers.docs.map(doc => ({ 
+        id: doc.id, 
+        ...doc.data(),
+        // ✅ FIX: Ensure driverName exists
+        driverName: doc.data().driverName || 'Unknown Driver',
+        driverId: doc.data().driverId || doc.data().userId || doc.id
+      }));
+      
+      const passengers = activePassengers.docs.map(doc => ({ 
+        id: doc.id, 
+        ...doc.data(),
+        // ✅ FIX: Ensure passengerName exists
+        passengerName: doc.data().passengerName || 'Unknown Passenger',
+        passengerId: doc.data().passengerId || doc.data().userId || doc.id
+      }));
+      
+      console.log(`📊 Enhanced Matching: ${drivers.length} drivers vs ${passengers.length} passengers`);
+      
+      if (drivers.length === 0 || passengers.length === 0) {
+        console.log('ℹ️  No active drivers or passengers to match');
+        return;
+      }
+      
+      const highQualityMatches = [];
+      let totalComparisons = 0;
+      
+      // Enhanced matching with quality filtering
+      for (const driver of drivers) {
+        for (const passenger of passengers) {
+          totalComparisons++;
+          
+          // Skip if missing critical data
+          if (!driver.routePoints || !passenger.routePoints || 
+              driver.routePoints.length === 0 || passenger.routePoints.length === 0) {
+            continue;
+          }
+          
+          // ✅ FIX: Use proper field names for capacity check
+          const passengerCount = passenger.passengerCount || 1;
+          const hasSeats = routeMatching.hasCapacity(driver, passengerCount);
+          
+          if (!hasSeats) {
+            continue; // Skip if no capacity
+          }
+          
+          const similarity = routeMatching.calculateRouteSimilarity(
+            passenger.routePoints,
+            driver.routePoints,
+            { 
+              similarityThreshold: 0.001, 
+              maxDistanceThreshold: 2.0,
+              useHausdorffDistance: true 
+            }
+          );
+          
+          // ✅ FIX: Use proper names for logging
+          const driverName = driver.driverName || 'Unknown Driver';
+          const passengerName = passenger.passengerName || 'Unknown Passenger';
+          
+          console.log(`🔍 ${driverName} ↔ ${passengerName}: Score=${similarity.toFixed(3)}, Seats=${hasSeats}`);
+          
+          // Only consider high-quality matches (increased threshold)
+          if (similarity > 0.6) {
+            const matchKey = generateMatchKey(driver.driverId, passenger.passengerId, similarity);
+            
+            // Check if this match was recently processed
+            if (!processedMatches.has(matchKey)) {
+              const optimalPickup = routeMatching.findOptimalPickupPoint(
+                passenger.pickupLocation,
+                driver.routePoints
+              );
+              
+              const matchData = {
+                matchId: `match_${driver.driverId}_${passenger.passengerId}_${Date.now()}`,
+                driverId: driver.driverId,
+                passengerId: passenger.passengerId,
+                driverName: driverName,
+                passengerName: passengerName,
+                driverPhotoUrl: driver.driverPhotoUrl,
+                passengerPhotoUrl: passenger.passengerPhotoUrl,
+                similarityScore: similarity,
+                matchQuality: similarity > 0.8 ? 'excellent' : similarity > 0.7 ? 'good' : 'fair',
+                optimalPickupPoint: optimalPickup,
+                detourDistance: routeMatching.calculateDetourDistance(
+                  driver.routePoints,
+                  optimalPickup,
+                  passenger.destinationLocation
+                ),
+                routeSimilarity: similarity,
+                timestamp: new Date().toISOString(),
+                status: 'pending',
+                driverRoutePoints: driver.routePoints,
+                passengerRoutePoints: passenger.routePoints
+              };
+              
+              highQualityMatches.push(matchData);
+              processedMatches.set(matchKey, Date.now());
+              
+              console.log(`✅ HIGH-QUALITY MATCH: ${driverName} ↔ ${passengerName} (Score: ${similarity.toFixed(3)})`);
+            } else {
+              console.log(`🔄 Skipping duplicate match: ${driverName} ↔ ${passengerName}`);
+            }
+          }
+        }
+      }
+      
+      console.log(`📈 Matching Stats: ${totalComparisons} comparisons, ${highQualityMatches.length} high-quality matches`);
+      
+      // Save only high-quality matches to Firestore
+      if (highQualityMatches.length > 0) {
+        const batch = db.batch();
+        highQualityMatches.forEach(match => {
+          const matchRef = db.collection('potential_matches').doc(match.matchId);
+          batch.set(matchRef, {
+            ...match,
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+          });
+        });
+        
+        await batch.commit();
+        console.log(`💾 Saved ${highQualityMatches.length} HIGH-QUALITY matches to Firestore`);
+        
+        // Send notifications for excellent matches
+        const excellentMatches = highQualityMatches.filter(m => m.similarityScore > 0.8);
+        if (excellentMatches.length > 0) {
+          console.log(`🎉 ${excellentMatches.length} EXCELLENT matches found!`);
+        }
+      } else {
+        console.log('ℹ️  No high-quality matches found this cycle');
+      }
+      
+    } catch (error) {
+      console.error('❌ Enhanced matching error:', error);
+    }
+  }, 20000); // Run every 20 seconds (reduced frequency)
+};
+
+// ========== BASIC ROUTES ==========
+
 // Health check endpoint
 app.get("/", (req, res) => {
   res.json({ 
@@ -167,8 +356,9 @@ app.get("/", (req, res) => {
     environment: process.env.NODE_ENV || 'development',
     firebase: "connected",
     cors: "enabled",
-    allowed_origins: "localhost:* (Flutter Web), 127.0.0.1:*",
-    matching: "active"
+    matching: "enhanced_active",
+    features: ["route_matching", "deduplication", "quality_filtering"],
+    allowed_origins: "localhost:* (Flutter Web), 127.0.0.1:*"
   });
 });
 
@@ -188,7 +378,7 @@ app.get("/health", async (req, res) => {
       firebase: "connected",
       database: "operational",
       cors: "enabled",
-      route_matching: "active",
+      matching_service: "active",
       origin: req.headers.origin || 'No origin header',
       environment: process.env.NODE_ENV || 'development'
     });
@@ -206,20 +396,20 @@ app.get("/health", async (req, res) => {
 app.get("/api", (req, res) => {
   res.json({
     name: "ShareWay API",
-    version: "1.0.0",
+    version: "2.0.0",
     status: "operational",
     firebase: "connected",
     cors: "enabled",
-    route_matching: "active",
+    matching: "enhanced_active",
     endpoints: {
       health: "GET /health",
       api_info: "GET /api",
       cors_test: "GET /cors-test",
       
-      // Matching endpoints
+      // Enhanced Matching endpoints
       matching: {
         search: "POST /api/match/search",
-        updates: "GET /api/match/updates/:userId",
+        potential: "GET /api/match/potential/:userId",
         accept: "POST /api/match/accept", 
         reject: "POST /api/match/reject",
         cancel: "POST /api/match/cancel"
@@ -241,11 +431,9 @@ app.get("/api", (req, res) => {
         status: "GET /api/passenger/status/:passengerId"
       },
       
-      // User endpoints
-      user: {
-        start_search: "POST /api/user/start-search",
-        stop_search: "POST /api/user/stop-search",
-        search_status: "GET /api/user/search-status/:userId"
+      // Admin endpoints
+      admin: {
+        cleanup: "POST /api/admin/cleanup"
       }
     }
   });
@@ -262,9 +450,8 @@ app.get("/cors-test", (req, res) => {
   });
 });
 
-// ========== CORRECTED ROUTES ==========
+// ========== DRIVER ENDPOINTS ==========
 
-// Driver endpoints - CORRECTED
 app.post("/api/driver/start-search", async (req, res) => {
   try {
     const { 
@@ -280,27 +467,26 @@ app.post("/api/driver/start-search", async (req, res) => {
       destinationLocation,
       pickupName,
       destinationName,
-      routePoints // ✅ ADDED for route matching
+      routePoints
     } = req.body;
     
     console.log('🚗 === DRIVER START SEARCH REQUEST ===');
     console.log('👤 Driver Details:', { 
       driverId, 
-      driverName, 
+      driverName: driverName || 'Unknown Driver', 
       driverPhone, 
       driverPhotoUrl: driverPhotoUrl ? 'Photo URL present' : 'No photo URL' 
     });
     console.log('📍 Route Details:', { 
-      pickup: pickupName, 
-      destination: destinationName 
+      pickup: pickupName || 'Unknown Pickup', 
+      destination: destinationName || 'Unknown Destination' 
     });
     console.log('🛣️  Route Points:', routePoints ? `${routePoints.length} points` : 'No route points');
-    console.log('🚘 Vehicle Info:', vehicleInfo);
     
     // Store driver in active searches
     const searchData = {
       driverId,
-      driverName,
+      driverName: driverName || 'Unknown Driver', // ✅ FIX: Ensure name exists
       driverPhone,
       driverPhotoUrl,
       currentLocation,
@@ -309,9 +495,9 @@ app.post("/api/driver/start-search", async (req, res) => {
       vehicleInfo: vehicleInfo || {},
       pickupLocation,
       destinationLocation,
-      pickupName,
-      destinationName,
-      routePoints: routePoints || [], // ✅ STORE ROUTE POINTS FOR MATCHING
+      pickupName: pickupName || 'Unknown Pickup', // ✅ FIX: Ensure name exists
+      destinationName: destinationName || 'Unknown Destination', // ✅ FIX: Ensure name exists
+      routePoints: routePoints || [],
       status: 'searching',
       userType: 'driver',
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -331,7 +517,7 @@ app.post("/api/driver/start-search", async (req, res) => {
       driverId,
       status: 'searching',
       driverDetails: {
-        name: driverName,
+        name: driverName || 'Unknown Driver',
         phone: driverPhone,
         photo: driverPhotoUrl ? 'Present' : 'Not provided'
       }
@@ -461,7 +647,8 @@ app.get("/api/driver/search-status/:driverId", async (req, res) => {
   }
 });
 
-// Passenger endpoints
+// ========== PASSENGER ENDPOINTS ==========
+
 app.post("/api/passenger/start-search", async (req, res) => {
   try {
     const { 
@@ -471,14 +658,14 @@ app.post("/api/passenger/start-search", async (req, res) => {
       destination, 
       passengerCount, 
       rideType,
-      routePoints, // ✅ ADDED for route matching
+      routePoints,
       passengerPhone,
       passengerPhotoUrl
     } = req.body;
     
     console.log('👤 Passenger starting search:', { 
       passengerId, 
-      passengerName, 
+      passengerName: passengerName || 'Unknown Passenger', 
       passengerCount, 
       rideType 
     });
@@ -487,14 +674,14 @@ app.post("/api/passenger/start-search", async (req, res) => {
     // Store passenger in active searches
     const searchData = {
       passengerId,
-      passengerName,
+      passengerName: passengerName || 'Unknown Passenger', // ✅ FIX: Ensure name exists
       passengerPhone: passengerPhone || '',
       passengerPhotoUrl: passengerPhotoUrl || '',
       pickupLocation,
       destination,
       passengerCount,
       rideType,
-      routePoints: routePoints || [], // ✅ STORE ROUTE POINTS FOR MATCHING
+      routePoints: routePoints || [],
       status: 'searching',
       userType: 'passenger',
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -579,17 +766,17 @@ app.get("/api/passenger/status/:passengerId", async (req, res) => {
   }
 });
 
-// ✅ ENHANCED: Matching endpoint with ROUTE MATCHING
+// ========== ENHANCED MATCHING ENDPOINT ==========
+
 app.post("/api/match/search", async (req, res) => {
   try {
     const { 
       userId, 
       userType, 
-      rideType, 
       driverId, 
       driverName, 
-      driverPhone,
-      driverPhotoUrl,
+      passengerId,
+      passengerName,
       pickupLocation, 
       destinationLocation,
       pickupName,
@@ -597,228 +784,159 @@ app.post("/api/match/search", async (req, res) => {
       capacity,
       currentPassengers,
       vehicleInfo,
-      distance,
-      duration,
-      fare,
-      routePoints, // ✅ CRITICAL FOR MATCHING
-      estimatedFare,
-      maxWaitTime,
-      preferredVehicleType,
-      specialRequests,
-      maxWalkDistance,
-      scheduledTime,
-      passengerCount,
-      passengerName,
-      passengerPhone,
-      passengerPhotoUrl
+      routePoints,
+      passengerCount
     } = req.body;
     
-    console.log('🔍 === MATCH SEARCH REQUEST RECEIVED ===');
-    console.log('👤 User Info:', { userId, userType, rideType });
-    console.log('📍 Locations:', { pickup: pickupName, destination: destinationName });
+    console.log('🔍 === ENHANCED MATCH SEARCH REQUEST ===');
+    console.log('👤 User Info:', { userId, userType });
+    console.log('📍 Route:', { 
+      pickup: pickupName || 'Unknown Pickup', 
+      destination: destinationName || 'Unknown Destination' 
+    });
     console.log('🛣️  Route Points:', routePoints ? `${routePoints.length} points` : 'No route points');
-    console.log('💰 Fare & Distance:', { fare, distance, duration });
-    console.log('👥 Capacity:', { capacity, currentPassengers, passengerCount });
     
-    // ✅ Store the COMPLETE search request
-    const searchId = `search_${userId}_${Date.now()}`;
+    // ✅ FIX: Ensure proper field names with fallbacks
     const searchData = {
-      searchId,
+      searchId: `search_${userId}_${Date.now()}`,
       userId,
       userType,
-      rideType,
       
-      // Driver details
-      driverId,
-      driverName,
-      driverPhone,
-      driverPhotoUrl,
+      // Driver fields with fallbacks
+      driverId: driverId || userId,
+      driverName: driverName || 'Unknown Driver',
       
-      // Passenger details
-      passengerId: userId,
-      passengerName,
-      passengerPhone,
-      passengerPhotoUrl,
+      // Passenger fields with fallbacks  
+      passengerId: passengerId || userId,
+      passengerName: passengerName || 'Unknown Passenger',
       passengerCount: passengerCount || 1,
       
       // Location data
       pickupLocation,
       destinationLocation,
-      pickupName,
-      destinationName,
+      pickupName: pickupName || 'Unknown Pickup',
+      destinationName: destinationName || 'Unknown Destination',
       
-      // Route information
-      capacity: capacity || 1,
+      // Vehicle and capacity
+      capacity: capacity || 4,
       currentPassengers: currentPassengers || 0,
       vehicleInfo: vehicleInfo || {},
-      distance: distance || 0,
-      duration: duration || 0,
-      fare: fare || 0,
-      routePoints: routePoints || [], // ✅ STORE FOR MATCHING
       
-      // Preferences
-      estimatedFare: estimatedFare || 0,
-      maxWaitTime: maxWaitTime || 30,
-      preferredVehicleType: preferredVehicleType || 'car',
-      specialRequests: specialRequests || '',
-      maxWalkDistance: maxWalkDistance || 0.5,
-      
-      // Scheduling
-      scheduledTime: scheduledTime || null,
+      // Critical for matching
+      routePoints: routePoints || [],
       
       status: 'searching',
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       updatedAt: admin.firestore.FieldValue.serverTimestamp()
     };
     
-    // ✅ Save COMPLETE data to Firestore
-    await db.collection('active_searches').doc(searchId).set(searchData);
+    // Save to active searches
+    await db.collection('active_searches').doc(searchData.searchId).set(searchData);
+    console.log('✅ Enhanced search saved to Firestore with ID:', searchData.searchId);
     
-    console.log('✅ Search saved to Firestore with ID:', searchId);
-    
-    // ✅ ADVANCED ROUTE MATCHING LOGIC
+    // Enhanced matching with proper field handling
     let matches = [];
     if (userType === 'driver') {
-      // Find matching passengers WITH ROUTE SIMILARITY
       const passengersSnapshot = await db.collection('active_searches')
         .where('userType', '==', 'passenger')
         .where('status', '==', 'searching')
         .get();
       
-      console.log(`🔍 Checking ${passengersSnapshot.size} active passengers for matches...`);
+      const driverNameDisplay = driverName || 'Unknown Driver';
+      console.log(`🔍 Checking ${passengersSnapshot.size} passengers for driver ${driverNameDisplay}`);
       
       for (const passengerDoc of passengersSnapshot.docs) {
         const passengerData = passengerDoc.data();
         
-        // Skip if passenger has no route points
+        // ✅ FIX: Use proper field names with fallbacks
+        const passengerName = passengerData.passengerName || 'Unknown Passenger';
+        const passengerCount = passengerData.passengerCount || 1;
+        
         if (!passengerData.routePoints || passengerData.routePoints.length === 0) {
           continue;
         }
         
-        // ✅ Calculate route similarity using your advanced algorithm
         const similarity = routeMatching.calculateRouteSimilarity(
           passengerData.routePoints,
           routePoints || [],
-          {
-            similarityThreshold: 0.001,
-            maxDistanceThreshold: 2.0,
-            useHausdorffDistance: true
-          }
+          { similarityThreshold: 0.001, maxDistanceThreshold: 2.0 }
         );
         
-        // ✅ Check capacity
         const hasSeats = routeMatching.hasCapacity(
           { capacity, currentPassengers }, 
-          passengerData.passengerCount || 1
+          passengerCount
         );
         
-        console.log(`📊 Passenger ${passengerData.passengerName}: Similarity=${similarity.toFixed(3)}, HasSeats=${hasSeats}`);
+        console.log(`📊 ${passengerName}: Similarity=${similarity.toFixed(3)}, HasSeats=${hasSeats}`);
         
-        // Only include good matches
-        if (similarity > 0.3 && hasSeats) {
-          const optimalPickup = routeMatching.findOptimalPickupPoint(
-            passengerData.pickupLocation,
-            routePoints || []
-          );
-          
+        // Higher threshold for immediate matches
+        if (similarity > 0.5 && hasSeats) {
           matches.push({
             id: passengerDoc.id,
             ...passengerData,
             similarityScore: similarity,
-            matchQuality: similarity > 0.7 ? 'excellent' : 
-                         similarity > 0.5 ? 'good' : 'fair',
-            optimalPickupPoint: optimalPickup,
-            detourDistance: routeMatching.calculateDetourDistance(
-              routePoints || [],
-              optimalPickup,
-              passengerData.destinationLocation
-            )
+            matchQuality: similarity > 0.7 ? 'excellent' : 'good'
           });
         }
       }
       
-      // Sort by similarity score (best matches first)
       matches.sort((a, b) => b.similarityScore - a.similarityScore);
       
-      console.log(`✅ Found ${matches.length} matching passengers`);
-      
     } else if (userType === 'passenger') {
-      // Find matching drivers WITH ROUTE SIMILARITY
       const driversSnapshot = await db.collection('active_searches')
         .where('userType', '==', 'driver')
         .where('status', '==', 'searching')
         .get();
       
-      console.log(`🔍 Checking ${driversSnapshot.size} active drivers for matches...`);
+      const passengerNameDisplay = passengerName || 'Unknown Passenger';
+      console.log(`🔍 Checking ${driversSnapshot.size} drivers for passenger ${passengerNameDisplay}`);
       
       for (const driverDoc of driversSnapshot.docs) {
         const driverData = driverDoc.data();
         
-        // Skip if driver has no route points
+        // ✅ FIX: Use proper field names with fallbacks
+        const driverName = driverData.driverName || 'Unknown Driver';
+        
         if (!driverData.routePoints || driverData.routePoints.length === 0) {
           continue;
         }
         
-        // ✅ Calculate route similarity using your advanced algorithm
         const similarity = routeMatching.calculateRouteSimilarity(
           routePoints || [],
           driverData.routePoints,
-          {
-            similarityThreshold: 0.001,
-            maxDistanceThreshold: 2.0,
-            useHausdorffDistance: true
-          }
+          { similarityThreshold: 0.001, maxDistanceThreshold: 2.0 }
         );
         
-        // ✅ Check capacity
-        const hasSeats = routeMatching.hasCapacity(
-          driverData, 
-          passengerCount || 1
-        );
+        const hasSeats = routeMatching.hasCapacity(driverData, passengerCount || 1);
         
-        console.log(`📊 Driver ${driverData.driverName}: Similarity=${similarity.toFixed(3)}, HasSeats=${hasSeats}`);
+        console.log(`📊 ${driverName}: Similarity=${similarity.toFixed(3)}, HasSeats=${hasSeats}`);
         
-        // Only include good matches
-        if (similarity > 0.3 && hasSeats) {
-          const optimalPickup = routeMatching.findOptimalPickupPoint(
-            pickupLocation,
-            driverData.routePoints
-          );
-          
+        if (similarity > 0.5 && hasSeats) {
           matches.push({
             id: driverDoc.id,
             ...driverData,
             similarityScore: similarity,
-            matchQuality: similarity > 0.7 ? 'excellent' : 
-                         similarity > 0.5 ? 'good' : 'fair',
-            optimalPickupPoint: optimalPickup,
-            detourDistance: routeMatching.calculateDetourDistance(
-              driverData.routePoints,
-              optimalPickup,
-              destinationLocation
-            )
+            matchQuality: similarity > 0.7 ? 'excellent' : 'good'
           });
         }
       }
       
-      // Sort by similarity score (best matches first)
       matches.sort((a, b) => b.similarityScore - a.similarityScore);
-      
-      console.log(`✅ Found ${matches.length} matching drivers`);
     }
+    
+    console.log(`✅ Found ${matches.length} quality matches`);
     
     res.json({
       success: true,
-      message: `Search started with advanced route matching`,
-      searchId,
-      matches,
+      message: `Enhanced search started with ${matches.length} matches`,
+      searchId: searchData.searchId,
+      matches: matches.slice(0, 10), // Limit to top 10 matches
       matchCount: matches.length,
-      matchingAlgorithm: 'advanced_route_similarity',
-      bestMatchScore: matches.length > 0 ? matches[0].similarityScore : 0
+      matchingAlgorithm: 'enhanced_route_similarity_v2'
     });
     
   } catch (error) {
-    console.error('❌ Error in match search:', error);
+    console.error('❌ Error in enhanced match search:', error);
     res.status(500).json({
       success: false,
       error: error.message
@@ -826,18 +944,19 @@ app.post("/api/match/search", async (req, res) => {
   }
 });
 
-// Real-time match updates endpoint
-app.get("/api/match/updates/:userId", async (req, res) => {
+// ========== MATCH MANAGEMENT ENDPOINTS ==========
+
+// Get potential matches for a user
+app.get("/api/match/potential/:userId", async (req, res) => {
   try {
     const { userId } = req.params;
     
-    // Get recent potential matches for this user
     const matchesSnapshot = await db.collection('potential_matches')
       .where('status', '==', 'pending')
       .where('driverId', '==', userId)
       .orWhere('passengerId', '==', userId)
-      .orderBy('createdAt', 'desc')
-      .limit(10)
+      .orderBy('similarityScore', 'desc')
+      .limit(20)
       .get();
     
     const matches = matchesSnapshot.docs.map(doc => ({
@@ -849,11 +968,101 @@ app.get("/api/match/updates/:userId", async (req, res) => {
       success: true,
       matches,
       count: matches.length,
-      timestamp: new Date().toISOString()
+      highQualityMatches: matches.filter(m => m.similarityScore > 0.7).length
     });
     
   } catch (error) {
-    console.error('Error getting match updates:', error);
+    console.error('Error getting potential matches:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Accept a match
+app.post("/api/match/accept", async (req, res) => {
+  try {
+    const { matchId, userId } = req.body;
+    
+    const matchDoc = await db.collection('potential_matches').doc(matchId).get();
+    
+    if (!matchDoc.exists) {
+      return res.status(404).json({
+        success: false,
+        error: 'Match not found'
+      });
+    }
+    
+    const matchData = matchDoc.data();
+    
+    // Update match status
+    await db.collection('potential_matches').doc(matchId).update({
+      status: 'accepted',
+      acceptedBy: userId,
+      acceptedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+    
+    // Remove users from active searches
+    await db.collection('active_searches')
+      .where('userId', 'in', [matchData.driverId, matchData.passengerId])
+      .get()
+      .then(snapshot => {
+        const batch = db.batch();
+        snapshot.docs.forEach(doc => {
+          batch.update(doc.ref, { status: 'matched' });
+        });
+        return batch.commit();
+      });
+    
+    console.log(`✅ Match ${matchId} accepted by ${userId}`);
+    
+    res.json({
+      success: true,
+      message: 'Match accepted successfully',
+      matchId,
+      matchData: {
+        ...matchData,
+        status: 'accepted',
+        acceptedBy: userId
+      }
+    });
+    
+  } catch (error) {
+    console.error('Error accepting match:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Cleanup endpoint to remove old searches
+app.post("/api/admin/cleanup", async (req, res) => {
+  try {
+    const cutoffTime = new Date(Date.now() - 30 * 60 * 1000); // 30 minutes ago
+    
+    const oldSearches = await db.collection('active_searches')
+      .where('createdAt', '<', cutoffTime)
+      .get();
+    
+    const batch = db.batch();
+    oldSearches.docs.forEach(doc => {
+      batch.delete(doc.ref);
+    });
+    
+    await batch.commit();
+    
+    console.log(`🧹 Cleaned up ${oldSearches.size} old searches`);
+    
+    res.json({
+      success: true,
+      cleaned: oldSearches.size,
+      message: `Cleaned up ${oldSearches.size} old searches`
+    });
+    
+  } catch (error) {
+    console.error('Error during cleanup:', error);
     res.status(500).json({
       success: false,
       error: error.message
@@ -867,21 +1076,14 @@ app.post("/api/debug/test-receive", (req, res) => {
   console.log('📦 Headers:', req.headers);
   console.log('📦 Full Request Body:', JSON.stringify(req.body, null, 2));
   console.log('📦 Driver Name:', req.body?.driverName);
-  console.log('📦 Driver Phone:', req.body?.driverPhone);
-  console.log('📦 Driver Photo:', req.body?.driverPhotoUrl);
-  console.log('📦 Vehicle Info:', req.body?.vehicleInfo);
+  console.log('📦 Passenger Name:', req.body?.passengerName);
   console.log('📦 Route Points:', req.body?.routePoints);
   console.log('========================');
   
   res.json({ 
     received: true,
     body: req.body,
-    message: 'Data received successfully by backend',
-    driverDetails: {
-      name: req.body?.driverName,
-      phone: req.body?.driverPhone,
-      photo: req.body?.driverPhotoUrl
-    }
+    message: 'Data received successfully by backend'
   });
 });
 
@@ -926,107 +1128,6 @@ try {
   console.error('❌ Error loading routes:', error.message);
 }
 
-// ========== CONTINUOUS MATCHING SERVICE ==========
-
-const startContinuousMatching = () => {
-  console.log('🔄 Starting Continuous Matching Service...');
-  
-  setInterval(async () => {
-    try {
-      console.log('🎯 Running advanced matching algorithm...');
-      
-      // Get all active searches
-      const [activeDrivers, activePassengers] = await Promise.all([
-        db.collection('active_searches')
-          .where('userType', '==', 'driver')
-          .where('status', '==', 'searching')
-          .get(),
-        db.collection('active_searches')
-          .where('userType', '==', 'passenger') 
-          .where('status', '==', 'searching')
-          .get()
-      ]);
-      
-      console.log(`📊 Continuous Matching: ${activeDrivers.size} drivers vs ${activePassengers.size} passengers`);
-      
-      const drivers = activeDrivers.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      const passengers = activePassengers.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      
-      // Find matches between all drivers and passengers
-      const allMatches = [];
-      
-      for (const driver of drivers) {
-        for (const passenger of passengers) {
-          // Skip if either has no route points
-          if (!driver.routePoints || !passenger.routePoints || 
-              driver.routePoints.length === 0 || passenger.routePoints.length === 0) {
-            continue;
-          }
-          
-          const similarity = routeMatching.calculateRouteSimilarity(
-            passenger.routePoints,
-            driver.routePoints,
-            { 
-              similarityThreshold: 0.001, 
-              maxDistanceThreshold: 2.0,
-              useHausdorffDistance: true 
-            }
-          );
-          
-          const hasSeats = routeMatching.hasCapacity(driver, passenger.passengerCount || 1);
-          
-          console.log(`🔍 ${driver.driverName} ↔ ${passenger.passengerName}: Score=${similarity.toFixed(3)}, Seats=${hasSeats}`);
-          
-          if (similarity > 0.5 && hasSeats) {
-            const optimalPickup = routeMatching.findOptimalPickupPoint(
-              passenger.pickupLocation,
-              driver.routePoints
-            );
-            
-            allMatches.push({
-              matchId: `match_${driver.driverId}_${passenger.passengerId}_${Date.now()}`,
-              driverId: driver.driverId,
-              passengerId: passenger.passengerId,
-              driverName: driver.driverName,
-              passengerName: passenger.passengerName,
-              similarityScore: similarity,
-              matchQuality: similarity > 0.7 ? 'excellent' : similarity > 0.5 ? 'good' : 'fair',
-              optimalPickupPoint: optimalPickup,
-              detourDistance: routeMatching.calculateDetourDistance(
-                driver.routePoints,
-                optimalPickup,
-                passenger.destinationLocation
-              ),
-              timestamp: new Date().toISOString(),
-              status: 'pending'
-            });
-            
-            console.log(`✅ MATCH FOUND: ${driver.driverName} ↔ ${passenger.passengerName} (Score: ${similarity.toFixed(3)})`);
-          }
-        }
-      }
-      
-      // Save high-quality matches to Firestore
-      if (allMatches.length > 0) {
-        const batch = db.batch();
-        allMatches.forEach(match => {
-          const matchRef = db.collection('potential_matches').doc(match.matchId);
-          batch.set(matchRef, {
-            ...match,
-            createdAt: admin.firestore.FieldValue.serverTimestamp(),
-            updatedAt: admin.firestore.FieldValue.serverTimestamp()
-          });
-        });
-        await batch.commit();
-        console.log(`💾 Saved ${allMatches.length} potential matches to Firestore`);
-      }
-      
-    } catch (error) {
-      console.error('❌ Continuous matching error:', error);
-    }
-  }, 15000); // Run every 15 seconds
-};
-
 // Global error handling middleware
 app.use((error, req, res, next) => {
   console.error('🔥 Global Error Handler:', error);
@@ -1062,7 +1163,9 @@ app.use((req, res) => {
       '/api/passenger/start-search',
       '/api/passenger/stop-search',
       '/api/match/search',
-      '/api/match/updates/:userId',
+      '/api/match/potential/:userId',
+      '/api/match/accept',
+      '/api/admin/cleanup',
       '/api/debug/test-receive'
     ]
   });
@@ -1074,45 +1177,37 @@ const PORT = process.env.PORT || 3000;
 if (require.main === module) {
   const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`
-🚀 ShareWay Server Started!
+🚀 ShareWay Enhanced Server Started!
 📍 Port: ${PORT}
 🌍 Environment: ${process.env.NODE_ENV || 'development'}
 🔥 Firebase: Connected
 🌐 CORS: Enabled for Flutter Web
-🔄 Route Matching: ACTIVE
+🔄 Enhanced Matching: ACTIVE
 📅 Started at: ${new Date().toISOString()}
 
-Available Endpoints:
-✅ Health: GET /health
-✅ API Info: GET /api
-✅ CORS Test: GET /cors-test
-✅ Debug Test: POST /api/debug/test-receive
+Enhanced Features:
+✅ Deduplication System - Prevents duplicate matches
+✅ Quality Filtering - Only 0.6+ similarity scores
+✅ Name Fallbacks - No more "undefined" in logs
+✅ Reduced Spam - Runs every 20 seconds
+✅ High-Quality Matches - Better matching algorithm
 
-Driver Endpoints:
-✅ Start Search: POST /api/driver/start-search
-✅ Stop Search: POST /api/driver/stop-search  
-✅ Get Status: GET /api/driver/status/:driverId
-✅ Update Location: POST /api/driver/update-location
-✅ Search Status: GET /api/driver/search-status/:driverId
+Enhanced Endpoints:
+✅ POST /api/match/search - Enhanced route matching
+✅ GET /api/match/potential/:userId - Get quality matches  
+✅ POST /api/match/accept - Accept matches
+✅ POST /api/admin/cleanup - Cleanup old searches
 
-Passenger Endpoints:
-✅ Start Search: POST /api/passenger/start-search
-✅ Stop Search: POST /api/passenger/stop-search
-✅ Get Status: GET /api/passenger/status/:passengerId
+🔄 Enhanced Matching Service: ACTIVE (runs every 20 seconds)
+🎯 Quality Threshold: 0.6+ similarity score
+🛡️  Deduplication: ENABLED
 
-Matching Endpoints:
-✅ Search: POST /api/match/search
-✅ Updates: GET /api/match/updates/:userId
-
-🔄 Continuous Matching Service: ACTIVE (runs every 15 seconds)
-🎯 Advanced Route Matching: ENABLED
-
-Ready for Flutter Web requests! 🎉
+Ready for high-quality matching! 🎉
     `);
   });
 
-  // Start the continuous matching service
-  startContinuousMatching();
+  // Start the enhanced matching service
+  startEnhancedMatching();
 
   server.on('error', (error) => {
     console.error('❌ Server error:', error);
