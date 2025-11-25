@@ -1,11 +1,70 @@
 // utils/routeMatching.js
 const admin = require('firebase-admin');
 
+// Matching session management
+const activeMatchingSessions = new Map();
+const MATCHING_DURATION = 5 * 60 * 1000; // 5 minutes
+
 // Duplicate prevention cache
 const matchCooldown = new Map();
 const COOLDOWN_PERIOD = 2 * 60 * 1000; // 2 minutes cooldown
 
-// Check for existing matches to prevent duplicates
+// Session management functions
+const startMatchingSession = (userId, userType) => {
+  const sessionId = `${userType}_${userId}_${Date.now()}`;
+  const sessionData = {
+    sessionId,
+    userId,
+    userType,
+    startTime: Date.now(),
+    endTime: Date.now() + MATCHING_DURATION,
+    isActive: true,
+    matchesFound: 0
+  };
+  
+  activeMatchingSessions.set(sessionId, sessionData);
+  console.log(`🚀 Started matching session: ${sessionId} for ${MATCHING_DURATION/1000} seconds`);
+  
+  // Auto-cleanup after session duration
+  setTimeout(() => {
+    endMatchingSession(sessionId);
+  }, MATCHING_DURATION);
+  
+  return sessionId;
+};
+
+const endMatchingSession = (sessionId) => {
+  const session = activeMatchingSessions.get(sessionId);
+  if (session) {
+    session.isActive = false;
+    activeMatchingSessions.delete(sessionId);
+    console.log(`🛑 Ended matching session: ${sessionId}. Found ${session.matchesFound} matches`);
+  }
+};
+
+const isMatchingSessionActive = (userId, userType) => {
+  for (const [sessionId, session] of activeMatchingSessions.entries()) {
+    if (session.userId === userId && session.userType === userType && session.isActive) {
+      return true;
+    }
+  }
+  return false;
+};
+
+const getActiveSession = (userId, userType) => {
+  for (const [sessionId, session] of activeMatchingSessions.entries()) {
+    if (session.userId === userId && session.userType === userType && session.isActive) {
+      return session;
+    }
+  }
+  return null;
+};
+
+const getAllActiveSessions = () => {
+  return Array.from(activeMatchingSessions.values()).filter(session => session.isActive);
+};
+
+// Enhanced duplicate prevention with session awareness
 const checkExistingMatch = async (db, driverId, passengerId, maxAgeMinutes = 5) => {
   try {
     const now = admin.firestore.Timestamp.now();
@@ -26,7 +85,6 @@ const checkExistingMatch = async (db, driverId, passengerId, maxAgeMinutes = 5) 
   }
 };
 
-// Check if match should be throttled
 const shouldThrottleMatch = (driverId, passengerId) => {
   const key = `${driverId}_${passengerId}`;
   const now = Date.now();
@@ -36,10 +94,9 @@ const shouldThrottleMatch = (driverId, passengerId) => {
     return true;
   }
   
-  // Update the cooldown timestamp
   matchCooldown.set(key, now);
   
-  // Clean up old entries periodically
+  // Clean up old entries
   if (matchCooldown.size > 1000) {
     for (const [key, timestamp] of matchCooldown.entries()) {
       if (now - timestamp > COOLDOWN_PERIOD * 2) {
@@ -51,70 +108,56 @@ const shouldThrottleMatch = (driverId, passengerId) => {
   return false;
 };
 
-// ✅ FIXED: Create notifications for both users with CORRECT STRUCTURE
+// ✅ OPTIMIZED: Single Firestore write for notifications
 const createMatchNotifications = async (db, matchData) => {
   try {
     console.log(`📢 Creating notifications for match: ${matchData.matchId}`);
     
     const batch = db.batch();
+    const timestamp = admin.firestore.FieldValue.serverTimestamp();
     
-    // ✅ FIXED: Notification for driver - ALL DATA NESTED IN 'data' FIELD
+    // Shared notification data
+    const notificationData = {
+      type: 'match_proposal',
+      read: false,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      data: {
+        matchId: matchData.matchId,
+        driverId: matchData.driverId,
+        passengerId: matchData.passengerId,
+        driverName: matchData.driverName,
+        passengerName: matchData.passengerName,
+        similarityScore: matchData.similarityScore,
+        matchQuality: matchData.matchQuality,
+        optimalPickupPoint: matchData.optimalPickupPoint,
+        detourDistance: matchData.detourDistance,
+        driverPhotoUrl: null,
+        passengerPhotoUrl: null,
+        action: 'view_match'
+      }
+    };
+
+    // Driver notification
     const driverNotificationRef = db.collection('notifications').doc();
     batch.set(driverNotificationRef, {
+      ...notificationData,
       userId: matchData.driverId,
-      type: 'match_proposal',
       title: 'Passenger Found! 🚗',
-      message: `Passenger ${matchData.passengerName} wants to share your ride. Route similarity: ${(matchData.similarityScore * 100).toFixed(1)}%`,
-      // ✅ ALL MATCH DATA GOES INSIDE 'data' FIELD
-      data: {
-        matchId: matchData.matchId,
-        driverId: matchData.driverId,
-        passengerId: matchData.passengerId,
-        driverName: matchData.driverName,
-        passengerName: matchData.passengerName,
-        similarityScore: matchData.similarityScore,
-        matchQuality: matchData.matchQuality,
-        optimalPickupPoint: matchData.optimalPickupPoint,
-        detourDistance: matchData.detourDistance,
-        driverPhotoUrl: null,
-        passengerPhotoUrl: null,
-        action: 'view_match'
-      },
-      read: false,
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      message: `Passenger ${matchData.passengerName} wants to share your ride. Route similarity: ${(matchData.similarityScore * 100).toFixed(1)}%`
     });
 
-    // ✅ FIXED: Notification for passenger - ALL DATA NESTED IN 'data' FIELD
+    // Passenger notification
     const passengerNotificationRef = db.collection('notifications').doc();
     batch.set(passengerNotificationRef, {
+      ...notificationData,
       userId: matchData.passengerId,
-      type: 'match_proposal',
       title: 'Driver Found! 🚗',
-      message: `Driver ${matchData.driverName} is going your way. Route similarity: ${(matchData.similarityScore * 100).toFixed(1)}%`,
-      // ✅ ALL MATCH DATA GOES INSIDE 'data' FIELD
-      data: {
-        matchId: matchData.matchId,
-        driverId: matchData.driverId,
-        passengerId: matchData.passengerId,
-        driverName: matchData.driverName,
-        passengerName: matchData.passengerName,
-        similarityScore: matchData.similarityScore,
-        matchQuality: matchData.matchQuality,
-        optimalPickupPoint: matchData.optimalPickupPoint,
-        detourDistance: matchData.detourDistance,
-        driverPhotoUrl: null,
-        passengerPhotoUrl: null,
-        action: 'view_match'
-      },
-      read: false,
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      message: `Driver ${matchData.driverName} is going your way. Route similarity: ${(matchData.similarityScore * 100).toFixed(1)}%`
     });
 
     await batch.commit();
     console.log(`✅ Notifications created for both users: ${matchData.driverName} ↔ ${matchData.passengerName}`);
-    console.log(`✅ Notification structure: All match data nested in 'data' field`);
     
     return true;
   } catch (error) {
@@ -123,8 +166,50 @@ const createMatchNotifications = async (db, matchData) => {
   }
 };
 
-// Enhanced matching function with duplicate prevention AND NOTIFICATIONS
-const createMatchIfNotExists = async (db, driverData, passengerData, similarityScore, matchQuality) => {
+// ✅ OPTIMIZED: Single Firestore write for active match
+const createActiveMatchForOverlay = async (db, matchData) => {
+  try {
+    console.log(`🎯 Creating active match for overlay: ${matchData.matchId}`);
+    
+    const activeMatchData = {
+      matchId: matchData.matchId,
+      driverId: matchData.driverId,
+      driverName: matchData.driverName,
+      passengerId: matchData.passengerId,
+      passengerName: matchData.passengerName,
+      similarityScore: matchData.similarityScore,
+      matchQuality: matchData.matchQuality,
+      
+      // Route information for overlay display
+      pickupName: matchData.pickupName || 'Unknown Location',
+      destinationName: matchData.destinationName || 'Unknown Destination',
+      pickupLocation: matchData.pickupLocation,
+      destinationLocation: matchData.destinationLocation,
+      
+      // Session information
+      driverSessionId: matchData.driverSessionId,
+      passengerSessionId: matchData.passengerSessionId,
+      
+      // Overlay trigger flag
+      overlayTriggered: true,
+      processedAt: null,
+      
+      // Single timestamp
+      createdAt: admin.firestore.FieldValue.serverTimestamp()
+    };
+
+    await db.collection('active_matches').doc(matchData.matchId).set(activeMatchData);
+    console.log(`✅ Active match created for overlay: ${matchData.matchId}`);
+    return activeMatchData;
+    
+  } catch (error) {
+    console.error('❌ Error creating active match for overlay:', error);
+    return null;
+  }
+};
+
+// ✅ OPTIMIZED: Single Firestore write for match creation
+const createMatchIfNotExists = async (db, driverData, passengerData, similarityScore, matchQuality, sessionData = {}) => {
   try {
     const driverId = driverData.driverId || driverData.id;
     const passengerId = passengerData.passengerId || passengerData.id;
@@ -134,7 +219,7 @@ const createMatchIfNotExists = async (db, driverData, passengerData, similarityS
       return null;
     }
 
-    // Check cooldown first (in-memory cache for performance)
+    // Check cooldown first
     if (shouldThrottleMatch(driverId, passengerId)) {
       console.log(`⏸️ Match throttled: ${driverId} + ${passengerId}`);
       return null;
@@ -159,7 +244,7 @@ const createMatchIfNotExists = async (db, driverData, passengerData, similarityS
     const detourDistance = calculateDetourDistance(
       driverData.routePoints,
       optimalPickup,
-      passengerData.destination
+      passengerData.destinationLocation
     );
 
     const matchData = {
@@ -170,27 +255,35 @@ const createMatchIfNotExists = async (db, driverData, passengerData, similarityS
       passengerName: passengerData.passengerName || passengerData.name || 'Unknown Passenger',
       similarityScore: Math.round(similarityScore * 100) / 100,
       matchQuality,
+      
+      // Route information for overlay
+      pickupName: passengerData.pickupName || driverData.pickupName || 'Unknown Location',
+      destinationName: passengerData.destinationName || driverData.destinationName || 'Unknown Destination',
+      pickupLocation: passengerData.pickupLocation || driverData.pickupLocation,
+      destinationLocation: passengerData.destinationLocation || driverData.destinationLocation,
+      
+      // Session data
+      driverSessionId: sessionData.driverSessionId,
+      passengerSessionId: sessionData.passengerSessionId,
+      
       status: 'proposed',
       detourDistance,
       optimalPickupPoint: optimalPickup,
       timestamp: new Date(timestamp).toISOString(),
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      notificationSent: false,
-      notifiedAt: null
+      notificationSent: false
     };
 
-    // Save match to Firestore
+    // Single Firestore write for match
     await db.collection('potential_matches').doc(matchId).set(matchData);
     console.log(`✅ Created new match: ${matchId} (score: ${similarityScore.toFixed(2)})`);
     
-    // ✅ CREATE NOTIFICATIONS FOR BOTH USERS (WITH FIXED STRUCTURE)
+    // Create notifications in single batch
     await createMatchNotifications(db, matchData);
     
-    // Update match with notification status
+    // Update match with notification status in single operation
     await db.collection('potential_matches').doc(matchId).update({
-      notificationSent: true,
-      notifiedAt: admin.firestore.FieldValue.serverTimestamp()
+      notificationSent: true
     });
     
     return matchData;
@@ -201,14 +294,22 @@ const createMatchIfNotExists = async (db, driverData, passengerData, similarityS
   }
 };
 
-// 🎯 TEST MODE: Main matching function with VERY LOW threshold for testing
+// ✅ OPTIMIZED: Main matching function with session validation
 const performIntelligentMatching = async (db, driver, passenger, options = {}) => {
   try {
+    // Session validation
+    const driverSession = getActiveSession(driver.driverId, 'driver');
+    const passengerSession = getActiveSession(passenger.passengerId, 'passenger');
+    
+    if (!driverSession || !passengerSession) {
+      console.log('❌ Matching session expired or not active');
+      return null;
+    }
+
     const {
-      // 🎯 VERY LOW THRESHOLD FOR TESTING - will match almost anything
-      similarityThreshold = 0.01, // Changed from 0.3 to 0.01 for testing
-      maxDetourDistance = 50.0,   // Increased for testing
-      checkCapacity = false        // Disabled for testing
+      similarityThreshold = 0.01,
+      maxDetourDistance = 50.0,
+      checkCapacity = false
     } = options;
 
     // Basic validation
@@ -222,7 +323,7 @@ const performIntelligentMatching = async (db, driver, passenger, options = {}) =
       return null;
     }
 
-    // 🎯 SKIP capacity check for testing
+    // Skip capacity check for testing
     if (checkCapacity && !hasCapacity(driver, passenger.passengerCount || 1)) {
       console.log(`❌ No capacity: ${driver.driverId}`);
       return null;
@@ -235,9 +336,8 @@ const performIntelligentMatching = async (db, driver, passenger, options = {}) =
       { maxDistanceThreshold: maxDetourDistance }
     );
 
-    console.log(`🎯 TEST MODE: Similarity score: ${similarityScore.toFixed(3)}`);
+    console.log(`🎯 Similarity score: ${similarityScore.toFixed(3)}`);
 
-    // 🎯 VERY LOW THRESHOLD FOR TESTING - will match almost anything
     if (similarityScore < similarityThreshold) {
       console.log(`📉 Low similarity: ${similarityScore.toFixed(3)} for ${driver.driverId}`);
       return null;
@@ -247,16 +347,34 @@ const performIntelligentMatching = async (db, driver, passenger, options = {}) =
     let matchQuality = 'fair';
     if (similarityScore >= 0.7) matchQuality = 'excellent';
     else if (similarityScore >= 0.5) matchQuality = 'good';
-    else if (similarityScore >= 0.1) matchQuality = 'fair'; // Lowered for testing
+    else if (similarityScore >= 0.1) matchQuality = 'fair';
     else matchQuality = 'poor';
 
     console.log(`🎯 Creating match with quality: ${matchQuality}`);
 
-    // Create match with duplicate prevention (this now includes notifications)
-    const match = await createMatchIfNotExists(db, driver, passenger, similarityScore, matchQuality);
+    // Create match with session data
+    const match = await createMatchIfNotExists(db, driver, passenger, similarityScore, matchQuality, {
+      driverSessionId: driverSession.sessionId,
+      passengerSessionId: passengerSession.sessionId
+    });
     
     if (match) {
-      console.log(`🎉 SUCCESS: Created match with notifications - ${match.driverName} ↔ ${match.passengerName} (${similarityScore.toFixed(3)})`);
+      console.log(`🎉 SUCCESS: Created match - ${match.driverName} ↔ ${match.passengerName} (${similarityScore.toFixed(3)})`);
+      
+      // Update session match count
+      driverSession.matchesFound++;
+      passengerSession.matchesFound++;
+      
+      // Create active match for overlay
+      const activeMatch = await createActiveMatchForOverlay(db, {
+        ...match,
+        driverSessionId: driverSession.sessionId,
+        passengerSessionId: passengerSession.sessionId
+      });
+      
+      if (activeMatch) {
+        console.log(`📱 Overlay match ready: ${activeMatch.matchId}`);
+      }
     }
     
     return match;
@@ -278,24 +396,24 @@ const calculateRouteSimilarity = (passengerRoute, driverRoute, options = {}) => 
 
     const {
       similarityThreshold = 0.001,
-      maxDistanceThreshold = 50.0, // 🎯 Increased for testing
+      maxDistanceThreshold = 50.0,
       useHausdorffDistance = true
     } = options;
 
-    // Method 1: Direct point-to-point comparison (for exact routes)
+    // Method 1: Direct point-to-point comparison
     const directSimilarity = calculateDirectSimilarity(passengerRoute, driverRoute, similarityThreshold);
     
-    // Method 2: Hausdorff distance (for route shape similarity)
+    // Method 2: Hausdorff distance
     const hausdorffSimilarity = useHausdorffDistance ? 
       calculateHausdorffSimilarity(passengerRoute, driverRoute, maxDistanceThreshold) : 0;
     
-    // Method 3: Bounding box overlap (for general area similarity)
+    // Method 3: Bounding box overlap
     const bboxSimilarity = calculateBoundingBoxSimilarity(passengerRoute, driverRoute);
     
     // Method 4: Start/end point proximity
     const endpointSimilarity = calculateEndpointSimilarity(passengerRoute, driverRoute, maxDistanceThreshold);
     
-    // Weighted combination of different similarity measures
+    // Weighted combination
     const weights = {
       direct: 0.3,
       hausdorff: 0.4,
@@ -309,7 +427,7 @@ const calculateRouteSimilarity = (passengerRoute, driverRoute, options = {}) => 
       (bboxSimilarity * weights.bbox) +
       (endpointSimilarity * weights.endpoints);
     
-    // 🎯 BOOST similarity for testing - ensures matches happen
+    // Boost similarity for testing
     const boostedSimilarity = Math.min(1, Math.max(0, totalSimilarity * 1.5));
     
     console.log(`🎯 Similarity breakdown - Direct: ${directSimilarity.toFixed(3)}, Hausdorff: ${hausdorffSimilarity.toFixed(3)}, BBox: ${bboxSimilarity.toFixed(3)}, Endpoints: ${endpointSimilarity.toFixed(3)}`);
@@ -339,13 +457,12 @@ const calculateDirectSimilarity = (route1, route2, threshold = 0.001) => {
 };
 
 // Hausdorff distance for route shape similarity
-const calculateHausdorffSimilarity = (route1, route2, maxDistanceThreshold = 50.0) => { // 🎯 Increased threshold
+const calculateHausdorffSimilarity = (route1, route2, maxDistanceThreshold = 50.0) => {
   try {
     const distance1to2 = calculateDirectedHausdorffDistance(route1, route2);
     const distance2to1 = calculateDirectedHausdorffDistance(route2, route1);
     const hausdorffDistance = Math.max(distance1to2, distance2to1);
     
-    // Convert distance to similarity (closer distance = higher similarity)
     const similarity = Math.max(0, 1 - (hausdorffDistance / maxDistanceThreshold));
     console.log(`🎯 Hausdorff distance: ${hausdorffDistance.toFixed(3)}km, similarity: ${similarity.toFixed(3)}`);
     return similarity;
@@ -383,7 +500,6 @@ const calculateBoundingBoxSimilarity = (route1, route2) => {
     const bbox1 = calculateBoundingBox(route1);
     const bbox2 = calculateBoundingBox(route2);
     
-    // Calculate intersection area
     const intersection = {
       minLat: Math.max(bbox1.minLat, bbox2.minLat),
       maxLat: Math.min(bbox1.maxLat, bbox2.maxLat),
@@ -391,7 +507,6 @@ const calculateBoundingBoxSimilarity = (route1, route2) => {
       maxLng: Math.min(bbox1.maxLng, bbox2.maxLng)
     };
     
-    // Check if there's no intersection
     if (intersection.minLat > intersection.maxLat || intersection.minLng > intersection.maxLng) {
       return 0;
     }
@@ -400,7 +515,6 @@ const calculateBoundingBoxSimilarity = (route1, route2) => {
     const area2 = (bbox2.maxLat - bbox2.minLat) * (bbox2.maxLng - bbox2.minLng);
     const intersectionArea = (intersection.maxLat - intersection.minLat) * (intersection.maxLng - intersection.minLng);
     
-    // Use Jaccard similarity (intersection over union)
     const similarity = intersectionArea / (area1 + area2 - intersectionArea);
     console.log(`🎯 BBox similarity: ${similarity.toFixed(3)}`);
     return similarity;
@@ -432,8 +546,8 @@ const calculateBoundingBox = (route) => {
   return { minLat, maxLat, minLng, maxLng };
 };
 
-// Endpoint similarity (pickup and destination proximity)
-const calculateEndpointSimilarity = (passengerRoute, driverRoute, maxDistanceThreshold = 50.0) => { // 🎯 Increased threshold
+// Endpoint similarity
+const calculateEndpointSimilarity = (passengerRoute, driverRoute, maxDistanceThreshold = 50.0) => {
   try {
     if (passengerRoute.length === 0 || driverRoute.length === 0) return 0;
     
@@ -448,7 +562,6 @@ const calculateEndpointSimilarity = (passengerRoute, driverRoute, maxDistanceThr
     const startSimilarity = Math.max(0, 1 - (startDistance / maxDistanceThreshold));
     const endSimilarity = Math.max(0, 1 - (endDistance / maxDistanceThreshold));
     
-    // Average of start and end similarity
     const similarity = (startSimilarity + endSimilarity) / 2;
     console.log(`🎯 Endpoint similarity - Start: ${startSimilarity.toFixed(3)}, End: ${endSimilarity.toFixed(3)}, Avg: ${similarity.toFixed(3)}`);
     return similarity;
@@ -460,7 +573,7 @@ const calculateEndpointSimilarity = (passengerRoute, driverRoute, maxDistanceThr
 };
 
 // Enhanced location along route check
-const isLocationAlongRoute = (location, routePoints, maxDistance = 5.0, options = {}) => { // 🎯 Increased distance
+const isLocationAlongRoute = (location, routePoints, maxDistance = 5.0, options = {}) => {
   try {
     if (!location || !routePoints || !Array.isArray(routePoints)) return false;
     if (typeof location.lat === 'undefined') return false;
@@ -481,7 +594,7 @@ const isLocationAlongRoute = (location, routePoints, maxDistance = 5.0, options 
       }
     }
     
-    // Check segment proximity (location near route segments, not just points)
+    // Check segment proximity
     if (checkSegmentProximity && routePoints.length >= 2) {
       for (let i = 0; i < routePoints.length - 1; i++) {
         const segmentStart = routePoints[i];
@@ -496,7 +609,7 @@ const isLocationAlongRoute = (location, routePoints, maxDistance = 5.0, options 
       }
     }
     
-    // Check if location is near route start/end points with different threshold
+    // Check if location is near route start/end points
     if (includeRouteEnds) {
       const startPoint = routePoints[0];
       const endPoint = routePoints[routePoints.length - 1];
@@ -545,14 +658,11 @@ const calculateDistanceToSegment = (point, segmentStart, segmentEnd) => {
     yy = segmentStart.lng + param * D;
   }
   
-  const dx = point.lat - xx;
-  const dy = point.lng - yy;
-  
   return calculateDistance({ lat: point.lat, lng: point.lng }, { lat: xx, lng: yy });
 };
 
 // Enhanced point similarity check
-const isPointSimilar = (point1, point2, threshold = 0.1) => { // 🎯 Increased threshold
+const isPointSimilar = (point1, point2, threshold = 0.1) => {
   if (!point1 || !point2) return false;
   if (typeof point1.lat === 'undefined' || typeof point2.lat === 'undefined') return false;
   
@@ -561,13 +671,13 @@ const isPointSimilar = (point1, point2, threshold = 0.1) => { // 🎯 Increased 
   return latDiff < threshold && lngDiff < threshold;
 };
 
-// Calculate distance between two points (Haversine formula) - ENHANCED
+// Calculate distance between two points (Haversine formula)
 const calculateDistance = (point1, point2) => {
   try {
     if (!point1 || !point2) return Infinity;
     if (typeof point1.lat === 'undefined' || typeof point2.lat === 'undefined') return Infinity;
     
-    const R = 6371; // Earth's radius in kilometers
+    const R = 6371;
     const dLat = (point2.lat - point1.lat) * Math.PI / 180;
     const dLng = (point2.lng - point1.lng) * Math.PI / 180;
     const a = 
@@ -577,7 +687,7 @@ const calculateDistance = (point1, point2) => {
     const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
     const distance = R * c;
     
-    return Math.round(distance * 1000) / 1000; // Round to 3 decimal places
+    return Math.round(distance * 1000) / 1000;
     
   } catch (error) {
     console.error('❌ Error calculating distance:', error);
@@ -596,11 +706,10 @@ const generateRouteHash = (pickup, destination, precision = 3) => {
     const destLat = Number(destination.lat).toFixed(precision);
     const destLng = Number(destination.lng).toFixed(precision);
     
-    // Create a consistent hash regardless of direction
     const coordinates = [
       `${pickupLat},${pickupLng}`,
       `${destLat},${destLng}`
-    ].sort(); // Sort to ensure same hash for A→B and B→A
+    ].sort();
     
     return `route_${coordinates.join('_')}_p${precision}`;
     
@@ -690,7 +799,7 @@ const updateDriverCapacity = async (db, driverId, passengerCount, operation = 'a
 };
 
 // Calculate optimal pickup point along driver's route
-const findOptimalPickupPoint = (passengerLocation, driverRoute, maxWalkDistance = 5.0) => { // 🎯 Increased distance
+const findOptimalPickupPoint = (passengerLocation, driverRoute, maxWalkDistance = 5.0) => {
   try {
     if (!driverRoute || driverRoute.length < 2) return passengerLocation;
     
@@ -758,8 +867,6 @@ const calculateDetourDistance = (driverRoute, pickupPoint, dropoffPoint) => {
     if (!driverRoute || driverRoute.length < 2) return 0;
     
     const originalDistance = calculateRouteDistance(driverRoute);
-    
-    // Create new route with pickup and dropoff points
     const newRoute = insertPointsInRoute(driverRoute, pickupPoint, dropoffPoint);
     const newDistance = calculateRouteDistance(newRoute);
     
@@ -842,6 +949,23 @@ const cleanupOldMatches = async (db, olderThanMinutes = 30) => {
   }
 };
 
+// Cleanup expired sessions
+const cleanupExpiredSessions = () => {
+  const now = Date.now();
+  let cleanedCount = 0;
+  
+  for (const [sessionId, session] of activeMatchingSessions.entries()) {
+    if (now > session.endTime) {
+      activeMatchingSessions.delete(sessionId);
+      cleanedCount++;
+    }
+  }
+  
+  if (cleanedCount > 0) {
+    console.log(`🧹 Cleaned up ${cleanedCount} expired sessions`);
+  }
+};
+
 // 🎯 TEST FUNCTION: Force create a match for testing
 const forceCreateTestMatch = async (db, driverData, passengerData) => {
   try {
@@ -859,29 +983,26 @@ const forceCreateTestMatch = async (db, driverData, passengerData) => {
       driverName: driverData.driverName || driverData.name || 'Test Driver',
       passengerId,
       passengerName: passengerData.passengerName || passengerData.name || 'Test Passenger',
-      similarityScore: 0.85, // High score for testing
+      similarityScore: 0.85,
       matchQuality: 'excellent',
       status: 'proposed',
       detourDistance: 0.5,
       optimalPickupPoint: driverData.routePoints ? driverData.routePoints[0] : { lat: 0, lng: 0 },
       timestamp: new Date(timestamp).toISOString(),
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      notificationSent: false,
-      notifiedAt: null
+      notificationSent: false
     };
 
-    // Save match to Firestore
+    // Single Firestore write
     await db.collection('potential_matches').doc(matchId).set(matchData);
     console.log(`✅ Created test match: ${matchId}`);
     
     // Create notifications
     await createMatchNotifications(db, matchData);
     
-    // Update match with notification status
+    // Update notification status
     await db.collection('potential_matches').doc(matchId).update({
-      notificationSent: true,
-      notifiedAt: admin.firestore.FieldValue.serverTimestamp()
+      notificationSent: true
     });
     
     console.log(`🎉 TEST MATCH CREATED: ${matchData.driverName} ↔ ${matchData.passengerName}`);
@@ -893,14 +1014,24 @@ const forceCreateTestMatch = async (db, driverData, passengerData) => {
   }
 };
 
+// Export all functions
 module.exports = {
+  // Session management
+  startMatchingSession,
+  endMatchingSession,
+  isMatchingSessionActive,
+  getActiveSession,
+  getAllActiveSessions,
+  cleanupExpiredSessions,
+  
   // Core matching functions
   performIntelligentMatching,
   createMatchIfNotExists,
+  createActiveMatchForOverlay, // ✅ NEW
   checkExistingMatch,
   shouldThrottleMatch,
-  createMatchNotifications, // ✅ EXPORT THE FIXED FUNCTION
-  forceCreateTestMatch,     // 🎯 EXPORT TEST FUNCTION
+  createMatchNotifications,
+  forceCreateTestMatch,
   
   // Route calculation functions
   calculateRouteSimilarity,

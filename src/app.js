@@ -1,4 +1,4 @@
-// src/app.js - COMPLETE WORKING VERSION
+// src/app.js - COMPLETE FIXED VERSION WITH MATCH OVERLAY SYSTEM
 const express = require("express");
 const admin = require("firebase-admin");
 const cors = require("cors");
@@ -76,8 +76,24 @@ const corsOptions = {
 // Apply CORS middleware to all routes
 app.use(cors(corsOptions));
 
-// FIXED: Remove problematic regex preflight handler and use simple approach
-// The cors middleware already handles preflight, so we don't need manual handler
+// Manual preflight handler for ALL routes
+app.options(/.*/, (req, res) => {
+  const origin = req.headers.origin;
+  
+  // Check if origin is allowed
+  const isAllowed = !origin || corsOptions.origin(origin, (err, allowed) => allowed);
+  
+  if (isAllowed) {
+    res.header('Access-Control-Allow-Origin', origin || '*');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept, Origin, Access-Control-Request-Method, Access-Control-Request-Headers');
+    res.header('Access-Control-Allow-Credentials', 'true');
+    res.header('Access-Control-Max-Age', '86400');
+    res.status(204).send();
+  } else {
+    res.status(403).json({ error: 'CORS not allowed' });
+  }
+});
 
 // Body parsing middleware
 app.use(express.json({ 
@@ -143,154 +159,160 @@ try {
   process.exit(1);
 }
 
-// ========== NOTIFICATION SERVICE ==========
+// ========== MATCH OVERLAY SERVICE ==========
 
-class NotificationService {
-  constructor(db) {
-    this.db = db;
+// ✅ NEW: Create active match for overlay display
+const createActiveMatchForOverlay = async (db, matchData) => {
+  try {
+    console.log(`🎯 Creating active match for overlay: ${matchData.matchId}`);
+    
+    const activeMatchData = {
+      matchId: matchData.matchId,
+      driverId: matchData.driverId,
+      driverName: matchData.driverName,
+      passengerId: matchData.passengerId,
+      passengerName: matchData.passengerName,
+      similarityScore: matchData.similarityScore,
+      matchQuality: matchData.matchQuality,
+      
+      // Route information for overlay display
+      pickupName: matchData.pickupName || 'Unknown Location',
+      destinationName: matchData.destinationName || 'Unknown Destination',
+      pickupLocation: matchData.pickupLocation,
+      destinationLocation: matchData.destinationLocation,
+      
+      // Overlay trigger flag
+      overlayTriggered: true,
+      processedAt: null,
+      
+      // Timestamps
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    };
+
+    // Save to active_matches collection for real-time overlay
+    await db.collection('active_matches').doc(matchData.matchId).set(activeMatchData);
+    
+    console.log(`✅ Active match created for overlay: ${matchData.matchId}`);
+    return activeMatchData;
+    
+  } catch (error) {
+    console.error('❌ Error creating active match for overlay:', error);
+    return null;
   }
+};
 
-  async sendMatchNotification(matchData) {
-    try {
-      console.log(`📢 Sending match notification for: ${matchData.driverName} ↔ ${matchData.passengerName}`);
-      
-      const notifications = [
-        {
-          userId: matchData.driverId,
-          type: 'match_proposal',
-          title: 'New Ride Match Found!',
-          message: `Passenger ${matchData.passengerName} wants to share your ride. Similarity: ${(matchData.similarityScore * 100).toFixed(1)}%`,
-          data: {
-            matchId: matchData.matchId,
-            driverId: matchData.driverId,
-            passengerId: matchData.passengerId,
-            passengerName: matchData.passengerName,
-            similarityScore: matchData.similarityScore,
-            action: 'view_match'
-          },
-          read: false,
-          createdAt: admin.firestore.FieldValue.serverTimestamp()
-        },
-        {
-          userId: matchData.passengerId,
-          type: 'match_proposal',
-          title: 'Driver Match Found!',
-          message: `Driver ${matchData.driverName} is going your way. Similarity: ${(matchData.similarityScore * 100).toFixed(1)}%`,
-          data: {
-            matchId: matchData.matchId,
-            driverId: matchData.driverId,
-            passengerId: matchData.passengerId,
-            driverName: matchData.driverName,
-            similarityScore: matchData.similarityScore,
-            action: 'view_match'
-          },
-          read: false,
-          createdAt: admin.firestore.FieldValue.serverTimestamp()
-        }
-      ];
-
-      const batch = this.db.batch();
-      notifications.forEach(notification => {
-        const notificationRef = this.db.collection('notifications').doc();
-        batch.set(notificationRef, notification);
-      });
-      
-      await batch.commit();
-      
-      console.log(`✅ Notifications sent to both users for match ${matchData.matchId}`);
-      
-      await this.db.collection('potential_matches').doc(matchData.matchId).update({
-        notificationSent: true,
-        notifiedAt: admin.firestore.FieldValue.serverTimestamp()
-      });
-      
-      return true;
-      
-    } catch (error) {
-      console.error('❌ Error sending match notification:', error);
-      return false;
+// ✅ NEW: Handle match decision
+const handleMatchDecision = async (db, matchId, decision, userId) => {
+  try {
+    console.log(`🤝 Handling match decision: ${matchId} - ${decision} by ${userId}`);
+    
+    const matchRef = db.collection('potential_matches').doc(matchId);
+    const matchDoc = await matchRef.get();
+    
+    if (!matchDoc.exists) {
+      throw new Error('Match not found');
     }
+
+    const matchData = matchDoc.data();
+    
+    // Update match status
+    await matchRef.update({
+      status: decision ? 'accepted' : 'rejected',
+      decidedBy: userId,
+      decidedAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    // Clean up active match for overlay
+    await db.collection('active_matches').doc(matchId).delete();
+
+    console.log(`✅ Match ${matchId} ${decision ? 'accepted' : 'rejected'} by ${userId}`);
+    
+    return {
+      success: true,
+      matchId,
+      status: decision ? 'accepted' : 'rejected'
+    };
+    
+  } catch (error) {
+    console.error('❌ Error handling match decision:', error);
+    return {
+      success: false,
+      error: error.message
+    };
   }
+};
 
-  async getUserNotifications(userId, limit = 20) {
-    try {
-      const snapshot = await this.db.collection('notifications')
-        .where('userId', '==', userId)
-        .orderBy('createdAt', 'desc')
-        .limit(limit)
-        .get();
-      
-      return snapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      }));
-    } catch (error) {
-      console.error('Error getting user notifications:', error);
-      return [];
-    }
+// ✅ NEW: Clean up old active matches
+const cleanupExpiredMatches = async (db) => {
+  try {
+    const cutoffTime = new Date(Date.now() - 10 * 60 * 1000); // 10 minutes
+    
+    const expiredMatches = await db.collection('active_matches')
+      .where('createdAt', '<', cutoffTime)
+      .get();
+
+    const batch = db.batch();
+    expiredMatches.forEach(doc => {
+      batch.delete(doc.ref);
+    });
+
+    await batch.commit();
+    console.log(`🧹 Cleaned up ${expiredMatches.size} expired active matches`);
+    
+  } catch (error) {
+    console.error('❌ Error cleaning up expired matches:', error);
   }
+};
 
-  async markNotificationAsRead(notificationId) {
-    try {
-      await this.db.collection('notifications').doc(notificationId).update({
-        read: true,
-        readAt: admin.firestore.FieldValue.serverTimestamp()
-      });
-      return true;
-    } catch (error) {
-      console.error('Error marking notification as read:', error);
-      return false;
-    }
-  }
-}
+// ========== DEDUPLICATION SYSTEM ==========
 
-const notificationService = new NotificationService(db);
-
-// ========== FIXED DEDUPLICATION SYSTEM ==========
-
-const processedMatches = new Map();
+const processedMatches = new Set();
 const MAX_MATCH_AGE = 300000; // 5 minutes
 
 // Clean old matches from tracking
 setInterval(() => {
   const now = Date.now();
-  let cleanedCount = 0;
-  
   for (const [key, timestamp] of processedMatches.entries()) {
     if (now - timestamp > MAX_MATCH_AGE) {
       processedMatches.delete(key);
-      cleanedCount++;
     }
   }
-  
-  if (cleanedCount > 0) {
-    console.log(`🧹 Cleaned ${cleanedCount} old matches from deduplication cache`);
-  }
-}, 60000);
+}, 60000); // Clean every minute
 
 // Generate match key for deduplication
 const generateMatchKey = (driverId, passengerId, similarity) => {
   return `${driverId}_${passengerId}_${Math.round(similarity * 1000)}`;
 };
 
-// ========== ENHANCED MATCHING SERVICE WITH NOTIFICATIONS ==========
+// ========== ENHANCED MATCHING SERVICE WITH OVERLAY SUPPORT ==========
 
 const startEnhancedMatching = () => {
-  console.log('🔄 Starting Enhanced Matching Service with Notifications...');
+  console.log('🔄 Starting Enhanced Matching Service with Overlay Support...');
   
   setInterval(async () => {
     try {
-      console.log('🎯 Running ENHANCED matching with notifications...');
+      console.log('🎯 Running ENHANCED matching with overlay support...');
       
+      // Get all active searches with proper error handling
       const [activeDrivers, activePassengers] = await Promise.all([
         db.collection('active_searches')
           .where('userType', '==', 'driver')
           .where('status', '==', 'searching')
-          .get(),
+          .get()
+          .catch(error => {
+            console.error('❌ Error fetching drivers:', error);
+            return { docs: [] };
+          }),
         db.collection('active_searches')
           .where('userType', '==', 'passenger') 
           .where('status', '==', 'searching')
           .get()
+          .catch(error => {
+            console.error('❌ Error fetching passengers:', error);
+            return { docs: [] };
+          })
       ]);
       
       const drivers = activeDrivers.docs.map(doc => ({ 
@@ -317,10 +339,12 @@ const startEnhancedMatching = () => {
       const highQualityMatches = [];
       let totalComparisons = 0;
       
+      // Enhanced matching with quality filtering
       for (const driver of drivers) {
         for (const passenger of passengers) {
           totalComparisons++;
           
+          // Skip if missing critical data
           if (!driver.routePoints || !passenger.routePoints || 
               driver.routePoints.length === 0 || passenger.routePoints.length === 0) {
             continue;
@@ -329,7 +353,9 @@ const startEnhancedMatching = () => {
           const passengerCount = passenger.passengerCount || 1;
           const hasSeats = routeMatching.hasCapacity(driver, passengerCount);
           
-          if (!hasSeats) continue;
+          if (!hasSeats) {
+            continue;
+          }
           
           const similarity = routeMatching.calculateRouteSimilarity(
             passenger.routePoints,
@@ -346,9 +372,11 @@ const startEnhancedMatching = () => {
           
           console.log(`🔍 ${driverName} ↔ ${passengerName}: Score=${similarity.toFixed(3)}, Seats=${hasSeats}`);
           
-          if (similarity > 0.5) {
+          // Only consider high-quality matches
+          if (similarity > 0.5) { // Lowered threshold to get more matches for testing
             const matchKey = generateMatchKey(driver.driverId, passenger.passengerId, similarity);
             
+            // Check if this match was recently processed
             if (!processedMatches.has(matchKey)) {
               const optimalPickup = routeMatching.findOptimalPickupPoint(
                 passenger.pickupLocation,
@@ -371,6 +399,12 @@ const startEnhancedMatching = () => {
                   optimalPickup,
                   passenger.destinationLocation
                 ),
+                // ✅ ADDED: Route information for overlay
+                pickupName: passenger.pickupName || driver.pickupName || 'Unknown Location',
+                destinationName: passenger.destinationName || driver.destinationName || 'Unknown Destination',
+                pickupLocation: passenger.pickupLocation || driver.pickupLocation,
+                destinationLocation: passenger.destinationLocation || driver.destinationLocation,
+                
                 timestamp: new Date().toISOString(),
                 status: 'proposed',
                 notificationSent: false
@@ -389,6 +423,7 @@ const startEnhancedMatching = () => {
       
       console.log(`📈 Matching Stats: ${totalComparisons} comparisons, ${highQualityMatches.length} high-quality matches`);
       
+      // Save matches and create overlay triggers
       if (highQualityMatches.length > 0) {
         const batch = db.batch();
         
@@ -404,13 +439,14 @@ const startEnhancedMatching = () => {
         await batch.commit();
         console.log(`💾 Saved ${highQualityMatches.length} matches to Firestore`);
         
-        let notificationCount = 0;
+        // ✅ NEW: Create active matches for overlay display
+        let overlayCount = 0;
         for (const match of highQualityMatches) {
-          const success = await notificationService.sendMatchNotification(match);
-          if (success) notificationCount++;
+          const activeMatch = await createActiveMatchForOverlay(db, match);
+          if (activeMatch) overlayCount++;
         }
         
-        console.log(`📢 Notifications sent for ${notificationCount} matches`);
+        console.log(`📱 Overlay triggers created for ${overlayCount} matches`);
       } else {
         console.log('ℹ️  No high-quality matches found this cycle');
       }
@@ -418,11 +454,12 @@ const startEnhancedMatching = () => {
     } catch (error) {
       console.error('❌ Enhanced matching error:', error);
     }
-  }, 20000);
+  }, 20000); // Run every 20 seconds
 };
 
 // ========== BASIC ROUTES ==========
 
+// Health check endpoint
 app.get("/", (req, res) => {
   res.json({ 
     status: "🚀 ShareWay Backend is running!",
@@ -431,69 +468,103 @@ app.get("/", (req, res) => {
     firebase: "connected",
     cors: "enabled",
     matching: "enhanced_active",
-    notifications: "enabled"
+    overlay_system: "enabled",
+    features: ["route_matching", "deduplication", "quality_filtering", "match_overlay"],
+    allowed_origins: "localhost:* (Flutter Web), 127.0.0.1:*"
   });
 });
 
+// Health check with Firebase test
 app.get("/health", async (req, res) => {
   try {
     await db.collection('health_checks').doc('server').set({
       timestamp: admin.firestore.FieldValue.serverTimestamp(),
-      message: 'Health check ping'
+      message: 'Health check ping',
+      origin: req.headers.origin || 'direct'
     }, { merge: true });
 
     res.json({
       status: "healthy",
       timestamp: new Date().toISOString(),
       firebase: "connected",
+      database: "operational",
+      cors: "enabled",
       matching_service: "active",
-      notification_service: "active",
+      overlay_system: "active",
+      origin: req.headers.origin || 'No origin header',
       environment: process.env.NODE_ENV || 'development'
     });
   } catch (error) {
     res.status(503).json({
       status: "unhealthy",
+      timestamp: new Date().toISOString(),
+      firebase: "disconnected",
       error: error.message
     });
   }
 });
 
+// API info endpoint
 app.get("/api", (req, res) => {
   res.json({
     name: "ShareWay API",
-    version: "2.1.0",
+    version: "2.2.0",
     status: "operational",
     firebase: "connected",
+    cors: "enabled",
     matching: "enhanced_active",
-    notifications: "enabled",
+    overlay_system: "enabled",
     endpoints: {
       health: "GET /health",
       api_info: "GET /api",
+      cors_test: "GET /cors-test",
       
+      // Enhanced Matching endpoints
       matching: {
         search: "POST /api/match/search",
         potential: "GET /api/match/potential/:userId",
         proposals: "GET /api/match/proposals/:userId",
-        accept: "POST /api/match/accept"
+        accept: "POST /api/match/accept", 
+        reject: "POST /api/match/reject",
+        cancel: "POST /api/match/cancel",
+        // ✅ NEW: Overlay endpoints
+        decision: "POST /api/match/decision",
+        active_matches: "GET /api/match/active/:userId"
       },
       
-      notifications: {
-        list: "GET /api/notifications/:userId",
-        mark_read: "POST /api/notifications/:notificationId/read"
-      },
-      
+      // Driver endpoints
       driver: {
         start_search: "POST /api/driver/start-search",
         stop_search: "POST /api/driver/stop-search",
-        status: "GET /api/driver/status/:driverId"
+        status: "GET /api/driver/status/:driverId",
+        update_location: "POST /api/driver/update-location",
+        search_status: "GET /api/driver/search-status/:driverId"
       },
       
+      // Passenger endpoints
       passenger: {
         start_search: "POST /api/passenger/start-search",
         stop_search: "POST /api/passenger/stop-search",
         status: "GET /api/passenger/status/:passengerId"
+      },
+      
+      // Admin endpoints
+      admin: {
+        cleanup: "POST /api/admin/cleanup",
+        cleanup_matches: "POST /api/admin/cleanup-matches" // ✅ NEW
       }
     }
+  });
+});
+
+// CORS test endpoint
+app.get("/cors-test", (req, res) => {
+  res.json({
+    message: "CORS is working!",
+    your_origin: req.headers.origin || 'No origin header',
+    timestamp: new Date().toISOString(),
+    status: "success",
+    cors: "enabled"
   });
 });
 
@@ -560,7 +631,12 @@ app.post("/api/driver/start-search", async (req, res) => {
       message: 'Driver search started successfully',
       searchId: `driver_${driverId}_${Date.now()}`,
       driverId,
-      status: 'searching'
+      status: 'searching',
+      driverDetails: {
+        name: driverName || 'Unknown Driver',
+        phone: driverPhone,
+        photo: driverPhotoUrl ? 'Present' : 'Not provided'
+      }
     });
     
   } catch (error) {
@@ -626,6 +702,65 @@ app.get("/api/driver/status/:driverId", async (req, res) => {
   }
 });
 
+app.post("/api/driver/update-location", async (req, res) => {
+  try {
+    const { driverId, location, address } = req.body;
+    
+    console.log('📍 Updating driver location:', { driverId, location });
+    
+    await db.collection('active_drivers').doc(driverId).set({
+      currentLocation: location,
+      address: address,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+    
+    res.json({
+      success: true,
+      message: 'Driver location updated successfully',
+      driverId,
+      location,
+      address
+    });
+    
+  } catch (error) {
+    console.error('Error updating driver location:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+app.get("/api/driver/search-status/:driverId", async (req, res) => {
+  try {
+    const { driverId } = req.params;
+    
+    const driverDoc = await db.collection('active_drivers').doc(driverId).get();
+    
+    if (driverDoc.exists) {
+      const data = driverDoc.data();
+      res.json({
+        success: true,
+        isSearching: true,
+        searchData: data
+      });
+    } else {
+      res.json({
+        success: true,
+        isSearching: false,
+        message: 'Driver not in active search'
+      });
+    }
+    
+  } catch (error) {
+    console.error('Error getting driver search status:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
 // ========== PASSENGER ENDPOINTS ==========
 
 app.post("/api/passenger/start-search", async (req, res) => {
@@ -637,7 +772,9 @@ app.post("/api/passenger/start-search", async (req, res) => {
       destination, 
       passengerCount, 
       rideType,
-      routePoints
+      routePoints,
+      passengerPhone,
+      passengerPhotoUrl
     } = req.body;
     
     console.log('👤 Passenger starting search:', { 
@@ -651,6 +788,8 @@ app.post("/api/passenger/start-search", async (req, res) => {
     const searchData = {
       passengerId,
       passengerName: passengerName || 'Unknown Passenger',
+      passengerPhone: passengerPhone || '',
+      passengerPhotoUrl: passengerPhotoUrl || '',
       pickupLocation,
       destination,
       passengerCount,
@@ -897,24 +1036,33 @@ app.post("/api/match/search", async (req, res) => {
   }
 });
 
-// ========== NOTIFICATION ENDPOINTS ==========
+// ========== MATCH OVERLAY ENDPOINTS ==========
 
-app.get("/api/notifications/:userId", async (req, res) => {
+// ✅ NEW: Get active matches for overlay
+app.get("/api/match/active/:userId", async (req, res) => {
   try {
     const { userId } = req.params;
-    const { limit = 20 } = req.query;
     
-    const notifications = await notificationService.getUserNotifications(userId, parseInt(limit));
+    const activeMatchesSnapshot = await db.collection('active_matches')
+      .where('driverId', '==', userId)
+      .where('overlayTriggered', '==', true)
+      .orderBy('createdAt', 'desc')
+      .limit(10)
+      .get();
+    
+    const activeMatches = activeMatchesSnapshot.docs.map(doc => ({
+      matchId: doc.id,
+      ...doc.data()
+    }));
     
     res.json({
       success: true,
-      notifications,
-      count: notifications.length,
-      unreadCount: notifications.filter(n => !n.read).length
+      activeMatches,
+      count: activeMatches.length
     });
     
   } catch (error) {
-    console.error('Error getting notifications:', error);
+    console.error('Error getting active matches:', error);
     res.status(500).json({
       success: false,
       error: error.message
@@ -922,26 +1070,33 @@ app.get("/api/notifications/:userId", async (req, res) => {
   }
 });
 
-app.post("/api/notifications/:notificationId/read", async (req, res) => {
+// ✅ NEW: Handle match decision (accept/reject)
+app.post("/api/match/decision", async (req, res) => {
   try {
-    const { notificationId } = req.params;
+    const { matchId, decision, userId } = req.body;
     
-    const success = await notificationService.markNotificationAsRead(notificationId);
-    
-    if (success) {
-      res.json({
-        success: true,
-        message: 'Notification marked as read'
-      });
-    } else {
-      res.status(404).json({
+    if (!matchId || typeof decision === 'undefined' || !userId) {
+      return res.status(400).json({
         success: false,
-        error: 'Notification not found'
+        error: 'Missing required fields: matchId, decision, userId'
       });
     }
     
+    const result = await handleMatchDecision(db, matchId, decision, userId);
+    
+    if (result.success) {
+      res.json({
+        success: true,
+        message: `Match ${decision ? 'accepted' : 'rejected'} successfully`,
+        matchId,
+        status: result.status
+      });
+    } else {
+      res.status(400).json(result);
+    }
+    
   } catch (error) {
-    console.error('Error marking notification as read:', error);
+    console.error('Error handling match decision:', error);
     res.status(500).json({
       success: false,
       error: error.message
@@ -951,6 +1106,7 @@ app.post("/api/notifications/:notificationId/read", async (req, res) => {
 
 // ========== MATCH MANAGEMENT ENDPOINTS ==========
 
+// Get potential matches for a user
 app.get("/api/match/potential/:userId", async (req, res) => {
   try {
     const { userId } = req.params;
@@ -971,7 +1127,8 @@ app.get("/api/match/potential/:userId", async (req, res) => {
     res.json({
       success: true,
       matches,
-      count: matches.length
+      count: matches.length,
+      highQualityMatches: matches.filter(m => m.similarityScore > 0.7).length
     });
     
   } catch (error) {
@@ -983,6 +1140,7 @@ app.get("/api/match/potential/:userId", async (req, res) => {
   }
 });
 
+// Get match proposals for a user
 app.get("/api/match/proposals/:userId", async (req, res) => {
   try {
     const { userId } = req.params;
@@ -1015,6 +1173,7 @@ app.get("/api/match/proposals/:userId", async (req, res) => {
   }
 });
 
+// Accept a match
 app.post("/api/match/accept", async (req, res) => {
   try {
     const { matchId, userId } = req.body;
@@ -1030,18 +1189,39 @@ app.post("/api/match/accept", async (req, res) => {
     
     const matchData = matchDoc.data();
     
+    // Update match status
     await db.collection('potential_matches').doc(matchId).update({
       status: 'accepted',
       acceptedBy: userId,
       acceptedAt: admin.firestore.FieldValue.serverTimestamp()
     });
+
+    // ✅ NEW: Clean up active match for overlay
+    await db.collection('active_matches').doc(matchId).delete();
+    
+    // Remove users from active searches
+    await db.collection('active_searches')
+      .where('userId', 'in', [matchData.driverId, matchData.passengerId])
+      .get()
+      .then(snapshot => {
+        const batch = db.batch();
+        snapshot.docs.forEach(doc => {
+          batch.update(doc.ref, { status: 'matched' });
+        });
+        return batch.commit();
+      });
     
     console.log(`✅ Match ${matchId} accepted by ${userId}`);
     
     res.json({
       success: true,
       message: 'Match accepted successfully',
-      matchId
+      matchId,
+      matchData: {
+        ...matchData,
+        status: 'accepted',
+        acceptedBy: userId
+      }
     });
     
   } catch (error) {
@@ -1053,13 +1233,132 @@ app.post("/api/match/accept", async (req, res) => {
   }
 });
 
+// ========== ADMIN ENDPOINTS ==========
+
+// Cleanup endpoint to remove old searches
+app.post("/api/admin/cleanup", async (req, res) => {
+  try {
+    const cutoffTime = new Date(Date.now() - 30 * 60 * 1000); // 30 minutes ago
+    
+    const oldSearches = await db.collection('active_searches')
+      .where('createdAt', '<', cutoffTime)
+      .get();
+    
+    const batch = db.batch();
+    oldSearches.docs.forEach(doc => {
+      batch.delete(doc.ref);
+    });
+    
+    await batch.commit();
+    
+    console.log(`🧹 Cleaned up ${oldSearches.size} old searches`);
+    
+    res.json({
+      success: true,
+      cleaned: oldSearches.size,
+      message: `Cleaned up ${oldSearches.size} old searches`
+    });
+    
+  } catch (error) {
+    console.error('Error during cleanup:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// ✅ NEW: Cleanup expired matches
+app.post("/api/admin/cleanup-matches", async (req, res) => {
+  try {
+    await cleanupExpiredMatches(db);
+    
+    res.json({
+      success: true,
+      message: 'Expired matches cleanup completed'
+    });
+    
+  } catch (error) {
+    console.error('Error during matches cleanup:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Debug endpoint to test data reception
+app.post("/api/debug/test-receive", (req, res) => {
+  console.log('=== DEBUG ENDPOINT HIT ===');
+  console.log('📦 Headers:', req.headers);
+  console.log('📦 Full Request Body:', JSON.stringify(req.body, null, 2));
+  console.log('📦 Driver Name:', req.body?.driverName);
+  console.log('📦 Passenger Name:', req.body?.passengerName);
+  console.log('📦 Route Points:', req.body?.routePoints);
+  console.log('========================');
+  
+  res.json({ 
+    received: true,
+    body: req.body,
+    message: 'Data received successfully by backend'
+  });
+});
+
+// Load and mount routes (if they exist)
+console.log('🔄 Loading routes...');
+try {
+  try {
+    const matchRoutes = require("./routes/matching");
+    app.use("/api/match", matchRoutes);
+    console.log('✅ Matching routes loaded');
+  } catch (e) {
+    console.log('ℹ️  Matching routes not found, using built-in routes');
+  }
+  
+  try {
+    const userRoutes = require("./routes/user");
+    app.use("/api/user", userRoutes);
+    console.log('✅ User routes loaded');
+  } catch (e) {
+    console.log('ℹ️  User routes not found, using built-in routes');
+  }
+  
+  try {
+    const driverRoutes = require("./routes/driver");
+    app.use("/api/driver", driverRoutes);
+    console.log('✅ Driver routes loaded');
+  } catch (e) {
+    console.log('ℹ️  Driver routes not found, using built-in routes');
+  }
+  
+  try {
+    const passengerRoutes = require("./routes/passenger");
+    app.use("/api/passenger", passengerRoutes);
+    console.log('✅ Passenger routes loaded');
+  } catch (e) {
+    console.log('ℹ️  Passenger routes not found, using built-in routes');
+  }
+
+  console.log('✅ All routes loaded successfully');
+} catch (error) {
+  console.error('❌ Error loading routes:', error.message);
+}
+
 // Global error handling middleware
 app.use((error, req, res, next) => {
   console.error('🔥 Global Error Handler:', error);
-  res.status(500).json({
-    success: false,
-    error: error.message
-  });
+  
+  if (process.env.NODE_ENV === 'production') {
+    res.status(500).json({
+      success: false,
+      error: 'Internal Server Error'
+    });
+  } else {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
 });
 
 // 404 handler
@@ -1067,12 +1366,34 @@ app.use((req, res) => {
   res.status(404).json({
     success: false,
     error: 'Route not found',
-    path: req.originalUrl
+    path: req.originalUrl,
+    method: req.method,
+    available_endpoints: [
+      '/health',
+      '/api', 
+      '/cors-test',
+      '/api/driver/start-search',
+      '/api/driver/stop-search',
+      '/api/driver/status/:driverId',
+      '/api/driver/update-location',
+      '/api/passenger/start-search',
+      '/api/passenger/stop-search',
+      '/api/match/search',
+      '/api/match/potential/:userId',
+      '/api/match/proposals/:userId',
+      '/api/match/accept',
+      '/api/match/decision', // ✅ NEW
+      '/api/match/active/:userId', // ✅ NEW
+      '/api/admin/cleanup',
+      '/api/admin/cleanup-matches', // ✅ NEW
+      '/api/debug/test-receive'
+    ]
   });
 });
 
 const PORT = process.env.PORT || 3000;
 
+// Start server
 if (require.main === module) {
   const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`
@@ -1080,34 +1401,49 @@ if (require.main === module) {
 📍 Port: ${PORT}
 🌍 Environment: ${process.env.NODE_ENV || 'development'}
 🔥 Firebase: Connected
+🌐 CORS: Enabled for Flutter Web
 🔄 Enhanced Matching: ACTIVE
-📢 Notifications: ENABLED
+📱 Match Overlay: ENABLED
 📅 Started at: ${new Date().toISOString()}
 
 Enhanced Features:
-✅ Fixed CORS Configuration - No more PathError
-✅ Fixed Deduplication System - Using Map instead of Set
-✅ Quality Filtering - 0.5+ similarity scores  
-✅ Notification System - Real-time match alerts
+✅ Deduplication System - Prevents duplicate matches
+✅ Quality Filtering - 0.5+ similarity scores
+✅ Name Fallbacks - No more "undefined" in logs
+✅ Match Overlay System - Real-time overlay triggers
 ✅ Reduced Spam - Runs every 20 seconds
+
+Enhanced Endpoints:
+✅ POST /api/match/search - Enhanced route matching
+✅ GET /api/match/potential/:userId - Get quality matches  
+✅ GET /api/match/proposals/:userId - Get match proposals
+✅ POST /api/match/accept - Accept matches
+✅ POST /api/match/decision - Handle match decisions (NEW)
+✅ GET /api/match/active/:userId - Get active matches (NEW)
 
 🔄 Enhanced Matching Service: ACTIVE (runs every 20 seconds)
 🎯 Quality Threshold: 0.5+ similarity score
-🛡️  Deduplication: FIXED & WORKING
-📢 Notifications: ACTIVE
+🛡️  Deduplication: ENABLED
+📱 Overlay System: ACTIVE
 
-Ready for high-quality matching with notifications! 🎉
+Ready for high-quality matching with overlay system! 🎉
     `);
   });
 
   // Start the enhanced matching service
   startEnhancedMatching();
 
+  // Start periodic cleanup of expired matches
+  setInterval(() => {
+    cleanupExpiredMatches(db);
+  }, 5 * 60 * 1000); // Run every 5 minutes
+
   server.on('error', (error) => {
     console.error('❌ Server error:', error);
     process.exit(1);
   });
 
+  // Graceful shutdown
   process.on('SIGINT', () => {
     console.log('\n🛑 Shutting down server gracefully...');
     server.close(() => {
@@ -1117,4 +1453,5 @@ Ready for high-quality matching with notifications! 🎉
   });
 }
 
+// Export for testing
 module.exports = { app, db, admin };
