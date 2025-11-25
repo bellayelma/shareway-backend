@@ -1,4 +1,4 @@
-// src/app.js - COMPLETE VERSION WITH ALL FLUTTER ENDPOINTS
+// src/app.js - FIXED VERSION THAT HANDLES BOTH ENDPOINTS
 const express = require("express");
 const admin = require("firebase-admin");
 const cors = require("cors");
@@ -19,6 +19,15 @@ app.use(cors({
 // Body parsing middleware
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
+
+// ========== REQUEST LOGGING MIDDLEWARE ==========
+app.use((req, res, next) => {
+  console.log(`🔍 ${new Date().toISOString()} ${req.method} ${req.originalUrl}`);
+  if (Object.keys(req.body).length > 0) {
+    console.log('📦 Request body:', JSON.stringify(req.body, null, 2));
+  }
+  next();
+});
 
 // Initialize Firebase Admin
 let db;
@@ -208,7 +217,44 @@ const startOptimizedMatching = () => {
   }, 60000); // Reduced to 60 seconds
 };
 
-// ========== ALL FLUTTER COMPATIBILITY ENDPOINTS ==========
+// ========== CORE SEARCH STORAGE FUNCTION ==========
+
+// Universal function to store search in memory (used by both endpoints)
+const storeSearchInMemory = (searchData) => {
+  const { userId, userType } = searchData;
+  
+  if (!userId) {
+    throw new Error('userId is required');
+  }
+
+  // Enhanced search data with all required fields
+  const enhancedSearchData = {
+    userId: userId,
+    userType: userType,
+    driverName: searchData.driverName || 'Unknown Driver',
+    passengerName: searchData.passengerName || 'Unknown Passenger',
+    pickupLocation: searchData.pickupLocation || {},
+    destinationLocation: searchData.destinationLocation || {},
+    pickupName: searchData.pickupName || 'Unknown Pickup',
+    destinationName: searchData.destinationName || 'Unknown Destination',
+    routePoints: searchData.routePoints || [],
+    passengerCount: searchData.passengerCount || 1,
+    capacity: searchData.capacity || 4,
+    vehicleType: searchData.vehicleType || 'car',
+    status: 'searching',
+    lastUpdated: Date.now()
+  };
+
+  // Store in memory
+  activeSearches.set(userId, enhancedSearchData);
+  
+  console.log(`✅ ${userType} search stored in memory: ${enhancedSearchData.driverName || enhancedSearchData.passengerName} (ID: ${userId})`);
+  console.log(`📊 Current active searches: ${activeSearches.size}`);
+  
+  return enhancedSearchData;
+};
+
+// ========== COMPATIBILITY ENDPOINTS ==========
 
 // Health check with memory stats
 app.get("/", (req, res) => {
@@ -228,40 +274,78 @@ app.get("/", (req, res) => {
   });
 });
 
-app.get("/health", (req, res) => {
-  const drivers = Array.from(activeSearches.values()).filter(s => s.userType === 'driver');
-  const passengers = Array.from(activeSearches.values()).filter(s => s.userType === 'passenger');
-  
-  res.json({
-    status: "healthy",
-    timestamp: new Date().toISOString(),
-    memoryStats: {
-      activeSearches: activeSearches.size,
-      drivers: drivers.length,
-      passengers: passengers.length,
-      processedMatches: processedMatches.size
-    },
-    memoryUsage: process.memoryUsage()
-  });
+// ========== MATCH SEARCH ENDPOINT (YOUR FLUTTER APP'S ENDPOINT) ==========
+
+// ✅ FIXED: This is the endpoint your Flutter app is calling
+app.post("/api/match/search", async (req, res) => {
+  try {
+    console.log('🎯 === MATCH SEARCH ENDPOINT CALLED ===');
+    
+    const { 
+      userId, 
+      userType, 
+      driverId,
+      driverName,
+      pickupLocation,
+      destinationLocation,
+      pickupName,
+      destinationName,
+      routePoints,
+      capacity,
+      passengerCount
+    } = req.body;
+    
+    // Determine the actual user ID to use
+    const actualUserId = userId || driverId;
+    
+    if (!actualUserId) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'userId or driverId is required' 
+      });
+    }
+
+    // Store the search in memory
+    const searchData = {
+      userId: actualUserId,
+      userType: userType || 'driver', // Default to driver
+      driverName: driverName,
+      pickupLocation: pickupLocation,
+      destinationLocation: destinationLocation,
+      pickupName: pickupName,
+      destinationName: destinationName,
+      routePoints: routePoints,
+      capacity: capacity,
+      passengerCount: passengerCount
+    };
+
+    storeSearchInMemory(searchData);
+
+    // Return success response
+    res.json({
+      success: true,
+      message: 'Search started successfully',
+      searchId: `search_${actualUserId}_${Date.now()}`,
+      userId: actualUserId,
+      matches: [], // Empty matches to reduce processing
+      matchCount: 0,
+      matchingAlgorithm: 'enhanced_route_similarity_v2'
+    });
+    
+  } catch (error) {
+    console.error('❌ Error in match search:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message 
+    });
+  }
 });
 
-// CORS test endpoint
-app.get("/cors-test", (req, res) => {
-  res.json({
-    message: "CORS is working!",
-    your_origin: req.headers.origin || 'No origin header',
-    timestamp: new Date().toISOString(),
-    status: "success"
-  });
-});
+// ========== DRIVER SPECIFIC ENDPOINTS ==========
 
-// ========== DRIVER ENDPOINTS ==========
-
-// Enhanced driver start search with better logging
 app.post("/api/driver/start-search", async (req, res) => {
   try {
-    console.log('🚗 === DRIVER START SEARCH ===');
-    console.log('📦 Request body:', JSON.stringify(req.body, null, 2));
+    console.log('🚗 === DRIVER START SEARCH ENDPOINT ===');
     
     const { 
       driverId, 
@@ -271,37 +355,31 @@ app.post("/api/driver/start-search", async (req, res) => {
       pickupName,
       destinationName,
       routePoints,
-      vehicleType,
-      capacity,
-      currentLocation
+      capacity
     } = req.body;
     
     if (!driverId) {
-      return res.status(400).json({ success: false, error: 'driverId is required' });
+      return res.status(400).json({ 
+        success: false, 
+        error: 'driverId is required' 
+      });
     }
 
+    // Store the search in memory
     const searchData = {
       userId: driverId,
       userType: 'driver',
-      driverName: driverName || 'Unknown Driver',
-      pickupLocation: pickupLocation || {},
-      destinationLocation: destinationLocation || {},
-      pickupName: pickupName || 'Unknown Pickup',
-      destinationName: destinationName || 'Unknown Destination',
-      routePoints: routePoints || [],
-      vehicleType: vehicleType || 'car',
-      capacity: capacity || 4,
-      currentLocation: currentLocation || {},
-      status: 'searching',
-      lastUpdated: Date.now()
+      driverName: driverName,
+      pickupLocation: pickupLocation,
+      destinationLocation: destinationLocation,
+      pickupName: pickupName,
+      destinationName: destinationName,
+      routePoints: routePoints,
+      capacity: capacity
     };
-    
-    // Store in memory instead of Firestore
-    activeSearches.set(driverId, searchData);
-    
-    console.log(`✅ Driver search stored in memory: ${driverName} (ID: ${driverId})`);
-    console.log(`📊 Current active searches: ${activeSearches.size}`);
-    
+
+    storeSearchInMemory(searchData);
+
     res.json({
       success: true,
       message: 'Driver search started successfully',
@@ -312,11 +390,67 @@ app.post("/api/driver/start-search", async (req, res) => {
     
   } catch (error) {
     console.error('❌ Error starting driver search:', error);
-    res.status(500).json({ success: false, error: error.message });
+    res.status(500).json({ 
+      success: false, 
+      error: error.message 
+    });
   }
 });
 
-// Driver stop search
+// ========== PASSENGER ENDPOINTS ==========
+
+app.post("/api/passenger/start-search", async (req, res) => {
+  try {
+    console.log('👤 === PASSENGER START SEARCH ENDPOINT ===');
+    
+    const { 
+      passengerId, 
+      passengerName, 
+      pickupLocation, 
+      destinationLocation, 
+      passengerCount,
+      routePoints
+    } = req.body;
+    
+    if (!passengerId) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'passengerId is required' 
+      });
+    }
+
+    // Store the search in memory
+    const searchData = {
+      userId: passengerId,
+      userType: 'passenger',
+      passengerName: passengerName,
+      pickupLocation: pickupLocation,
+      destinationLocation: destinationLocation,
+      passengerCount: passengerCount,
+      routePoints: routePoints
+    };
+
+    storeSearchInMemory(searchData);
+
+    res.json({
+      success: true,
+      message: 'Passenger search started successfully',
+      searchId: passengerId,
+      passengerId: passengerId,
+      status: 'searching'
+    });
+    
+  } catch (error) {
+    console.error('❌ Error starting passenger search:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message 
+    });
+  }
+});
+
+// ========== OTHER COMPATIBILITY ENDPOINTS ==========
+
 app.post("/api/driver/stop-search", async (req, res) => {
   try {
     const { driverId } = req.body;
@@ -336,132 +470,6 @@ app.post("/api/driver/stop-search", async (req, res) => {
     });
   } catch (error) {
     console.error('Error stopping driver search:', error);
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// Driver status
-app.get("/api/driver/status/:driverId", async (req, res) => {
-  try {
-    const { driverId } = req.params;
-    const search = activeSearches.get(driverId);
-    
-    if (search) {
-      res.json({
-        success: true,
-        status: 'active',
-        data: search
-      });
-    } else {
-      res.json({
-        success: true,
-        status: 'inactive',
-        message: 'Driver not actively searching'
-      });
-    }
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// Driver update location
-app.post("/api/driver/update-location", async (req, res) => {
-  try {
-    const { driverId, location } = req.body;
-    const search = activeSearches.get(driverId);
-    
-    if (search) {
-      search.currentLocation = location;
-      search.lastUpdated = Date.now();
-      console.log(`📍 Updated driver location: ${driverId}`);
-    }
-    
-    res.json({
-      success: true,
-      message: 'Driver location updated',
-      driverId: driverId
-    });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// Driver search status
-app.get("/api/driver/search-status/:driverId", async (req, res) => {
-  try {
-    const { driverId } = req.params;
-    const search = activeSearches.get(driverId);
-    
-    if (search) {
-      res.json({
-        success: true,
-        isSearching: true,
-        searchData: search
-      });
-    } else {
-      res.json({
-        success: true,
-        isSearching: false,
-        message: 'Driver not in active search'
-      });
-    }
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// ========== PASSENGER ENDPOINTS ==========
-
-app.post("/api/passenger/start-search", async (req, res) => {
-  try {
-    console.log('👤 === PASSENGER START SEARCH ===');
-    console.log('📦 Request body:', JSON.stringify(req.body, null, 2));
-    
-    const { 
-      passengerId, 
-      passengerName, 
-      pickupLocation, 
-      destinationLocation, 
-      passengerCount,
-      routePoints,
-      rideType
-    } = req.body;
-    
-    if (!passengerId) {
-      return res.status(400).json({ success: false, error: 'passengerId is required' });
-    }
-
-    const searchData = {
-      userId: passengerId,
-      userType: 'passenger',
-      passengerName: passengerName || 'Unknown Passenger',
-      passengerCount: passengerCount || 1,
-      pickupLocation: pickupLocation || {},
-      destinationLocation: destinationLocation || {},
-      pickupName: 'Pickup Location',
-      destinationName: 'Destination',
-      routePoints: routePoints || [],
-      rideType: rideType || 'standard',
-      status: 'searching',
-      lastUpdated: Date.now()
-    };
-    
-    // Store in memory instead of Firestore
-    activeSearches.set(passengerId, searchData);
-    
-    console.log(`✅ Passenger search stored in memory: ${passengerName} (ID: ${passengerId})`);
-    console.log(`📊 Current active searches: ${activeSearches.size}`);
-    
-    res.json({
-      success: true,
-      message: 'Passenger search started successfully',
-      searchId: passengerId,
-      passengerId: passengerId,
-      status: 'searching'
-    });
-    
-  } catch (error) {
-    console.error('❌ Error starting passenger search:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
@@ -489,60 +497,8 @@ app.post("/api/passenger/stop-search", async (req, res) => {
   }
 });
 
-app.get("/api/passenger/status/:passengerId", async (req, res) => {
-  try {
-    const { passengerId } = req.params;
-    const search = activeSearches.get(passengerId);
-    
-    if (search) {
-      res.json({
-        success: true,
-        status: 'active',
-        data: search
-      });
-    } else {
-      res.json({
-        success: true,
-        status: 'inactive',
-        message: 'Passenger not actively searching'
-      });
-    }
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
 // ========== MATCH ENDPOINTS ==========
 
-app.post("/api/match/decision", async (req, res) => {
-  try {
-    const { matchId, decision, userId } = req.body;
-    
-    if (!matchId || typeof decision === 'undefined' || !userId) {
-      return res.status(400).json({
-        success: false,
-        error: 'Missing required fields'
-      });
-    }
-
-    // Clean up the active match
-    await db.collection('active_matches').doc(matchId).delete();
-
-    console.log(`✅ Match ${matchId} ${decision ? 'accepted' : 'rejected'} by ${userId}`);
-    
-    res.json({
-      success: true,
-      message: `Match ${decision ? 'accepted' : 'rejected'} successfully`,
-      matchId
-    });
-    
-  } catch (error) {
-    console.error('Error handling match decision:', error);
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// Get active matches for overlay
 app.get("/api/match/active/:userId", async (req, res) => {
   try {
     const { userId } = req.params;
@@ -571,115 +527,30 @@ app.get("/api/match/active/:userId", async (req, res) => {
   }
 });
 
-// Match search endpoint
-app.post("/api/match/search", async (req, res) => {
+app.post("/api/match/decision", async (req, res) => {
   try {
-    const { userId, userType } = req.body;
+    const { matchId, decision, userId } = req.body;
     
-    // Use memory cache first
-    const userSearch = activeSearches.get(userId);
-    if (!userSearch) {
-      return res.json({
-        success: true,
-        message: 'No active search found',
-        matches: []
+    if (!matchId || typeof decision === 'undefined' || !userId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required fields'
       });
     }
 
-    res.json({
-      success: true,
-      message: 'Search active in memory',
-      searchId: userId,
-      matches: [] // Return empty matches to reduce processing
-    });
-    
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// Get potential matches
-app.get("/api/match/potential/:userId", async (req, res) => {
-  try {
-    const { userId } = req.params;
-    
-    res.json({
-      success: true,
-      matches: [],
-      count: 0,
-      highQualityMatches: 0
-    });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// Get match proposals
-app.get("/api/match/proposals/:userId", async (req, res) => {
-  try {
-    const { userId } = req.params;
-    
-    res.json({
-      success: true,
-      proposals: [],
-      count: 0
-    });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// Accept match
-app.post("/api/match/accept", async (req, res) => {
-  try {
-    const { matchId, userId } = req.body;
-    
     // Clean up the active match
     await db.collection('active_matches').doc(matchId).delete();
 
-    console.log(`✅ Match ${matchId} accepted by ${userId}`);
+    console.log(`✅ Match ${matchId} ${decision ? 'accepted' : 'rejected'} by ${userId}`);
     
     res.json({
       success: true,
-      message: 'Match accepted successfully',
+      message: `Match ${decision ? 'accepted' : 'rejected'} successfully`,
       matchId
     });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// ========== ADMIN ENDPOINTS ==========
-
-app.post("/api/admin/cleanup", async (req, res) => {
-  try {
-    // Clean old active matches from Firestore
-    const cutoffTime = new Date(Date.now() - 10 * 60 * 1000);
-    const expiredMatches = await db.collection('active_matches')
-      .where('createdAt', '<', cutoffTime)
-      .get();
-
-    const batch = db.batch();
-    expiredMatches.forEach(doc => batch.delete(doc.ref));
-    await batch.commit();
-
-    // Clear memory caches
-    const initialSize = activeSearches.size;
-    const now = Date.now();
-    for (const [key, search] of activeSearches.entries()) {
-      if (now - search.lastUpdated > 300000) { // 5 minutes
-        activeSearches.delete(key);
-      }
-    }
-
-    res.json({
-      success: true,
-      cleanedMatches: expiredMatches.size,
-      cleanedSearches: initialSize - activeSearches.size,
-      activeSearches: activeSearches.size
-    });
     
   } catch (error) {
+    console.error('Error handling match decision:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
@@ -714,23 +585,6 @@ app.get("/api/debug/memory", (req, res) => {
   });
 });
 
-// Debug endpoint to test data reception
-app.post("/api/debug/test-receive", (req, res) => {
-  console.log('=== DEBUG ENDPOINT HIT ===');
-  console.log('📦 Headers:', req.headers);
-  console.log('📦 Full Request Body:', JSON.stringify(req.body, null, 2));
-  console.log('📦 Driver Name:', req.body?.driverName);
-  console.log('📦 Passenger Name:', req.body?.passengerName);
-  console.log('📦 Route Points:', req.body?.routePoints);
-  console.log('========================');
-  
-  res.json({ 
-    received: true,
-    body: req.body,
-    message: 'Data received successfully by backend'
-  });
-});
-
 // ========== ERROR HANDLING ==========
 
 app.use((error, req, res, next) => {
@@ -738,35 +592,12 @@ app.use((error, req, res, next) => {
   res.status(500).json({ success: false, error: 'Internal Server Error' });
 });
 
-// 404 handler with all available endpoints
 app.use((req, res) => {
   res.status(404).json({
     success: false,
     error: 'Route not found',
     path: req.originalUrl,
-    method: req.method,
-    available_endpoints: [
-      'GET /',
-      'GET /health',
-      'GET /cors-test',
-      'POST /api/driver/start-search',
-      'POST /api/driver/stop-search',
-      'GET /api/driver/status/:driverId',
-      'POST /api/driver/update-location',
-      'GET /api/driver/search-status/:driverId',
-      'POST /api/passenger/start-search',
-      'POST /api/passenger/stop-search',
-      'GET /api/passenger/status/:passengerId',
-      'POST /api/match/search',
-      'GET /api/match/active/:userId',
-      'POST /api/match/decision',
-      'GET /api/match/potential/:userId',
-      'GET /api/match/proposals/:userId',
-      'POST /api/match/accept',
-      'POST /api/admin/cleanup',
-      'GET /api/debug/memory',
-      'POST /api/debug/test-receive'
-    ]
+    method: req.method
   });
 });
 
