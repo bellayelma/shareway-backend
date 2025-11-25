@@ -1,7 +1,180 @@
 // utils/routeMatching.js
 const admin = require('firebase-admin');
 
-// Calculate route similarity with enhanced algorithm - UPDATED
+// Duplicate prevention cache
+const matchCooldown = new Map();
+const COOLDOWN_PERIOD = 2 * 60 * 1000; // 2 minutes cooldown
+
+// Check for existing matches to prevent duplicates
+const checkExistingMatch = async (db, driverId, passengerId, maxAgeMinutes = 5) => {
+  try {
+    const now = admin.firestore.Timestamp.now();
+    const cutoffTime = new Date(now.toDate().getTime() - maxAgeMinutes * 60 * 1000);
+    
+    const existingMatches = await db.collection('potential_matches')
+      .where('driverId', '==', driverId)
+      .where('passengerId', '==', passengerId)
+      .where('createdAt', '>', cutoffTime)
+      .where('status', 'in', ['proposed', 'pending', 'accepted'])
+      .limit(1)
+      .get();
+    
+    return !existingMatches.empty;
+  } catch (error) {
+    console.error('❌ Error checking existing matches:', error);
+    return false;
+  }
+};
+
+// Check if match should be throttled
+const shouldThrottleMatch = (driverId, passengerId) => {
+  const key = `${driverId}_${passengerId}`;
+  const now = Date.now();
+  const lastMatchTime = matchCooldown.get(key);
+  
+  if (lastMatchTime && (now - lastMatchTime) < COOLDOWN_PERIOD) {
+    return true;
+  }
+  
+  // Update the cooldown timestamp
+  matchCooldown.set(key, now);
+  
+  // Clean up old entries periodically
+  if (matchCooldown.size > 1000) {
+    for (const [key, timestamp] of matchCooldown.entries()) {
+      if (now - timestamp > COOLDOWN_PERIOD * 2) {
+        matchCooldown.delete(key);
+      }
+    }
+  }
+  
+  return false;
+};
+
+// Enhanced matching function with duplicate prevention
+const createMatchIfNotExists = async (db, driverData, passengerData, similarityScore, matchQuality) => {
+  try {
+    const driverId = driverData.driverId || driverData.id;
+    const passengerId = passengerData.passengerId || passengerData.id;
+    
+    if (!driverId || !passengerId) {
+      console.error('❌ Missing driverId or passengerId');
+      return null;
+    }
+
+    // Check cooldown first (in-memory cache for performance)
+    if (shouldThrottleMatch(driverId, passengerId)) {
+      console.log(`⏸️ Match throttled: ${driverId} + ${passengerId}`);
+      return null;
+    }
+
+    // Check Firestore for existing matches
+    const existingMatch = await checkExistingMatch(db, driverId, passengerId);
+    if (existingMatch) {
+      console.log(`⏸️ Existing match found: ${driverId} + ${passengerId}`);
+      return null;
+    }
+
+    // Create new match
+    const timestamp = Date.now();
+    const matchId = `match_${driverId}_${passengerId}_${timestamp}`;
+    
+    const optimalPickup = findOptimalPickupPoint(
+      passengerData.pickupLocation, 
+      driverData.routePoints
+    );
+    
+    const detourDistance = calculateDetourDistance(
+      driverData.routePoints,
+      optimalPickup,
+      passengerData.destination
+    );
+
+    const matchData = {
+      matchId,
+      driverId,
+      driverName: driverData.driverName || driverData.name || 'Unknown Driver',
+      passengerId,
+      passengerName: passengerData.passengerName || passengerData.name || 'Unknown Passenger',
+      similarityScore: Math.round(similarityScore * 100) / 100,
+      matchQuality,
+      status: 'proposed',
+      detourDistance,
+      optimalPickupPoint: optimalPickup,
+      timestamp: new Date(timestamp).toISOString(),
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      notificationSent: false,
+      notifiedAt: null
+    };
+
+    await db.collection('potential_matches').doc(matchId).set(matchData);
+    console.log(`✅ Created new match: ${matchId} (score: ${similarityScore.toFixed(2)})`);
+    
+    return matchData;
+    
+  } catch (error) {
+    console.error('❌ Error creating match:', error);
+    return null;
+  }
+};
+
+// Main matching function with duplicate prevention
+const performIntelligentMatching = async (db, driver, passenger, options = {}) => {
+  try {
+    const {
+      similarityThreshold = 0.3,
+      maxDetourDistance = 5.0,
+      checkCapacity = true
+    } = options;
+
+    // Basic validation
+    if (!driver || !passenger) {
+      console.log('❌ Missing driver or passenger data');
+      return null;
+    }
+
+    if (!driver.routePoints || !passenger.routePoints) {
+      console.log('❌ Missing route points');
+      return null;
+    }
+
+    // Check capacity
+    if (checkCapacity && !hasCapacity(driver, passenger.passengerCount || 1)) {
+      console.log(`❌ No capacity: ${driver.driverId}`);
+      return null;
+    }
+
+    // Calculate similarity
+    const similarityScore = calculateRouteSimilarity(
+      passenger.routePoints, 
+      driver.routePoints,
+      { maxDistanceThreshold: maxDetourDistance }
+    );
+
+    if (similarityScore < similarityThreshold) {
+      console.log(`📉 Low similarity: ${similarityScore.toFixed(2)} for ${driver.driverId}`);
+      return null;
+    }
+
+    // Determine match quality
+    let matchQuality = 'fair';
+    if (similarityScore >= 0.7) matchQuality = 'excellent';
+    else if (similarityScore >= 0.5) matchQuality = 'good';
+    else if (similarityScore >= 0.3) matchQuality = 'fair';
+
+    // Create match with duplicate prevention
+    const match = await createMatchIfNotExists(db, driver, passenger, similarityScore, matchQuality);
+    
+    return match;
+
+  } catch (error) {
+    console.error('❌ Error in intelligent matching:', error);
+    return null;
+  }
+};
+
+// Calculate route similarity with enhanced algorithm
 const calculateRouteSimilarity = (passengerRoute, driverRoute, options = {}) => {
   try {
     if (!passengerRoute || !driverRoute || !Array.isArray(passengerRoute) || !Array.isArray(driverRoute)) {
@@ -182,7 +355,7 @@ const calculateEndpointSimilarity = (passengerRoute, driverRoute, maxDistanceThr
   }
 };
 
-// Enhanced location along route check - UPDATED
+// Enhanced location along route check
 const isLocationAlongRoute = (location, routePoints, maxDistance = 0.5, options = {}) => {
   try {
     if (!location || !routePoints || !Array.isArray(routePoints)) return false;
@@ -308,7 +481,7 @@ const calculateDistance = (point1, point2) => {
   }
 };
 
-// Enhanced route hash generation - UPDATED
+// Enhanced route hash generation
 const generateRouteHash = (pickup, destination, precision = 3) => {
   try {
     if (!pickup || !destination) return 'invalid_route';
@@ -333,7 +506,7 @@ const generateRouteHash = (pickup, destination, precision = 3) => {
   }
 };
 
-// Enhanced capacity check - UPDATED for new data structure
+// Enhanced capacity check
 const hasCapacity = (driverData, passengerCount) => {
   try {
     if (!driverData) return false;
@@ -350,7 +523,7 @@ const hasCapacity = (driverData, passengerCount) => {
   }
 };
 
-// Enhanced driver capacity update - UPDATED for new collections
+// Enhanced driver capacity update
 const updateDriverCapacity = async (db, driverId, passengerCount, operation = 'add') => {
   try {
     // Update active_searches collection
@@ -412,7 +585,7 @@ const updateDriverCapacity = async (db, driverId, passengerCount, operation = 'a
   }
 };
 
-// New: Calculate optimal pickup point along driver's route
+// Calculate optimal pickup point along driver's route
 const findOptimalPickupPoint = (passengerLocation, driverRoute, maxWalkDistance = 0.5) => {
   try {
     if (!driverRoute || driverRoute.length < 2) return passengerLocation;
@@ -475,7 +648,7 @@ const findClosestPointOnSegment = (point, segmentStart, segmentEnd) => {
   }
 };
 
-// New: Calculate detour distance for driver
+// Calculate detour distance for driver
 const calculateDetourDistance = (driverRoute, pickupPoint, dropoffPoint) => {
   try {
     if (!driverRoute || driverRoute.length < 2) return 0;
@@ -508,9 +681,6 @@ const calculateRouteDistance = (route) => {
 
 // Insert pickup and dropoff points into driver's route
 const insertPointsInRoute = (originalRoute, pickupPoint, dropoffPoint) => {
-  // This is a simplified implementation
-  // In a real system, you'd use proper routing algorithms
-  
   const pickupIndex = findBestInsertionIndex(originalRoute, pickupPoint);
   const dropoffIndex = findBestInsertionIndex(originalRoute, dropoffPoint);
   
@@ -547,18 +717,55 @@ const findBestInsertionIndex = (route, point) => {
   return bestIndex;
 };
 
+// Cleanup function for old matches
+const cleanupOldMatches = async (db, olderThanMinutes = 30) => {
+  try {
+    const cutoffTime = new Date(Date.now() - olderThanMinutes * 60 * 1000);
+    const oldMatches = await db.collection('potential_matches')
+      .where('createdAt', '<', cutoffTime)
+      .where('status', 'in', ['proposed', 'pending'])
+      .get();
+
+    const batch = db.batch();
+    oldMatches.forEach(doc => {
+      batch.delete(doc.ref);
+    });
+
+    await batch.commit();
+    console.log(`🧹 Cleaned up ${oldMatches.size} old matches`);
+  } catch (error) {
+    console.error('❌ Error cleaning up old matches:', error);
+  }
+};
+
 module.exports = {
+  // Core matching functions
+  performIntelligentMatching,
+  createMatchIfNotExists,
+  checkExistingMatch,
+  shouldThrottleMatch,
+  
+  // Route calculation functions
   calculateRouteSimilarity,
   isLocationAlongRoute,
   generateRouteHash,
   calculateDistance,
+  
+  // Capacity functions
   hasCapacity,
   updateDriverCapacity,
+  
+  // Route optimization functions
   findOptimalPickupPoint,
   calculateDetourDistance,
   calculateRouteDistance,
+  
+  // Similarity components
   calculateDirectSimilarity,
   calculateHausdorffSimilarity,
   calculateBoundingBoxSimilarity,
-  calculateEndpointSimilarity
+  calculateEndpointSimilarity,
+  
+  // Maintenance
+  cleanupOldMatches
 };
