@@ -268,7 +268,8 @@ const cleanupExpiredMatches = async (db) => {
 
 // ========== DEDUPLICATION SYSTEM ==========
 
-const processedMatches = new Set();
+// ✅ FIXED: Use Map instead of Set to store timestamps
+const processedMatches = new Map();
 const MAX_MATCH_AGE = 300000; // 5 minutes
 
 // Clean old matches from tracking
@@ -284,6 +285,43 @@ setInterval(() => {
 // Generate match key for deduplication
 const generateMatchKey = (driverId, passengerId, similarity) => {
   return `${driverId}_${passengerId}_${Math.round(similarity * 1000)}`;
+};
+
+// ✅ NEW: Check if match already exists in Firestore
+const checkExistingMatchInFirestore = async (db, driverId, passengerId) => {
+  try {
+    const matchesSnapshot = await db.collection('potential_matches')
+      .where('driverId', '==', driverId)
+      .where('passengerId', '==', passengerId)
+      .where('status', '==', 'proposed')
+      .limit(1)
+      .get();
+    
+    return !matchesSnapshot.empty ? {
+      matchId: matchesSnapshot.docs[0].id,
+      ...matchesSnapshot.docs[0].data()
+    } : null;
+  } catch (error) {
+    console.error('Error checking existing match:', error);
+    return null;
+  }
+};
+
+// ✅ NEW: Check if active match already exists for overlay
+const checkActiveMatchInFirestore = async (db, driverId, passengerId) => {
+  try {
+    const activeMatchesSnapshot = await db.collection('active_matches')
+      .where('driverId', '==', driverId)
+      .where('passengerId', '==', passengerId)
+      .where('overlayTriggered', '==', true)
+      .limit(1)
+      .get();
+    
+    return !activeMatchesSnapshot.empty;
+  } catch (error) {
+    console.error('Error checking active match:', error);
+    return false;
+  }
 };
 
 // ========== ENHANCED MATCHING SERVICE WITH OVERLAY SUPPORT ==========
@@ -339,7 +377,7 @@ const startEnhancedMatching = () => {
       const highQualityMatches = [];
       let totalComparisons = 0;
       
-      // Enhanced matching with quality filtering
+      // ✅ FIXED: Enhanced matching with proper duplicate handling
       for (const driver of drivers) {
         for (const passenger of passengers) {
           totalComparisons++;
@@ -373,11 +411,13 @@ const startEnhancedMatching = () => {
           console.log(`🔍 ${driverName} ↔ ${passengerName}: Score=${similarity.toFixed(3)}, Seats=${hasSeats}`);
           
           // Only consider high-quality matches
-          if (similarity > 0.5) { // Lowered threshold to get more matches for testing
+          if (similarity > 0.5) {
             const matchKey = generateMatchKey(driver.driverId, passenger.passengerId, similarity);
             
-            // Check if this match was recently processed
-            if (!processedMatches.has(matchKey)) {
+            // ✅ FIXED: Check if this exact match already exists in Firestore
+            const existingMatch = await checkExistingMatchInFirestore(db, driver.driverId, passenger.passengerId);
+            
+            if (!existingMatch) {
               const optimalPickup = routeMatching.findOptimalPickupPoint(
                 passenger.pickupLocation,
                 driver.routePoints
@@ -399,7 +439,7 @@ const startEnhancedMatching = () => {
                   optimalPickup,
                   passenger.destinationLocation
                 ),
-                // ✅ ADDED: Route information for overlay
+                // Route information for overlay
                 pickupName: passenger.pickupName || driver.pickupName || 'Unknown Location',
                 destinationName: passenger.destinationName || driver.destinationName || 'Unknown Destination',
                 pickupLocation: passenger.pickupLocation || driver.pickupLocation,
@@ -411,11 +451,37 @@ const startEnhancedMatching = () => {
               };
               
               highQualityMatches.push(matchData);
+              // ✅ FIXED: Use .set() for Map (not .add() for Set)
               processedMatches.set(matchKey, Date.now());
               
               console.log(`✅ HIGH-QUALITY MATCH: ${driverName} ↔ ${passengerName} (Score: ${similarity.toFixed(3)})`);
             } else {
-              console.log(`🔄 Skipping duplicate match: ${driverName} ↔ ${passengerName}`);
+              console.log(`🔄 Skipping existing Firestore match: ${driverName} ↔ ${passengerName}`);
+              
+              // ✅ FIXED: But STILL create active match for overlay if it doesn't exist
+              const activeMatchExists = await checkActiveMatchInFirestore(db, driver.driverId, passenger.passengerId);
+              if (!activeMatchExists) {
+                console.log(`📱 Creating overlay for existing match: ${driverName} ↔ ${passengerName}`);
+                
+                const overlayMatchData = {
+                  matchId: existingMatch.matchId,
+                  driverId: driver.driverId,
+                  driverName: driverName,
+                  passengerId: passenger.passengerId,
+                  passengerName: passengerName,
+                  similarityScore: similarity,
+                  matchQuality: similarity > 0.7 ? 'excellent' : 'good',
+                  pickupName: passenger.pickupName || driver.pickupName || 'Unknown Location',
+                  destinationName: passenger.destinationName || driver.destinationName || 'Unknown Destination',
+                  pickupLocation: passenger.pickupLocation || driver.pickupLocation,
+                  destinationLocation: passenger.destinationLocation || driver.destinationLocation,
+                  overlayTriggered: true,
+                  processedAt: null,
+                  createdAt: admin.firestore.FieldValue.serverTimestamp()
+                };
+                
+                await createActiveMatchForOverlay(db, overlayMatchData);
+              }
             }
           }
         }
