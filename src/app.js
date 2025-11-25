@@ -1,4 +1,4 @@
-// src/app.js - MINIMIZED FIRESTORE USAGE VERSION
+// src/app.js - FIXED VERSION WITH COMPATIBILITY ENDPOINTS
 const express = require("express");
 const admin = require("firebase-admin");
 const cors = require("cors");
@@ -86,16 +86,19 @@ const createActiveMatchForOverlay = async (matchData) => {
       matchId: matchData.matchId,
       driverId: matchData.driverId,
       driverName: matchData.driverName,
+      passengerId: matchData.passengerId,
       passengerName: matchData.passengerName,
       similarityScore: matchData.similarityScore,
       pickupName: matchData.pickupName || 'Unknown',
       destinationName: matchData.destinationName || 'Unknown',
+      pickupLocation: matchData.pickupLocation,
+      destinationLocation: matchData.destinationLocation,
       overlayTriggered: true,
       createdAt: admin.firestore.FieldValue.serverTimestamp()
     };
 
     await db.collection('active_matches').doc(matchData.matchId).set(activeMatchData);
-    console.log(`✅ Overlay match: ${matchData.driverName} ↔ ${matchData.passengerName}`);
+    console.log(`✅ Overlay match created: ${matchData.driverName} ↔ ${matchData.passengerName}`);
     return true;
     
   } catch (error) {
@@ -119,10 +122,21 @@ const startOptimizedMatching = () => {
       const passengers = Array.from(activeSearches.values())
         .filter(search => search.userType === 'passenger' && search.status === 'searching');
 
-      console.log(`📊 Matching: ${drivers.length} drivers vs ${passengers.length} passengers`);
+      console.log(`📊 Memory Matching: ${drivers.length} drivers vs ${passengers.length} passengers`);
       
-      if (drivers.length === 0 || passengers.length === 0) return;
+      if (drivers.length === 0 || passengers.length === 0) {
+        if (drivers.length === 0 && passengers.length === 0) {
+          console.log('💤 No active searches in memory');
+        } else if (drivers.length === 0) {
+          console.log('💤 No active drivers in memory');
+        } else {
+          console.log('💤 No active passengers in memory');
+        }
+        return;
+      }
 
+      console.log(`🎯 Processing ${drivers.length} drivers and ${passengers.length} passengers...`);
+      
       let matchesCreated = 0;
       
       // Optimized matching with minimal operations
@@ -149,8 +163,10 @@ const startOptimizedMatching = () => {
             }
           );
 
+          console.log(`🔍 ${driver.driverName} ↔ ${passenger.passengerName}: Score=${similarity.toFixed(3)}`);
+
           // Only process high-quality matches
-          if (similarity > 0.7) { // Increased threshold to reduce matches
+          if (similarity > 0.5) { // Lowered threshold for testing
             const matchKey = generateMatchKey(driver.userId, passenger.userId);
             
             // Skip if recently processed
@@ -162,8 +178,10 @@ const startOptimizedMatching = () => {
                 passengerId: passenger.userId,
                 passengerName: passenger.passengerName || 'Passenger',
                 similarityScore: similarity,
-                pickupName: passenger.pickupName || driver.pickupName,
-                destinationName: passenger.destinationName || driver.destinationName,
+                pickupName: passenger.pickupName || driver.pickupName || 'Unknown Location',
+                destinationName: passenger.destinationName || driver.destinationName || 'Unknown Destination',
+                pickupLocation: passenger.pickupLocation || driver.pickupLocation,
+                destinationLocation: passenger.destinationLocation || driver.destinationLocation,
                 timestamp: new Date().toISOString()
               };
 
@@ -171,6 +189,8 @@ const startOptimizedMatching = () => {
               await createActiveMatchForOverlay(matchData);
               matchesCreated++;
               processedMatches.set(matchKey, Date.now());
+              
+              console.log(`🎉 MATCH CREATED: ${driver.driverName} ↔ ${passenger.passengerName} (Score: ${similarity.toFixed(3)})`);
             }
           }
         }
@@ -178,6 +198,8 @@ const startOptimizedMatching = () => {
 
       if (matchesCreated > 0) {
         console.log(`📱 Created ${matchesCreated} overlay matches`);
+      } else {
+        console.log('ℹ️  No matches found this cycle');
       }
       
     } catch (error) {
@@ -186,38 +208,51 @@ const startOptimizedMatching = () => {
   }, 60000); // Reduced to 60 seconds
 };
 
-// ========== OPTIMIZED ENDPOINTS ==========
+// ========== COMPATIBILITY ENDPOINTS ==========
 
-// Health check (no Firestore usage)
+// Health check with memory stats
 app.get("/", (req, res) => {
+  const drivers = Array.from(activeSearches.values()).filter(s => s.userType === 'driver');
+  const passengers = Array.from(activeSearches.values()).filter(s => s.userType === 'passenger');
+  
   res.json({ 
-    status: "🚀 Server running",
+    status: "🚀 Server running (Memory Mode)",
     timestamp: new Date().toISOString(),
-    activeSearches: activeSearches.size,
+    memoryStats: {
+      activeSearches: activeSearches.size,
+      drivers: drivers.length,
+      passengers: passengers.length,
+      processedMatches: processedMatches.size
+    },
     environment: process.env.NODE_ENV || 'development'
   });
 });
 
-// Health check with minimal Firestore usage
-app.get("/health", async (req, res) => {
-  try {
-    // Only write if absolutely necessary
-    res.json({
-      status: "healthy",
-      timestamp: new Date().toISOString(),
+app.get("/health", (req, res) => {
+  const drivers = Array.from(activeSearches.values()).filter(s => s.userType === 'driver');
+  const passengers = Array.from(activeSearches.values()).filter(s => s.userType === 'passenger');
+  
+  res.json({
+    status: "healthy",
+    timestamp: new Date().toISOString(),
+    memoryStats: {
       activeSearches: activeSearches.size,
-      memoryUsage: process.memoryUsage()
-    });
-  } catch (error) {
-    res.status(503).json({ status: "unhealthy", error: error.message });
-  }
+      drivers: drivers.length,
+      passengers: passengers.length,
+      processedMatches: processedMatches.size
+    },
+    memoryUsage: process.memoryUsage()
+  });
 });
 
-// ========== OPTIMIZED SEARCH ENDPOINTS ==========
+// ========== DRIVER ENDPOINTS ==========
 
-// Start search - store in memory instead of Firestore
+// Enhanced driver start search with better logging
 app.post("/api/driver/start-search", async (req, res) => {
   try {
+    console.log('🚗 === DRIVER START SEARCH ===');
+    console.log('📦 Request body:', JSON.stringify(req.body, null, 2));
+    
     const { 
       driverId, 
       driverName, 
@@ -228,14 +263,18 @@ app.post("/api/driver/start-search", async (req, res) => {
       routePoints
     } = req.body;
     
+    if (!driverId) {
+      return res.status(400).json({ success: false, error: 'driverId is required' });
+    }
+
     const searchData = {
       userId: driverId,
       userType: 'driver',
-      driverName: driverName || 'Driver',
-      pickupLocation,
-      destinationLocation,
-      pickupName: pickupName || 'Pickup',
-      destinationName: destinationName || 'Destination',
+      driverName: driverName || 'Unknown Driver',
+      pickupLocation: pickupLocation || {},
+      destinationLocation: destinationLocation || {},
+      pickupName: pickupName || 'Unknown Pickup',
+      destinationName: destinationName || 'Unknown Destination',
       routePoints: routePoints || [],
       status: 'searching',
       lastUpdated: Date.now()
@@ -244,37 +283,73 @@ app.post("/api/driver/start-search", async (req, res) => {
     // Store in memory instead of Firestore
     activeSearches.set(driverId, searchData);
     
+    console.log(`✅ Driver search stored in memory: ${driverName} (ID: ${driverId})`);
+    console.log(`📊 Current active searches: ${activeSearches.size}`);
+    
     res.json({
       success: true,
-      message: 'Search started',
-      searchId: driverId
+      message: 'Driver search started (memory)',
+      searchId: driverId,
+      driverId: driverId
     });
     
   } catch (error) {
-    console.error('Error starting search:', error);
+    console.error('❌ Error starting driver search:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
 
+// Driver stop search
+app.post("/api/driver/stop-search", async (req, res) => {
+  try {
+    const { driverId } = req.body;
+    console.log(`🚗 Stopping driver search: ${driverId}`);
+    
+    const existed = activeSearches.has(driverId);
+    activeSearches.delete(driverId);
+    
+    console.log(`✅ Driver search stopped: ${driverId} (existed: ${existed})`);
+    console.log(`📊 Remaining active searches: ${activeSearches.size}`);
+    
+    res.json({ 
+      success: true, 
+      message: 'Driver search stopped',
+      existed: existed
+    });
+  } catch (error) {
+    console.error('Error stopping driver search:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ========== PASSENGER ENDPOINTS ==========
+
 app.post("/api/passenger/start-search", async (req, res) => {
   try {
+    console.log('👤 === PASSENGER START SEARCH ===');
+    console.log('📦 Request body:', JSON.stringify(req.body, null, 2));
+    
     const { 
       passengerId, 
       passengerName, 
       pickupLocation, 
-      destination, 
+      destinationLocation, 
       passengerCount,
       routePoints
     } = req.body;
     
+    if (!passengerId) {
+      return res.status(400).json({ success: false, error: 'passengerId is required' });
+    }
+
     const searchData = {
       userId: passengerId,
       userType: 'passenger',
-      passengerName: passengerName || 'Passenger',
+      passengerName: passengerName || 'Unknown Passenger',
       passengerCount: passengerCount || 1,
-      pickupLocation,
-      destinationLocation: destination,
-      pickupName: 'Pickup',
+      pickupLocation: pickupLocation || {},
+      destinationLocation: destinationLocation || {},
+      pickupName: 'Pickup Location',
       destinationName: 'Destination',
       routePoints: routePoints || [],
       status: 'searching',
@@ -284,25 +359,18 @@ app.post("/api/passenger/start-search", async (req, res) => {
     // Store in memory instead of Firestore
     activeSearches.set(passengerId, searchData);
     
+    console.log(`✅ Passenger search stored in memory: ${passengerName} (ID: ${passengerId})`);
+    console.log(`📊 Current active searches: ${activeSearches.size}`);
+    
     res.json({
       success: true,
-      message: 'Search started',
-      searchId: passengerId
+      message: 'Passenger search started (memory)',
+      searchId: passengerId,
+      passengerId: passengerId
     });
     
   } catch (error) {
-    console.error('Error starting search:', error);
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// Stop search - remove from memory
-app.post("/api/driver/stop-search", async (req, res) => {
-  try {
-    const { driverId } = req.body;
-    activeSearches.delete(driverId);
-    res.json({ success: true, message: 'Search stopped' });
-  } catch (error) {
+    console.error('❌ Error starting passenger search:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
@@ -310,14 +378,26 @@ app.post("/api/driver/stop-search", async (req, res) => {
 app.post("/api/passenger/stop-search", async (req, res) => {
   try {
     const { passengerId } = req.body;
+    console.log(`👤 Stopping passenger search: ${passengerId}`);
+    
+    const existed = activeSearches.has(passengerId);
     activeSearches.delete(passengerId);
-    res.json({ success: true, message: 'Search stopped' });
+    
+    console.log(`✅ Passenger search stopped: ${passengerId} (existed: ${existed})`);
+    console.log(`📊 Remaining active searches: ${activeSearches.size}`);
+    
+    res.json({ 
+      success: true, 
+      message: 'Passenger search stopped',
+      existed: existed
+    });
   } catch (error) {
+    console.error('Error stopping passenger search:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// ========== MATCH DECISION ENDPOINT ==========
+// ========== MATCH ENDPOINTS ==========
 
 app.post("/api/match/decision", async (req, res) => {
   try {
@@ -347,69 +427,63 @@ app.post("/api/match/decision", async (req, res) => {
   }
 });
 
-// ========== CLEANUP ENDPOINTS ==========
-
-// Manual cleanup endpoint
-app.post("/api/admin/cleanup", async (req, res) => {
+// Get active matches for overlay
+app.get("/api/match/active/:userId", async (req, res) => {
   try {
-    // Clean old active matches from Firestore
-    const cutoffTime = new Date(Date.now() - 10 * 60 * 1000);
-    const expiredMatches = await db.collection('active_matches')
-      .where('createdAt', '<', cutoffTime)
+    const { userId } = req.params;
+    
+    const activeMatchesSnapshot = await db.collection('active_matches')
+      .where('driverId', '==', userId)
+      .where('overlayTriggered', '==', true)
+      .orderBy('createdAt', 'desc')
+      .limit(10)
       .get();
-
-    const batch = db.batch();
-    expiredMatches.forEach(doc => batch.delete(doc.ref));
-    await batch.commit();
-
-    // Clear memory caches
-    const initialSize = activeSearches.size;
-    const now = Date.now();
-    for (const [key, search] of activeSearches.entries()) {
-      if (now - search.lastUpdated > 300000) { // 5 minutes
-        activeSearches.delete(key);
-      }
-    }
-
+    
+    const activeMatches = activeMatchesSnapshot.docs.map(doc => ({
+      matchId: doc.id,
+      ...doc.data()
+    }));
+    
     res.json({
       success: true,
-      cleanedMatches: expiredMatches.size,
-      cleanedSearches: initialSize - activeSearches.size,
-      activeSearches: activeSearches.size
+      activeMatches,
+      count: activeMatches.length
     });
     
   } catch (error) {
+    console.error('Error getting active matches:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// ========== FALLBACK FIRESTORE ENDPOINTS (Only if needed) ==========
+// ========== DEBUG ENDPOINTS ==========
 
-// Fallback endpoint for when you need to use Firestore
-app.post("/api/match/search", async (req, res) => {
-  try {
-    const { userId, userType } = req.body;
-    
-    // Use memory cache first
-    const userSearch = activeSearches.get(userId);
-    if (!userSearch) {
-      return res.json({
-        success: true,
-        message: 'No active search found',
-        matches: []
-      });
-    }
-
-    res.json({
-      success: true,
-      message: 'Search active in memory',
-      searchId: userId,
-      matches: [] // Return empty matches to reduce processing
-    });
-    
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
+// Debug endpoint to see current memory state
+app.get("/api/debug/memory", (req, res) => {
+  const drivers = Array.from(activeSearches.values()).filter(s => s.userType === 'driver');
+  const passengers = Array.from(activeSearches.values()).filter(s => s.userType === 'passenger');
+  
+  res.json({
+    success: true,
+    memoryStats: {
+      totalSearches: activeSearches.size,
+      drivers: drivers.length,
+      passengers: passengers.length,
+      processedMatches: processedMatches.size
+    },
+    drivers: drivers.map(d => ({
+      userId: d.userId,
+      driverName: d.driverName,
+      lastUpdated: new Date(d.lastUpdated).toISOString(),
+      routePoints: d.routePoints ? `${d.routePoints.length} points` : 'none'
+    })),
+    passengers: passengers.map(p => ({
+      userId: p.userId,
+      passengerName: p.passengerName,
+      lastUpdated: new Date(p.lastUpdated).toISOString(),
+      routePoints: p.routePoints ? `${p.routePoints.length} points` : 'none'
+    }))
+  });
 });
 
 // ========== ERROR HANDLING ==========
@@ -447,8 +521,8 @@ if (require.main === module) {
 ✅ Minimal read operations
 
 📊 Current Stats:
-- Active Searches: 0 (in memory)
-- Processed Matches: 0 (in memory)
+- Active Searches: ${activeSearches.size} (in memory)
+- Processed Matches: ${processedMatches.size} (in memory)
 
 Ready with minimal Firestore usage! 🎉
     `);
@@ -456,26 +530,6 @@ Ready with minimal Firestore usage! 🎉
 
   // Start the optimized matching service
   startOptimizedMatching();
-
-  // Auto-cleanup every 10 minutes
-  setInterval(async () => {
-    try {
-      const cutoffTime = new Date(Date.now() - 10 * 60 * 1000);
-      const expiredMatches = await db.collection('active_matches')
-        .where('createdAt', '<', cutoffTime)
-        .get();
-
-      const batch = db.batch();
-      expiredMatches.forEach(doc => batch.delete(doc.ref));
-      await batch.commit();
-      
-      if (expiredMatches.size > 0) {
-        console.log(`🧹 Auto-cleaned ${expiredMatches.size} expired matches`);
-      }
-    } catch (error) {
-      console.error('Auto-cleanup error:', error);
-    }
-  }, 10 * 60 * 1000);
 
   server.on('error', (error) => {
     console.error('❌ Server error:', error);
