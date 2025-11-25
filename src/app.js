@@ -1,4 +1,4 @@
-// src/app.js - FIXED VERSION WITH PROPER USER TYPE HANDLING
+// src/app.js - UPDATED WITH WEB SOCKET SUPPORT
 const express = require("express");
 const admin = require("firebase-admin");
 const cors = require("cors");
@@ -7,6 +7,8 @@ require("dotenv").config({ path: path.join(__dirname, '../.env') });
 
 // Import route matching utilities
 const routeMatching = require("./utils/routeMatching");
+// Import WebSocket Server
+const WebSocketServer = require("./websocketServer");
 
 const app = express();
 
@@ -57,6 +59,14 @@ try {
   process.exit(1);
 }
 
+// ========== WEB SOCKET SERVER ==========
+let websocketServer;
+
+const setupWebSocket = (server) => {
+  websocketServer = new WebSocketServer(server);
+  console.log('✅ WebSocket server initialized');
+};
+
 // ========== OPTIMIZED MATCHING SYSTEM ==========
 
 // In-memory storage to minimize Firestore reads/writes
@@ -80,8 +90,10 @@ const generateMatchKey = (driverId, passengerId) => {
   return `${driverId}_${passengerId}`;
 };
 
-// Optimized: Create active match with minimal Firestore usage
-const createActiveMatchForOverlay = async (matchData) => {
+// ========== UPDATED MATCH CREATION WITH WEB SOCKET ==========
+
+// Fallback function to store in Firestore if WebSocket fails
+const storeMatchInFirestore = async (matchData) => {
   try {
     const activeMatchData = {
       matchId: matchData.matchId,
@@ -99,12 +111,77 @@ const createActiveMatchForOverlay = async (matchData) => {
     };
 
     await db.collection('active_matches').doc(matchData.matchId).set(activeMatchData);
-    console.log(`✅ Overlay match: ${matchData.driverName} ↔ ${matchData.passengerName} (${matchData.similarityScore})`);
+    console.log(`✅ Match stored in Firestore (fallback): ${matchData.driverName} ↔ ${matchData.passengerName}`);
     return true;
+    
+  } catch (error) {
+    console.error('❌ Error storing match in Firestore:', error);
+    return false;
+  }
+};
+
+// Optimized: Create active match with WebSocket priority
+const createActiveMatchForOverlay = async (matchData) => {
+  try {
+    // ✅ PRIMARY: Send to Flutter via WebSocket
+    if (websocketServer) {
+      const result = websocketServer.sendMatchToUsers(matchData);
+      
+      if (result.driverSent || result.passengerSent) {
+        console.log(`✅ Match sent to Flutter apps via WebSocket: ${matchData.driverName} ↔ ${matchData.passengerName}`);
+        
+        // Still store in Firestore as backup for 5 minutes
+        setTimeout(() => {
+          storeMatchInFirestore(matchData).catch(console.error);
+        }, 1000);
+        
+        return true;
+      } else {
+        console.log(`⚠️ Both users offline, storing in Firestore as backup`);
+        // Fallback to Firestore if both users are offline
+        return await storeMatchInFirestore(matchData);
+      }
+    } else {
+      console.log('⚠️ WebSocket not available, using Firestore fallback');
+      return await storeMatchInFirestore(matchData);
+    }
     
   } catch (error) {
     console.error('❌ Error creating overlay match:', error);
     return false;
+  }
+};
+
+// Handle match decisions from WebSocket
+const handleWebSocketMatchDecision = async (matchId, decision, userId) => {
+  try {
+    console.log(`🤝 WebSocket match decision: ${matchId} - ${decision} by ${userId}`);
+    
+    // Delete from active_matches
+    await db.collection('active_matches').doc(matchId).delete();
+    
+    // Notify the other user via WebSocket
+    const matchDoc = await db.collection('active_matches').doc(matchId).get();
+    if (matchDoc.exists) {
+      const matchData = matchDoc.data();
+      const otherUserId = userId === matchData.driverId ? matchData.passengerId : matchData.driverId;
+      
+      if (websocketServer) {
+        websocketServer.sendToUser(otherUserId, {
+          type: 'MATCH_DECISION_UPDATE',
+          data: {
+            matchId: matchId,
+            decision: decision,
+            decidedBy: userId
+          }
+        });
+      }
+    }
+    
+    console.log(`✅ WebSocket match decision processed: ${matchId}`);
+    
+  } catch (error) {
+    console.error('❌ Error handling WebSocket match decision:', error);
   }
 };
 
@@ -178,10 +255,13 @@ const startOptimizedMatching = () => {
                 destinationName: passenger.destinationName || driver.destinationName || 'Unknown Destination',
                 pickupLocation: passenger.pickupLocation || driver.pickupLocation,
                 destinationLocation: passenger.destinationLocation || driver.destinationLocation,
+                passengerCount: passenger.passengerCount || 1,
+                capacity: driver.capacity || 4,
+                vehicleType: driver.vehicleType || 'car',
                 timestamp: new Date().toISOString()
               };
 
-              // Create overlay match
+              // Create overlay match (now uses WebSocket)
               await createActiveMatchForOverlay(matchData);
               matchesCreated++;
               processedMatches.set(matchKey, Date.now());
@@ -311,6 +391,53 @@ app.post("/api/match/search", async (req, res) => {
   }
 });
 
+// ========== WEB SOCKET ENDPOINTS ==========
+
+// WebSocket status endpoint
+app.get("/api/websocket/status", (req, res) => {
+  if (!websocketServer) {
+    return res.json({ 
+      success: false, 
+      message: 'WebSocket server not initialized' 
+    });
+  }
+  
+  res.json({
+    success: true,
+    connectedClients: websocketServer.getConnectedCount(),
+    connectedUsers: websocketServer.getConnectedUsers(),
+    serverTime: new Date().toISOString(),
+    totalActiveSearches: activeSearches.size,
+    totalProcessedMatches: processedMatches.size
+  });
+});
+
+// Test WebSocket message endpoint
+app.post("/api/websocket/test/:userId", (req, res) => {
+  const { userId } = req.params;
+  const { message } = req.body;
+  
+  if (!websocketServer) {
+    return res.status(500).json({ 
+      success: false, 
+      error: 'WebSocket server not available' 
+    });
+  }
+  
+  const sent = websocketServer.sendToUser(userId, {
+    type: 'TEST_MESSAGE',
+    data: message || 'Test message from server',
+    timestamp: Date.now(),
+    serverTime: new Date().toISOString()
+  });
+  
+  res.json({
+    success: sent,
+    message: sent ? 'Message sent successfully' : 'User not connected',
+    userId: userId
+  });
+});
+
 // ========== DEBUG & MONITORING ENDPOINTS ==========
 
 app.get("/", (req, res) => {
@@ -318,13 +445,14 @@ app.get("/", (req, res) => {
   const passengers = Array.from(activeSearches.values()).filter(s => s.userType === 'passenger');
   
   res.json({ 
-    status: "🚀 Server running (Memory Mode)",
+    status: "🚀 Server running (WebSocket Mode)",
     timestamp: new Date().toISOString(),
     memoryStats: {
       activeSearches: activeSearches.size,
       drivers: drivers.length,
       passengers: passengers.length,
-      processedMatches: processedMatches.size
+      processedMatches: processedMatches.size,
+      websocketConnections: websocketServer ? websocketServer.getConnectedCount() : 0
     },
     drivers: drivers.map(d => ({
       id: d.userId,
@@ -352,7 +480,8 @@ app.get("/api/debug/memory", (req, res) => {
       totalSearches: activeSearches.size,
       drivers: drivers.length,
       passengers: passengers.length,
-      processedMatches: processedMatches.size
+      processedMatches: processedMatches.size,
+      websocketConnections: websocketServer ? websocketServer.getConnectedCount() : 0
     },
     drivers: drivers.map(d => ({
       userId: d.userId,
@@ -443,15 +572,20 @@ if (require.main === module) {
 🌍 Environment: ${process.env.NODE_ENV || 'development'}
 🔥 Firebase: Minimal Usage Mode
 💾 Memory Cache: ENABLED
+🔌 WebSocket: ENABLED
 🔄 Matching: Every 30 seconds
 
 📊 Current Stats:
 - Active Searches: ${activeSearches.size} (in memory)
 - Processed Matches: ${processedMatches.size} (in memory)
+- WebSocket Connections: ${websocketServer ? websocketServer.getConnectedCount() : 0}
 
 Ready for matching! 🎉
     `);
   });
+
+  // ✅ Initialize WebSocket server
+  setupWebSocket(server);
 
   // Start the optimized matching service
   startOptimizedMatching();
@@ -463,6 +597,12 @@ Ready for matching! 🎉
 
   process.on('SIGINT', () => {
     console.log('\n🛑 Shutting down server...');
+    if (websocketServer) {
+      websocketServer.broadcast({
+        type: 'SERVER_SHUTDOWN',
+        message: 'Server is shutting down'
+      });
+    }
     server.close(() => {
       console.log('✅ Server closed');
       process.exit(0);
@@ -470,4 +610,4 @@ Ready for matching! 🎉
   });
 }
 
-module.exports = { app, db, admin };
+module.exports = { app, db, admin, websocketServer };
