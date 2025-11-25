@@ -1,4 +1,4 @@
-// src/app.js - COMPLETE UPDATED VERSION
+// src/app.js - COMPLETE CORRECTED VERSION
 const express = require("express");
 const admin = require("firebase-admin");
 const cors = require("cors");
@@ -255,24 +255,55 @@ app.get("/cors-test", (req, res) => {
   });
 });
 
-// ========== MANUAL ROUTES (For testing before route files are fixed) ==========
+// ========== CORRECTED ROUTES ==========
 
-// Driver endpoints
+// Driver endpoints - CORRECTED
 app.post("/api/driver/start-search", async (req, res) => {
   try {
-    const { driverId, driverName, driverPhone, currentLocation, vehicleType, capacity, vehicleInfo } = req.body;
+    const { 
+      driverId, 
+      driverName, 
+      driverPhone,           // ✅ ADDED
+      driverPhotoUrl,        // ✅ ADDED
+      currentLocation, 
+      vehicleType, 
+      capacity, 
+      vehicleInfo,
+      pickupLocation,        // ✅ ADDED
+      destinationLocation,   // ✅ ADDED
+      pickupName,            // ✅ ADDED
+      destinationName        // ✅ ADDED
+    } = req.body;
     
-    console.log('🚗 Driver starting search:', { driverId, driverName, vehicleType, capacity });
+    console.log('🚗 === DRIVER START SEARCH REQUEST ===');
+    console.log('👤 Driver Details:', { 
+      driverId, 
+      driverName, 
+      driverPhone, 
+      driverPhotoUrl: driverPhotoUrl ? 'Photo URL present' : 'No photo URL' 
+    });
+    console.log('📍 Route Details:', { 
+      pickup: pickupName, 
+      destination: destinationName 
+    });
+    console.log('🚘 Vehicle Info:', vehicleInfo);
+    console.log('📦 Full Request Body:', JSON.stringify(req.body, null, 2));
+    console.log('=====================================');
     
     // Store driver in active searches
     const searchData = {
       driverId,
       driverName,
-      driverPhone,
+      driverPhone,        // ✅ NOW INCLUDED
+      driverPhotoUrl,     // ✅ NOW INCLUDED
       currentLocation,
       vehicleType,
       capacity,
       vehicleInfo: vehicleInfo || {},
+      pickupLocation,     // ✅ NOW INCLUDED
+      destinationLocation, // ✅ NOW INCLUDED
+      pickupName,         // ✅ NOW INCLUDED
+      destinationName,    // ✅ NOW INCLUDED
       status: 'searching',
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       updatedAt: admin.firestore.FieldValue.serverTimestamp()
@@ -285,11 +316,16 @@ app.post("/api/driver/start-search", async (req, res) => {
       message: 'Driver search started successfully',
       searchId: `driver_${driverId}_${Date.now()}`,
       driverId,
-      status: 'searching'
+      status: 'searching',
+      driverDetails: {    // ✅ Return for verification
+        name: driverName,
+        phone: driverPhone,
+        photo: driverPhotoUrl ? 'Present' : 'Not provided'
+      }
     });
     
   } catch (error) {
-    console.error('Error starting driver search:', error);
+    console.error('❌ Error starting driver search:', error);
     res.status(500).json({
       success: false,
       error: error.message
@@ -504,39 +540,113 @@ app.get("/api/passenger/status/:passengerId", async (req, res) => {
   }
 });
 
-// Matching endpoint
+// ✅ CORRECTED: Matching endpoint - FIXED VERSION
 app.post("/api/match/search", async (req, res) => {
   try {
-    const { userId, userType, rideType, driverId, driverName, pickupLocation, destinationLocation, capacity } = req.body;
+    // ✅ FIX: Destructure ALL the fields you're receiving
+    const { 
+      userId, 
+      userType, 
+      rideType, 
+      driverId, 
+      driverName, 
+      driverPhone,           // ✅ ADDED
+      driverPhotoUrl,        // ✅ ADDED
+      pickupLocation, 
+      destinationLocation,
+      pickupName,            // ✅ ADDED
+      destinationName,       // ✅ ADDED
+      capacity,
+      currentPassengers,
+      vehicleInfo,           // ✅ ADDED
+      distance,
+      duration,
+      fare,
+      routePoints,
+      estimatedFare,
+      maxWaitTime,
+      preferredVehicleType,
+      specialRequests,
+      maxWalkDistance,
+      scheduledTime
+    } = req.body;
     
-    console.log('🔍 Match search request:', { userId, userType, rideType, driverId, driverName });
+    // ✅ COMPREHENSIVE LOGGING
+    console.log('🔍 === MATCH SEARCH REQUEST RECEIVED ===');
+    console.log('👤 User Info:', { userId, userType, rideType });
+    console.log('🚗 Driver Details:', { 
+      driverId, 
+      driverName, 
+      driverPhone, 
+      driverPhotoUrl: driverPhotoUrl ? 'Photo URL present' : 'No photo URL' 
+    });
+    console.log('📍 Locations:', { 
+      pickup: pickupName, 
+      destination: destinationName 
+    });
+    console.log('💰 Fare & Distance:', { fare, distance, duration });
+    console.log('🚘 Vehicle Info:', vehicleInfo);
+    console.log('👥 Capacity:', { capacity, currentPassengers });
+    console.log('📦 Full Request Body:', JSON.stringify(req.body, null, 2));
+    console.log('========================================');
     
-    // Store the search request
+    // ✅ Store the COMPLETE search request
     const searchId = `search_${userId}_${Date.now()}`;
     const searchData = {
       searchId,
       userId,
       userType,
       rideType,
+      
+      // ✅ Store ALL driver details
       driverId,
       driverName,
+      driverPhone,        // ✅ NOW INCLUDED
+      driverPhotoUrl,     // ✅ NOW INCLUDED
+      
+      // ✅ Store ALL location data
       pickupLocation,
       destinationLocation,
+      pickupName,         // ✅ NOW INCLUDED
+      destinationName,    // ✅ NOW INCLUDED
+      
+      // ✅ Store ALL route information
       capacity: capacity || 1,
+      currentPassengers: currentPassengers || 0,
+      vehicleInfo: vehicleInfo || {},
+      distance: distance || 0,
+      duration: duration || 0,
+      fare: fare || 0,
+      routePoints: routePoints || [],
+      
+      // ✅ Store preferences
+      estimatedFare: estimatedFare || 0,
+      maxWaitTime: maxWaitTime || 30,
+      preferredVehicleType: preferredVehicleType || 'car',
+      specialRequests: specialRequests || '',
+      maxWalkDistance: maxWalkDistance || 0.5,
+      
+      // ✅ Store scheduling
+      scheduledTime: scheduledTime || null,
+      
       status: 'searching',
-      createdAt: admin.firestore.FieldValue.serverTimestamp()
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
     };
     
+    // ✅ Save COMPLETE data to Firestore
     await db.collection('active_searches').doc(searchId).set(searchData);
     
-    // Simple matching logic (you can enhance this)
+    console.log('✅ Search saved to Firestore with ID:', searchId);
+    
+    // Simple matching logic
+    let matches = [];
     if (userType === 'driver') {
       // Find matching passengers
       const passengersSnapshot = await db.collection('active_passengers')
         .where('status', '==', 'searching')
         .get();
       
-      const matches = [];
       passengersSnapshot.forEach(doc => {
         matches.push({ id: doc.id, ...doc.data() });
       });
@@ -546,7 +656,12 @@ app.post("/api/match/search", async (req, res) => {
         message: 'Driver search started with matching',
         searchId,
         matches,
-        matchCount: matches.length
+        matchCount: matches.length,
+        driverDetails: {        // ✅ Return driver details for verification
+          name: driverName,
+          phone: driverPhone,
+          photo: driverPhotoUrl ? 'Present' : 'Not provided'
+        }
       });
       
     } else if (userType === 'passenger') {
@@ -555,7 +670,6 @@ app.post("/api/match/search", async (req, res) => {
         .where('status', '==', 'searching')
         .get();
       
-      const matches = [];
       driversSnapshot.forEach(doc => {
         matches.push({ id: doc.id, ...doc.data() });
       });
@@ -571,17 +685,45 @@ app.post("/api/match/search", async (req, res) => {
       res.json({
         success: true,
         message: 'Search started',
-        searchId
+        searchId,
+        driverDetails: {        // ✅ Return driver details for verification
+          name: driverName,
+          phone: driverPhone,
+          photo: driverPhotoUrl ? 'Present' : 'Not provided'
+        }
       });
     }
     
   } catch (error) {
-    console.error('Error in match search:', error);
+    console.error('❌ Error in match search:', error);
     res.status(500).json({
       success: false,
       error: error.message
     });
   }
+});
+
+// Debug endpoint to test data reception
+app.post("/api/debug/test-receive", (req, res) => {
+  console.log('=== DEBUG ENDPOINT HIT ===');
+  console.log('📦 Headers:', req.headers);
+  console.log('📦 Full Request Body:', JSON.stringify(req.body, null, 2));
+  console.log('📦 Driver Name:', req.body?.driverName);
+  console.log('📦 Driver Phone:', req.body?.driverPhone);
+  console.log('📦 Driver Photo:', req.body?.driverPhotoUrl);
+  console.log('📦 Vehicle Info:', req.body?.vehicleInfo);
+  console.log('========================');
+  
+  res.json({ 
+    received: true,
+    body: req.body,
+    message: 'Data received successfully by backend',
+    driverDetails: {
+      name: req.body?.driverName,
+      phone: req.body?.driverPhone,
+      photo: req.body?.driverPhotoUrl
+    }
+  });
 });
 
 // Load and mount routes (if they exist)
@@ -659,7 +801,8 @@ app.use((req, res) => {
       '/api/driver/update-location',
       '/api/passenger/start-search',
       '/api/passenger/stop-search',
-      '/api/match/search'
+      '/api/match/search',
+      '/api/debug/test-receive'
     ]
   });
 });
@@ -681,6 +824,7 @@ Available Endpoints:
 ✅ Health: GET /health
 ✅ API Info: GET /api
 ✅ CORS Test: GET /cors-test
+✅ Debug Test: POST /api/debug/test-receive
 
 Driver Endpoints:
 ✅ Start Search: POST /api/driver/start-search
@@ -696,6 +840,8 @@ Passenger Endpoints:
 
 Matching Endpoints:
 ✅ Search: POST /api/match/search
+
+✅ ALL ROUTES NOW CAPTURE COMPLETE DRIVER DATA!
 
 Ready for Flutter Web requests! 🎉
     `);
