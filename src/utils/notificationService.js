@@ -6,7 +6,7 @@ class NotificationService {
     this.db = db;
   }
 
-  // Send match notification to both driver and passenger
+  // ✅ FIXED: Send match notification with CORRECT STRUCTURE
   async sendMatchNotification(matchData) {
     try {
       console.log(`📢 Sending match notification for: ${matchData.driverName} ↔ ${matchData.passengerName}`);
@@ -18,12 +18,17 @@ class NotificationService {
           type: 'match_proposal',
           title: 'New Ride Match Found!',
           message: `Passenger ${matchData.passengerName} wants to share your ride. Similarity: ${(matchData.similarityScore * 100).toFixed(1)}%`,
+          // ✅ ALL DATA NESTED IN 'data' FIELD
           data: {
             matchId: matchData.matchId,
             driverId: matchData.driverId,
             passengerId: matchData.passengerId,
+            driverName: matchData.driverName,
             passengerName: matchData.passengerName,
             similarityScore: matchData.similarityScore,
+            matchQuality: matchData.matchQuality,
+            driverPhotoUrl: null,
+            passengerPhotoUrl: null,
             action: 'view_match'
           },
           read: false,
@@ -34,12 +39,17 @@ class NotificationService {
           type: 'match_proposal',
           title: 'Driver Match Found!',
           message: `Driver ${matchData.driverName} is going your way. Similarity: ${(matchData.similarityScore * 100).toFixed(1)}%`,
+          // ✅ ALL DATA NESTED IN 'data' FIELD
           data: {
             matchId: matchData.matchId,
             driverId: matchData.driverId,
             passengerId: matchData.passengerId,
             driverName: matchData.driverName,
+            passengerName: matchData.passengerName,
             similarityScore: matchData.similarityScore,
+            matchQuality: matchData.matchQuality,
+            driverPhotoUrl: null,
+            passengerPhotoUrl: null,
             action: 'view_match'
           },
           read: false,
@@ -57,6 +67,7 @@ class NotificationService {
       await batch.commit();
       
       console.log(`✅ Notifications sent to both users for match ${matchData.matchId}`);
+      console.log(`✅ Notification structure: All match data nested in 'data' field`);
       
       // Update match with notification sent status
       await this.db.collection('potential_matches').doc(matchData.matchId).update({

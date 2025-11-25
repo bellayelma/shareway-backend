@@ -51,28 +51,33 @@ const shouldThrottleMatch = (driverId, passengerId) => {
   return false;
 };
 
-// ⭐⭐ NEW: Create notifications for both users ⭐⭐
+// ✅ FIXED: Create notifications for both users with CORRECT STRUCTURE
 const createMatchNotifications = async (db, matchData) => {
   try {
     console.log(`📢 Creating notifications for match: ${matchData.matchId}`);
     
     const batch = db.batch();
     
-    // Notification for driver
+    // ✅ FIXED: Notification for driver - ALL DATA NESTED IN 'data' FIELD
     const driverNotificationRef = db.collection('notifications').doc();
     batch.set(driverNotificationRef, {
       userId: matchData.driverId,
       type: 'match_proposal',
       title: 'Passenger Found! 🚗',
       message: `Passenger ${matchData.passengerName} wants to share your ride. Route similarity: ${(matchData.similarityScore * 100).toFixed(1)}%`,
+      // ✅ ALL MATCH DATA GOES INSIDE 'data' FIELD
       data: {
         matchId: matchData.matchId,
         driverId: matchData.driverId,
         passengerId: matchData.passengerId,
-        passengerName: matchData.passengerName,
         driverName: matchData.driverName,
+        passengerName: matchData.passengerName,
         similarityScore: matchData.similarityScore,
         matchQuality: matchData.matchQuality,
+        optimalPickupPoint: matchData.optimalPickupPoint,
+        detourDistance: matchData.detourDistance,
+        driverPhotoUrl: null,
+        passengerPhotoUrl: null,
         action: 'view_match'
       },
       read: false,
@@ -80,13 +85,14 @@ const createMatchNotifications = async (db, matchData) => {
       updatedAt: admin.firestore.FieldValue.serverTimestamp()
     });
 
-    // Notification for passenger
+    // ✅ FIXED: Notification for passenger - ALL DATA NESTED IN 'data' FIELD
     const passengerNotificationRef = db.collection('notifications').doc();
     batch.set(passengerNotificationRef, {
       userId: matchData.passengerId,
       type: 'match_proposal',
       title: 'Driver Found! 🚗',
       message: `Driver ${matchData.driverName} is going your way. Route similarity: ${(matchData.similarityScore * 100).toFixed(1)}%`,
+      // ✅ ALL MATCH DATA GOES INSIDE 'data' FIELD
       data: {
         matchId: matchData.matchId,
         driverId: matchData.driverId,
@@ -95,6 +101,10 @@ const createMatchNotifications = async (db, matchData) => {
         passengerName: matchData.passengerName,
         similarityScore: matchData.similarityScore,
         matchQuality: matchData.matchQuality,
+        optimalPickupPoint: matchData.optimalPickupPoint,
+        detourDistance: matchData.detourDistance,
+        driverPhotoUrl: null,
+        passengerPhotoUrl: null,
         action: 'view_match'
       },
       read: false,
@@ -104,6 +114,7 @@ const createMatchNotifications = async (db, matchData) => {
 
     await batch.commit();
     console.log(`✅ Notifications created for both users: ${matchData.driverName} ↔ ${matchData.passengerName}`);
+    console.log(`✅ Notification structure: All match data nested in 'data' field`);
     
     return true;
   } catch (error) {
@@ -173,7 +184,7 @@ const createMatchIfNotExists = async (db, driverData, passengerData, similarityS
     await db.collection('potential_matches').doc(matchId).set(matchData);
     console.log(`✅ Created new match: ${matchId} (score: ${similarityScore.toFixed(2)})`);
     
-    // ⭐⭐ CREATE NOTIFICATIONS FOR BOTH USERS ⭐⭐
+    // ✅ CREATE NOTIFICATIONS FOR BOTH USERS (WITH FIXED STRUCTURE)
     await createMatchNotifications(db, matchData);
     
     // Update match with notification status
@@ -819,7 +830,7 @@ module.exports = {
   createMatchIfNotExists,
   checkExistingMatch,
   shouldThrottleMatch,
-  createMatchNotifications, // ⭐⭐ EXPORT THE NEW FUNCTION ⭐⭐
+  createMatchNotifications, // ✅ EXPORT THE FIXED FUNCTION
   
   // Route calculation functions
   calculateRouteSimilarity,
