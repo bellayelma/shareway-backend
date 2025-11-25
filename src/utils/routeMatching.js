@@ -51,7 +51,68 @@ const shouldThrottleMatch = (driverId, passengerId) => {
   return false;
 };
 
-// Enhanced matching function with duplicate prevention
+// ⭐⭐ NEW: Create notifications for both users ⭐⭐
+const createMatchNotifications = async (db, matchData) => {
+  try {
+    console.log(`📢 Creating notifications for match: ${matchData.matchId}`);
+    
+    const batch = db.batch();
+    
+    // Notification for driver
+    const driverNotificationRef = db.collection('notifications').doc();
+    batch.set(driverNotificationRef, {
+      userId: matchData.driverId,
+      type: 'match_proposal',
+      title: 'Passenger Found! 🚗',
+      message: `Passenger ${matchData.passengerName} wants to share your ride. Route similarity: ${(matchData.similarityScore * 100).toFixed(1)}%`,
+      data: {
+        matchId: matchData.matchId,
+        driverId: matchData.driverId,
+        passengerId: matchData.passengerId,
+        passengerName: matchData.passengerName,
+        driverName: matchData.driverName,
+        similarityScore: matchData.similarityScore,
+        matchQuality: matchData.matchQuality,
+        action: 'view_match'
+      },
+      read: false,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    // Notification for passenger
+    const passengerNotificationRef = db.collection('notifications').doc();
+    batch.set(passengerNotificationRef, {
+      userId: matchData.passengerId,
+      type: 'match_proposal',
+      title: 'Driver Found! 🚗',
+      message: `Driver ${matchData.driverName} is going your way. Route similarity: ${(matchData.similarityScore * 100).toFixed(1)}%`,
+      data: {
+        matchId: matchData.matchId,
+        driverId: matchData.driverId,
+        passengerId: matchData.passengerId,
+        driverName: matchData.driverName,
+        passengerName: matchData.passengerName,
+        similarityScore: matchData.similarityScore,
+        matchQuality: matchData.matchQuality,
+        action: 'view_match'
+      },
+      read: false,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    await batch.commit();
+    console.log(`✅ Notifications created for both users: ${matchData.driverName} ↔ ${matchData.passengerName}`);
+    
+    return true;
+  } catch (error) {
+    console.error('❌ Error creating match notifications:', error);
+    return false;
+  }
+};
+
+// Enhanced matching function with duplicate prevention AND NOTIFICATIONS
 const createMatchIfNotExists = async (db, driverData, passengerData, similarityScore, matchQuality) => {
   try {
     const driverId = driverData.driverId || driverData.id;
@@ -108,8 +169,18 @@ const createMatchIfNotExists = async (db, driverData, passengerData, similarityS
       notifiedAt: null
     };
 
+    // Save match to Firestore
     await db.collection('potential_matches').doc(matchId).set(matchData);
     console.log(`✅ Created new match: ${matchId} (score: ${similarityScore.toFixed(2)})`);
+    
+    // ⭐⭐ CREATE NOTIFICATIONS FOR BOTH USERS ⭐⭐
+    await createMatchNotifications(db, matchData);
+    
+    // Update match with notification status
+    await db.collection('potential_matches').doc(matchId).update({
+      notificationSent: true,
+      notifiedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
     
     return matchData;
     
@@ -163,8 +234,12 @@ const performIntelligentMatching = async (db, driver, passenger, options = {}) =
     else if (similarityScore >= 0.5) matchQuality = 'good';
     else if (similarityScore >= 0.3) matchQuality = 'fair';
 
-    // Create match with duplicate prevention
+    // Create match with duplicate prevention (this now includes notifications)
     const match = await createMatchIfNotExists(db, driver, passenger, similarityScore, matchQuality);
+    
+    if (match) {
+      console.log(`🎉 SUCCESS: Created match with notifications - ${match.driverName} ↔ ${match.passengerName} (${similarityScore.toFixed(2)})`);
+    }
     
     return match;
 
@@ -744,6 +819,7 @@ module.exports = {
   createMatchIfNotExists,
   checkExistingMatch,
   shouldThrottleMatch,
+  createMatchNotifications, // ⭐⭐ EXPORT THE NEW FUNCTION ⭐⭐
   
   // Route calculation functions
   calculateRouteSimilarity,
