@@ -1,4 +1,4 @@
-// websocketServer.js
+// src/websocketServer.js
 const WebSocket = require('ws');
 
 class WebSocketServer {
@@ -24,14 +24,15 @@ class WebSocketServer {
         // Send welcome message
         this.sendToUser(userId, {
           type: 'CONNECTED',
-          message: 'WebSocket connected successfully'
+          message: 'WebSocket connected successfully',
+          timestamp: Date.now()
         });
       }
 
       ws.on('message', (message) => {
         try {
           const data = JSON.parse(message);
-          console.log(`📨 Received WebSocket message: ${data.type}`);
+          console.log(`📨 Received WebSocket message from ${userId}: ${data.type}`);
           this.handleMessage(userId, data);
         } catch (error) {
           console.error('❌ Error parsing WebSocket message:', error);
@@ -76,7 +77,7 @@ class WebSocketServer {
 
   // Send match to both driver and passenger
   sendMatchToUsers(matchData) {
-    const driverSent = this.sendToUser(matchData.driverId, {
+    const driverMessage = {
       type: 'PASSENGER_FOUND',
       data: {
         matchId: matchData.matchId,
@@ -92,11 +93,11 @@ class WebSocketServer {
           pickupName: matchData.pickupName,
           destinationName: matchData.destinationName
         },
-        timestamp: matchData.timestamp
+        timestamp: matchData.timestamp || new Date().toISOString()
       }
-    });
+    };
 
-    const passengerSent = this.sendToUser(matchData.passengerId, {
+    const passengerMessage = {
       type: 'DRIVER_FOUND',
       data: {
         matchId: matchData.matchId,
@@ -111,9 +112,12 @@ class WebSocketServer {
           pickupName: matchData.pickupName,
           destinationName: matchData.destinationName
         },
-        timestamp: matchData.timestamp
+        timestamp: matchData.timestamp || new Date().toISOString()
       }
-    });
+    };
+
+    const driverSent = this.sendToUser(matchData.driverId, driverMessage);
+    const passengerSent = this.sendToUser(matchData.passengerId, passengerMessage);
 
     console.log(`📱 Match forwarded - Driver: ${driverSent}, Passenger: ${passengerSent}`);
     return { driverSent, passengerSent };
@@ -123,12 +127,24 @@ class WebSocketServer {
   handleMessage(userId, data) {
     switch (data.type) {
       case 'PING':
-        this.sendToUser(userId, { type: 'PONG', timestamp: Date.now() });
+        this.sendToUser(userId, { 
+          type: 'PONG', 
+          timestamp: Date.now(),
+          serverTime: new Date().toISOString()
+        });
         break;
         
       case 'MATCH_DECISION':
         console.log(`🤝 Match decision from ${userId}:`, data.decision);
-        // You can forward this to your existing match decision handler
+        // Forward to match decision endpoint (you'll need to implement this)
+        // handleWebSocketMatchDecision(data.matchId, data.decision, userId);
+        break;
+        
+      case 'HEARTBEAT':
+        this.sendToUser(userId, { 
+          type: 'HEARTBEAT_ACK',
+          timestamp: Date.now() 
+        });
         break;
         
       default:
@@ -144,6 +160,15 @@ class WebSocketServer {
   // Get all connected user IDs
   getConnectedUsers() {
     return Array.from(this.connectedClients.keys());
+  }
+
+  // Broadcast to all connected clients
+  broadcast(message) {
+    this.connectedClients.forEach((client, userId) => {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(JSON.stringify(message));
+      }
+    });
   }
 }
 
