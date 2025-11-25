@@ -1,4 +1,4 @@
-// continuous_driver_test.js - Enhanced for driver search testing
+// continuous_passenger_test.js - EXACT driver route matching
 const https = require('https');
 
 let testCount = 0;
@@ -16,211 +16,99 @@ const CONFIG = {
   testDuration: 3600000,
 };
 
-const DRIVER_TEMPLATES = [
-  // Bole to Adama routes
-  {
-    userId: "driver_bole_adama_",
-    driverName: "John Driver",
-    driverPhone: "+251911223344",
-    pickupLocation: { lat: 9.033, lng: 38.760, address: "Bole International Airport" },
-    destinationLocation: { lat: 8.546, lng: 39.268, address: "Adama City Center" },
-    pickupName: "Bole International Airport",
-    destinationName: "Adama City Center",
-    capacity: 4,
-    vehicleInfo: {
-      model: "Toyota Corolla",
-      plate: "3-ABC-123",
-      color: "White",
-      year: "2022",
-      ac: true
-    }
-  },
-  {
-    userId: "driver_bole2_adama_",
-    driverName: "Michael Driver", 
-    driverPhone: "+251922334455",
-    pickupLocation: { lat: 9.028, lng: 38.755, address: "Bole Medhanialem" },
-    destinationLocation: { lat: 8.542, lng: 39.272, address: "Adama University" },
-    pickupName: "Bole Medhanialem",
-    destinationName: "Adama University",
-    capacity: 6,
-    vehicleInfo: {
-      model: "Toyota Hiace",
-      plate: "3-DEF-456",
-      color: "Blue",
-      year: "2020",
-      ac: true
-    }
-  },
-  {
-    userId: "driver_bole3_adama_",
-    driverName: "David Driver",
-    driverPhone: "+251933445566",
-    pickupLocation: { lat: 9.038, lng: 38.765, address: "Bole Arabsa" },
-    destinationLocation: { lat: 8.550, lng: 39.260, address: "Adama Stadium" },
-    pickupName: "Bole Arabsa", 
-    destinationName: "Adama Stadium",
-    capacity: 4,
-    vehicleInfo: {
-      model: "Honda Civic",
-      plate: "3-GHI-789",
-      color: "Black",
-      year: "2021",
-      ac: true
-    }
-  },
-  // Addis Ababa city routes
-  {
-    userId: "driver_merkato_4kilo_",
-    driverName: "Alex Driver",
-    driverPhone: "+251944556677",
-    pickupLocation: { lat: 9.020, lng: 38.740, address: "Merkato Main Gate" },
-    destinationLocation: { lat: 9.030, lng: 38.770, address: "4 Kilo Campus" },
-    pickupName: "Merkato Main Gate",
-    destinationName: "4 Kilo Campus",
-    capacity: 4,
-    vehicleInfo: {
-      model: "Hyundai Accent",
-      plate: "3-JKL-012",
-      color: "Silver",
-      year: "2019",
-      ac: false
-    }
-  },
-  {
-    userId: "driver_mexico_piazza_",
-    driverName: "Robert Driver", 
-    driverPhone: "+251955667788",
-    pickupLocation: { lat: 9.010, lng: 38.750, address: "Mexico Square" },
-    destinationLocation: { lat: 9.050, lng: 38.780, address: "Piazza Post Office" },
-    pickupName: "Mexico Square",
-    destinationName: "Piazza Post Office", 
-    capacity: 4,
-    vehicleInfo: {
-      model: "Toyota Yaris",
-      plate: "3-MNO-345",
-      color: "Red",
-      year: "2023",
-      ac: true
-    }
-  },
-  {
-    userId: "driver_sar_bet_ghion_",
-    driverName: "Daniel Driver",
-    driverPhone: "+251966778899",
-    pickupLocation: { lat: 9.025, lng: 38.760, address: "Sar Bet" },
-    destinationLocation: { lat: 9.040, lng: 38.775, address: "Ghion Hotel" },
-    pickupName: "Sar Bet",
-    destinationName: "Ghion Hotel",
-    capacity: 7,
-    vehicleInfo: {
-      model: "Toyota Hiace",
-      plate: "3-PQR-678",
-      color: "White",
-      year: "2020",
-      ac: true
-    }
-  }
-];
+// EXACT DRIVER ROUTE COORDINATES - FROM YOUR DRIVER DATA
+const DRIVER_ROUTE = {
+  pickupLocation: { lat: 8.55, lng: 39.2667 },
+  destinationLocation: { lat: 9.5892, lng: 41.8664 }, // Dire Dawa
+  pickupName: "Adama",
+  destinationName: "Dire Dawa",
+  routePoints: [
+    { lat: 8.549995, lng: 39.266714 },
+    { lat: 8.549951, lng: 39.266697 },
+    { lat: 8.913591, lng: 39.906468 },
+    { lat: 9.28897, lng: 40.829771 },
+    { lat: 9.52893, lng: 41.213885 },
+    { lat: 9.547991, lng: 41.481037 },
+    { lat: 9.589549, lng: 41.866169 }
+  ],
+  // Calculated approximate values for Adama → Dire Dawa
+  distance: 320, // approx km
+  duration: 360, // approx minutes
+  fare: 800      // approx ETB
+};
 
-function generateRandomDriver() {
-  const template = DRIVER_TEMPLATES[Math.floor(Math.random() * DRIVER_TEMPLATES.length)];
+// KNOWN DRIVER ID FROM YOUR DATA
+const TARGET_DRIVER_ID = "mtlB1Bd79RYtijBSR9wuyZHaI122";
+
+function generatePassenger() {
   const timestamp = Date.now();
   const randomId = Math.random().toString(36).substring(2, 8);
-  const isScheduled = Math.random() > 0.7; // 30% scheduled rides
-  
-  // Generate route points for better matching
-  const routePoints = generateRoutePoints(template.pickupLocation, template.destinationLocation);
   
   return {
-    // User identification - CRITICAL FIELDS
-    userId: template.userId + timestamp + '_' + randomId,
-    userType: "driver", // THIS IS WHAT YOUR FLUTTER APP WAS MISSING!
-    rideType: isScheduled ? "scheduled" : "immediate",
+    // User identification - MATCHING DRIVER'S FORMAT
+    userId: "passenger_" + timestamp + '_' + randomId,
+    userType: "passenger",
+    rideType: "immediate",
     
-    // Driver details - MUST MATCH YOUR FLUTTER APP
-    driverId: template.userId + timestamp + '_' + randomId,
-    driverName: template.driverName,
-    driverPhone: template.driverPhone,
-    driverPhotoUrl: "https://example.com/avatars/driver.jpg",
+    // Passenger details
+    passengerId: "passenger_" + timestamp + '_' + randomId,
+    passengerName: "Test Passenger - Adama to Dire Dawa", // Updated destination
+    passengerPhone: "+251911223344",
+    passengerPhotoUrl: "https://example.com/avatars/passenger.jpg",
     
-    // Location data
+    // EXACT SAME LOCATION DATA AS DRIVER
     pickupLocation: {
-      lat: template.pickupLocation.lat + (Math.random() - 0.5) * 0.005,
-      lng: template.pickupLocation.lng + (Math.random() - 0.5) * 0.005,
-      address: template.pickupLocation.address
+      lat: DRIVER_ROUTE.pickupLocation.lat,
+      lng: DRIVER_ROUTE.pickupLocation.lng,
+      address: DRIVER_ROUTE.pickupName
     },
     destinationLocation: {
-      lat: template.destinationLocation.lat + (Math.random() - 0.5) * 0.005,
-      lng: template.destinationLocation.lng + (Math.random() - 0.5) * 0.005,
-      address: template.destinationLocation.address
+      lat: DRIVER_ROUTE.destinationLocation.lat,
+      lng: DRIVER_ROUTE.destinationLocation.lng,
+      address: DRIVER_ROUTE.destinationName
     },
-    pickupName: template.pickupName,
-    destinationName: template.destinationName,
+    pickupName: DRIVER_ROUTE.pickupName,
+    destinationName: DRIVER_ROUTE.destinationName,
     
-    // Vehicle & capacity
-    capacity: template.capacity,
-    currentPassengers: Math.floor(Math.random() * 2), // 0-1 current passengers
-    vehicleInfo: template.vehicleInfo,
+    // EXACT SAME ROUTE POINTS AS DRIVER
+    routePoints: DRIVER_ROUTE.routePoints,
     
-    // Route information
-    routePoints: routePoints,
-    distance: calculateRouteDistance(routePoints),
-    duration: Math.floor(calculateRouteDistance(routePoints) * 3 + 10),
-    fare: Math.floor(calculateRouteDistance(routePoints) * 15 + 50),
+    // Passenger details - MATCHING DRIVER'S CAPACITY
+    passengerCount: 1, // Same as driver's passengerCount
+    currentPassengers: 0,
+    capacity: 4, // Same as driver's capacity
     
-    // Scheduling
-    scheduledTime: isScheduled ? 
-      new Date(Date.now() + Math.floor(Math.random() * 24 * 60 * 60 * 1000)).toISOString() : 
-      undefined,
+    // APPROXIMATE DISTANCE/FARE FOR THIS ROUTE
+    distance: DRIVER_ROUTE.distance,
+    duration: DRIVER_ROUTE.duration,
+    fare: DRIVER_ROUTE.fare,
     
-    // Preferences
-    estimatedFare: Math.floor(calculateRouteDistance(routePoints) * 15 + 50),
-    specialRequests: Math.random() > 0.8 ? "No pets please" : "",
+    // Preferences matching driver's capabilities
+    estimatedFare: DRIVER_ROUTE.fare,
+    specialRequests: "Testing exact route matching - Adama to Dire Dawa",
     preferredVehicleType: "car",
-    maxWaitTime: 15 + Math.floor(Math.random() * 30),
-    maxWalkDistance: 0.5
+    maxWaitTime: 60, // Longer wait for long distance
+    maxWalkDistance: 0.5,
+    
+    // Additional fields for better matching
+    luggageCount: 1,
+    paymentMethod: "cash",
+    rating: "4.5",
+    
+    // Enhanced matching parameters
+    matchPreferences: {
+      minRating: 4.0,
+      maxDetour: 10.0, // Higher for long distance
+      vehicleTypes: ["car", "sedan"],
+      allowFemaleDriver: true,
+      allowMaleDriver: true
+    }
   };
 }
 
-function generateRoutePoints(start, end, numPoints = 5) {
-  const points = [start];
-  
-  for (let i = 1; i < numPoints - 1; i++) {
-    const ratio = i / (numPoints - 1);
-    points.push({
-      lat: start.lat + (end.lat - start.lat) * ratio + (Math.random() - 0.5) * 0.002,
-      lng: start.lng + (end.lng - start.lng) * ratio + (Math.random() - 0.5) * 0.002
-    });
-  }
-  
-  points.push(end);
-  return points;
-}
-
-function calculateRouteDistance(routePoints) {
-  let distance = 0;
-  for (let i = 0; i < routePoints.length - 1; i++) {
-    distance += calculateDistance(routePoints[i], routePoints[i + 1]);
-  }
-  return Math.round(distance * 10) / 10;
-}
-
-function calculateDistance(point1, point2) {
-  const R = 6371;
-  const dLat = (point2.lat - point1.lat) * Math.PI / 180;
-  const dLng = (point2.lng - point1.lng) * Math.PI / 180;
-  const a = 
-    Math.sin(dLat/2) * Math.sin(dLat/2) +
-    Math.cos(point1.lat * Math.PI / 180) * Math.cos(point2.lat * Math.PI / 180) *
-    Math.sin(dLng/2) * Math.sin(dLng/2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-  return R * c;
-}
-
-async function sendDriverSearch(driverData) {
+async function sendPassengerSearch(passengerData) {
   return new Promise((resolve, reject) => {
-    const data = JSON.stringify(driverData);
+    const data = JSON.stringify(passengerData);
     
     const options = {
       hostname: CONFIG.baseUrl,
@@ -230,12 +118,12 @@ async function sendDriverSearch(driverData) {
       headers: {
         'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(data),
-        'User-Agent': 'ShareWay-Driver-Test/1.0'
+        'User-Agent': 'ShareWay-Passenger-Test/1.0'
       },
       timeout: CONFIG.timeout
     };
 
-    console.log(`🚗 Sending DRIVER search request to: ${CONFIG.baseUrl}${options.path}`);
+    console.log(`👤 Sending PASSENGER search for route: ${passengerData.pickupName} → ${passengerData.destinationName}`);
     
     const req = https.request(options, (res) => {
       let responseData = '';
@@ -251,14 +139,14 @@ async function sendDriverSearch(driverData) {
           resolve({
             statusCode: statusCode,
             data: result,
-            driver: driverData,
+            passenger: passengerData,
             headers: res.headers
           });
         } catch (e) {
           resolve({
             statusCode: statusCode,
             data: { raw: responseData, parseError: e.message },
-            driver: driverData,
+            passenger: passengerData,
             headers: res.headers
           });
         }
@@ -280,20 +168,19 @@ async function sendDriverSearch(driverData) {
 }
 
 function displayResult(result, testCount) {
-  const driver = result.driver;
+  const passenger = result.passenger;
   const response = result.data;
   
-  console.log(`\n📊 DRIVER TEST #${testCount}`);
+  console.log(`\n📊 PASSENGER TEST #${testCount}`);
   console.log('─────────────────────────────────────────────────────────');
-  console.log(`👤 Driver: ${driver.driverName}`);
-  console.log(`📞 Phone: ${driver.driverPhone}`);
-  console.log(`📍 From: ${driver.pickupName}`);
-  console.log(`🎯 To: ${driver.destinationName}`);
-  console.log(`🚗 Vehicle: ${driver.vehicleInfo.model} (${driver.vehicleInfo.color})`);
-  console.log(`👥 Capacity: ${driver.capacity} seats | Available: ${driver.capacity - driver.currentPassengers}`);
-  console.log(`📏 Distance: ${driver.distance}km | ⏱️ ${driver.duration}min`);
-  console.log(`💰 Estimated fare: ETB ${driver.estimatedFare}`);
-  console.log(`🔍 Type: ${driver.rideType.toUpperCase()} ride`);
+  console.log(`👤 Passenger: ${passenger.passengerName}`);
+  console.log(`📍 From: ${passenger.pickupName}`);
+  console.log(`🎯 To: ${passenger.destinationName}`);
+  console.log(`💰 Fare: ETB ${passenger.fare}`);
+  console.log(`📏 Distance: ${passenger.distance}km | ⏱️ ${passenger.duration}min`);
+  console.log(`👥 Passengers: ${passenger.passengerCount}/${passenger.capacity}`);
+  console.log(`🎯 Target Driver: ${TARGET_DRIVER_ID}`);
+  console.log(`🎯 🚨 EXACT DRIVER ROUTE - Should match immediately!`);
   
   if (result.statusCode === 200) {
     if (response.success) {
@@ -301,25 +188,42 @@ function displayResult(result, testCount) {
       
       if (response.totalMatches > 0) {
         matchesFound += response.totalMatches;
-        console.log(`✅ 🎉 SUCCESS! Found ${response.totalMatches} passenger matches!`);
-        console.log('🚶 PASSENGERS FOUND! Check your app for notifications!');
+        console.log(`✅ 🎉 SUCCESS! Found ${response.totalMatches} driver matches!`);
         
+        // Check if our target driver is in the matches
+        let targetDriverFound = false;
         if (response.matches && response.matches.length > 0) {
-          console.log('\n📋 Matching Passengers:');
+          console.log('\n📋 Matching Drivers:');
           response.matches.forEach((match, index) => {
-            console.log(`   ${index + 1}. ${match.passengerName || 'Passenger'} (${match.passengerPhone || 'No phone'})`);
-            console.log(`      👥 ${match.passengerCount || 1} passengers | ⭐ ${match.matchScore || match.similarity * 100}% match`);
-            console.log(`      💰 ETB ${match.proposedFare} | 📏 ${match.distance?.toFixed(1) || '?'}km`);
+            const isTargetDriver = match.driverId === TARGET_DRIVER_ID;
+            if (isTargetDriver) targetDriverFound = true;
+            
+            console.log(`   ${index + 1}. ${match.driverName || 'Unknown Driver'} ${isTargetDriver ? '🎯 TARGET!' : ''}`);
+            console.log(`      🆔 ${match.driverId || 'Unknown ID'}`);
+            console.log(`      🚗 ${match.vehicleInfo?.model || 'Car'} | ⭐ ${match.matchScore || (match.similarity * 100).toFixed(1)}% match`);
+            console.log(`      💰 ETB ${match.proposedFare} | 📏 ${match.distance?.toFixed(1) || '?'}km away`);
+            console.log(`      🪑 Seats: ${match.hasSeats ? 'Yes' : 'No'} | Similarity: ${(match.similarity * 100).toFixed(1)}%`);
           });
         }
+        
+        if (targetDriverFound) {
+          console.log('\n🎉 SUCCESS! Target driver matched successfully!');
+          console.log('🚗 DRIVER FOUND! Check your app for notifications!');
+        } else {
+          console.log('\n⚠️  Matches found but target driver not in results');
+          console.log('   Check if driver search is active with correct route');
+        }
+        
       } else {
-        console.log(`✅ Search successful but no passenger matches found`);
-        console.log(`   💡 Make sure passengers are actively searching in the system`);
-        console.log(`   🔍 Try running the passenger test script simultaneously`);
-      }
-      
-      if (response.searchId) {
-        console.log(`   🔍 Search ID: ${response.searchId}`);
+        console.log(`✅ Search successful but no driver matches found`);
+        console.log(`   🔍 Checking driver: ${TARGET_DRIVER_ID}`);
+        console.log(`   💡 Ensure driver is actively searching with same route`);
+        console.log(`   📍 Driver route: Adama → Dire Dawa`);
+        
+        // Additional debug info
+        if (response.debug) {
+          console.log(`   🔧 Debug: ${JSON.stringify(response.debug)}`);
+        }
       }
       
     } else {
@@ -329,45 +233,45 @@ function displayResult(result, testCount) {
         console.log(`   Error: ${response.error}`);
       }
       if (response.details) {
-        console.log(`   Details: ${response.details}`);
+        console.log(`   Details: ${JSON.stringify(response.details)}`);
       }
     }
   } else {
     failedSearches++;
     console.log(`❌ HTTP Error: Status ${result.statusCode}`);
-    if (response.error) {
-      console.log(`   Error: ${response.error}`);
-    }
-    if (response.message) {
+    if (response && response.message) {
       console.log(`   Message: ${response.message}`);
     }
   }
   
   // Display summary
   console.log('─────────────────────────────────────────────────────────');
-  const successRate = ((successfulSearches / testCount) * 100).toFixed(1);
+  const successRate = testCount > 0 ? ((successfulSearches / testCount) * 100).toFixed(1) : 0;
   console.log(`📈 SUMMARY: ${successfulSearches}/${testCount} successful (${successRate}%) | ${matchesFound} total matches`);
-  console.log(`⏰ Next driver search in ${CONFIG.searchInterval / 1000} seconds...`);
+  console.log(`⏰ Next passenger search in ${CONFIG.searchInterval / 1000} seconds...`);
   console.log('🛑 Press Ctrl+C to stop\n');
 }
 
 async function runContinuousTest() {
   console.log('=======================================================');
-  console.log('🚗 SHAREWAY CONTINUOUS DRIVER SEARCH TEST');
+  console.log('👤 SHAREWAY PASSENGER SEARCH TEST - EXACT DRIVER ROUTE');
   console.log('=======================================================');
   console.log(`📍 Target: ${CONFIG.baseUrl}`);
   console.log(`⏰ Interval: ${CONFIG.searchInterval / 1000} seconds`);
-  console.log(`⏱️ Timeout: ${CONFIG.timeout / 1000} seconds`);
-  console.log(`🔢 Max tests: ${CONFIG.maxTests}`);
-  console.log(`🚗 Testing: Driver search functionality`);
+  console.log(`🎯 Route: ${DRIVER_ROUTE.pickupName} → ${DRIVER_ROUTE.destinationName}`);
+  console.log(`📏 Distance: ${DRIVER_ROUTE.distance}km (approx)`);
+  console.log(`💰 Fare: ETB ${DRIVER_ROUTE.fare} (approx)`);
+  console.log(`🎯 Target Driver ID: ${TARGET_DRIVER_ID}`);
+  console.log(`👥 Driver Capacity: 4 passengers`);
   console.log('🛑 Press Ctrl+C to stop the test');
   console.log('=======================================================\n');
   
   // Test server connectivity first
   await testServerConnectivity();
   
-  // Initial delay
-  await new Promise(resolve => setTimeout(resolve, 2000));
+  // Initial delay to ensure driver is ready
+  console.log('⏳ Waiting 5 seconds for driver to be ready...');
+  await new Promise(resolve => setTimeout(resolve, 5000));
   
   const startTime = Date.now();
   let intervalId;
@@ -425,14 +329,20 @@ async function testServerConnectivity() {
         res.on('end', () => {
           try {
             const result = JSON.parse(data);
-            if (result.status === 'healthy') {
+            if (result.status === 'healthy' || res.statusCode === 200) {
               console.log('✅ Server is healthy and responsive');
               resolve();
             } else {
               reject(new Error('Server not healthy'));
             }
           } catch (e) {
-            reject(new Error('Invalid response from server'));
+            // If we can't parse but got 200, server is up
+            if (res.statusCode === 200) {
+              console.log('✅ Server is responsive (non-JSON response)');
+              resolve();
+            } else {
+              reject(new Error('Invalid response from server'));
+            }
           }
         });
       });
@@ -443,11 +353,7 @@ async function testServerConnectivity() {
     });
   } catch (error) {
     console.log('❌ Server connectivity test failed:', error.message);
-    console.log('💡 Please check:');
-    console.log('   - Is the server running?');
-    console.log('   - Is the URL correct?');
-    console.log('   - Are there any firewall restrictions?');
-    process.exit(1);
+    console.log('💡 Continuing anyway - server might be up but health endpoint down');
   }
 }
 
@@ -455,18 +361,18 @@ async function runSingleTest() {
   testCount++;
   
   try {
-    const driverData = generateRandomDriver();
-    const result = await sendDriverSearch(driverData);
+    const passengerData = generatePassenger();
+    const result = await sendPassengerSearch(passengerData);
     displayResult(result, testCount);
   } catch (error) {
     failedSearches++;
-    console.log(`\n📊 DRIVER TEST #${testCount}`);
+    console.log(`\n📊 PASSENGER TEST #${testCount}`);
     console.log('─────────────────────────────────────────────────────────');
     console.log(`❌ Request failed: ${error.message}`);
     console.log('─────────────────────────────────────────────────────────');
-    const successRate = ((successfulSearches / testCount) * 100).toFixed(1);
+    const successRate = testCount > 0 ? ((successfulSearches / testCount) * 100).toFixed(1) : 0;
     console.log(`📈 SUMMARY: ${successfulSearches}/${testCount} successful (${successRate}%) | ${matchesFound} total matches`);
-    console.log(`⏰ Next driver search in ${CONFIG.searchInterval / 1000} seconds...\n`);
+    console.log(`⏰ Next passenger search in ${CONFIG.searchInterval / 1000} seconds...\n`);
   }
 }
 
@@ -475,33 +381,33 @@ function displayFinalResults(startTime) {
   const successRate = testCount > 0 ? ((successfulSearches / testCount) * 100).toFixed(1) : 0;
   
   console.log('=======================================================');
-  console.log('📊 DRIVER TEST FINAL RESULTS');
+  console.log('📊 PASSENGER TEST FINAL RESULTS');
   console.log('=======================================================');
   console.log(`⏱️  Test duration: ${Math.floor(duration / 60)}m ${duration % 60}s`);
   console.log(`🔢 Total tests run: ${testCount}`);
   console.log(`✅ Successful searches: ${successfulSearches}`);
   console.log(`❌ Failed searches: ${failedSearches}`);
   console.log(`📈 Success rate: ${successRate}%`);
-  console.log(`🎯 Total passenger matches found: ${matchesFound}`);
-  console.log(`📊 Average matches per test: ${testCount > 0 ? (matchesFound / testCount).toFixed(2) : 0}`);
+  console.log(`🎯 Total driver matches found: ${matchesFound}`);
+  console.log(`🎯 Target Driver ID: ${TARGET_DRIVER_ID}`);
+  console.log(`📍 Route: Adama → Dire Dawa`);
   console.log('=======================================================');
   
-  // Recommendations based on results
-  if (matchesFound === 0) {
-    console.log('\n💡 RECOMMENDATIONS:');
-    console.log('   - Run passenger test script simultaneously to create matches');
-    console.log('   - Check if passenger routes overlap with driver routes');
-    console.log('   - Verify the matching algorithm is working correctly');
-    console.log('   - Check Firestore for active passenger searches');
-    console.log('   - Ensure driver data includes userType: "driver"');
+  if (matchesFound > 0) {
+    console.log('\n🎉 SUCCESS! Route matching is working!');
+    console.log('💡 Check if target driver appears in match results');
   } else {
-    console.log('\n🎉 SUCCESS! Driver search is working correctly!');
-    console.log('   Your Flutter app should now be able to find passengers');
+    console.log('\n💡 TROUBLESHOOTING:');
+    console.log('   1. ✅ Both passenger and driver are using the EXACT same route: Adama → Dire Dawa');
+    console.log('   2. 🔍 Check if driver search is still active in Firestore');
+    console.log('   3. 📍 Verify route points match exactly');
+    console.log('   4. 🪑 Driver has capacity: 4 passengers');
+    console.log('   5. ⏰ Ensure both are searching simultaneously');
   }
 }
 
 // Start the continuous test
 runContinuousTest().catch(error => {
-  console.error('💥 Driver test script crashed:', error);
+  console.error('💥 Passenger test script crashed:', error);
   process.exit(1);
 });
