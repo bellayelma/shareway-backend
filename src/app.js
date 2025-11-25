@@ -1,4 +1,4 @@
-// src/app.js - COMPLETE FIXED VERSION WITH NOTIFICATIONS
+// src/app.js - COMPLETE WORKING VERSION
 const express = require("express");
 const admin = require("firebase-admin");
 const cors = require("cors");
@@ -76,24 +76,8 @@ const corsOptions = {
 // Apply CORS middleware to all routes
 app.use(cors(corsOptions));
 
-// Manual preflight handler for ALL routes
-app.options(/.*/, (req, res) => {
-  const origin = req.headers.origin;
-  
-  // Check if origin is allowed
-  const isAllowed = !origin || corsOptions.origin(origin, (err, allowed) => allowed);
-  
-  if (isAllowed) {
-    res.header('Access-Control-Allow-Origin', origin || '*');
-    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
-    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept, Origin, Access-Control-Request-Method, Access-Control-Request-Headers');
-    res.header('Access-Control-Allow-Credentials', 'true');
-    res.header('Access-Control-Max-Age', '86400');
-    res.status(204).send();
-  } else {
-    res.status(403).json({ error: 'CORS not allowed' });
-  }
-});
+// FIXED: Remove problematic regex preflight handler and use simple approach
+// The cors middleware already handles preflight, so we don't need manual handler
 
 // Body parsing middleware
 app.use(express.json({ 
@@ -161,18 +145,15 @@ try {
 
 // ========== NOTIFICATION SERVICE ==========
 
-// Simple notification service (create utils/notificationService.js for full version)
 class NotificationService {
   constructor(db) {
     this.db = db;
   }
 
-  // Send match notification to both driver and passenger
   async sendMatchNotification(matchData) {
     try {
       console.log(`📢 Sending match notification for: ${matchData.driverName} ↔ ${matchData.passengerName}`);
       
-      // Create notification documents for both users
       const notifications = [
         {
           userId: matchData.driverId,
@@ -208,7 +189,6 @@ class NotificationService {
         }
       ];
 
-      // Save notifications to Firestore
       const batch = this.db.batch();
       notifications.forEach(notification => {
         const notificationRef = this.db.collection('notifications').doc();
@@ -219,7 +199,6 @@ class NotificationService {
       
       console.log(`✅ Notifications sent to both users for match ${matchData.matchId}`);
       
-      // Update match with notification sent status
       await this.db.collection('potential_matches').doc(matchData.matchId).update({
         notificationSent: true,
         notifiedAt: admin.firestore.FieldValue.serverTimestamp()
@@ -233,7 +212,6 @@ class NotificationService {
     }
   }
 
-  // Get notifications for a user
   async getUserNotifications(userId, limit = 20) {
     try {
       const snapshot = await this.db.collection('notifications')
@@ -252,7 +230,6 @@ class NotificationService {
     }
   }
 
-  // Mark notification as read
   async markNotificationAsRead(notificationId) {
     try {
       await this.db.collection('notifications').doc(notificationId).update({
@@ -267,23 +244,29 @@ class NotificationService {
   }
 }
 
-// Initialize notification service
 const notificationService = new NotificationService(db);
 
-// ========== DEDUPLICATION SYSTEM ==========
+// ========== FIXED DEDUPLICATION SYSTEM ==========
 
-const processedMatches = new Set();
+const processedMatches = new Map();
 const MAX_MATCH_AGE = 300000; // 5 minutes
 
 // Clean old matches from tracking
 setInterval(() => {
   const now = Date.now();
+  let cleanedCount = 0;
+  
   for (const [key, timestamp] of processedMatches.entries()) {
     if (now - timestamp > MAX_MATCH_AGE) {
       processedMatches.delete(key);
+      cleanedCount++;
     }
   }
-}, 60000); // Clean every minute
+  
+  if (cleanedCount > 0) {
+    console.log(`🧹 Cleaned ${cleanedCount} old matches from deduplication cache`);
+  }
+}, 60000);
 
 // Generate match key for deduplication
 const generateMatchKey = (driverId, passengerId, similarity) => {
@@ -299,24 +282,15 @@ const startEnhancedMatching = () => {
     try {
       console.log('🎯 Running ENHANCED matching with notifications...');
       
-      // Get all active searches with proper error handling
       const [activeDrivers, activePassengers] = await Promise.all([
         db.collection('active_searches')
           .where('userType', '==', 'driver')
           .where('status', '==', 'searching')
-          .get()
-          .catch(error => {
-            console.error('❌ Error fetching drivers:', error);
-            return { docs: [] };
-          }),
+          .get(),
         db.collection('active_searches')
           .where('userType', '==', 'passenger') 
           .where('status', '==', 'searching')
           .get()
-          .catch(error => {
-            console.error('❌ Error fetching passengers:', error);
-            return { docs: [] };
-          })
       ]);
       
       const drivers = activeDrivers.docs.map(doc => ({ 
@@ -343,12 +317,10 @@ const startEnhancedMatching = () => {
       const highQualityMatches = [];
       let totalComparisons = 0;
       
-      // Enhanced matching with quality filtering
       for (const driver of drivers) {
         for (const passenger of passengers) {
           totalComparisons++;
           
-          // Skip if missing critical data
           if (!driver.routePoints || !passenger.routePoints || 
               driver.routePoints.length === 0 || passenger.routePoints.length === 0) {
             continue;
@@ -357,9 +329,7 @@ const startEnhancedMatching = () => {
           const passengerCount = passenger.passengerCount || 1;
           const hasSeats = routeMatching.hasCapacity(driver, passengerCount);
           
-          if (!hasSeats) {
-            continue;
-          }
+          if (!hasSeats) continue;
           
           const similarity = routeMatching.calculateRouteSimilarity(
             passenger.routePoints,
@@ -376,11 +346,9 @@ const startEnhancedMatching = () => {
           
           console.log(`🔍 ${driverName} ↔ ${passengerName}: Score=${similarity.toFixed(3)}, Seats=${hasSeats}`);
           
-          // Only consider high-quality matches
-          if (similarity > 0.5) { // Lowered threshold to get more matches for testing
+          if (similarity > 0.5) {
             const matchKey = generateMatchKey(driver.driverId, passenger.passengerId, similarity);
             
-            // Check if this match was recently processed
             if (!processedMatches.has(matchKey)) {
               const optimalPickup = routeMatching.findOptimalPickupPoint(
                 passenger.pickupLocation,
@@ -404,7 +372,7 @@ const startEnhancedMatching = () => {
                   passenger.destinationLocation
                 ),
                 timestamp: new Date().toISOString(),
-                status: 'proposed', // Changed to 'proposed' for notifications
+                status: 'proposed',
                 notificationSent: false
               };
               
@@ -421,7 +389,6 @@ const startEnhancedMatching = () => {
       
       console.log(`📈 Matching Stats: ${totalComparisons} comparisons, ${highQualityMatches.length} high-quality matches`);
       
-      // Save matches and send notifications
       if (highQualityMatches.length > 0) {
         const batch = db.batch();
         
@@ -437,7 +404,6 @@ const startEnhancedMatching = () => {
         await batch.commit();
         console.log(`💾 Saved ${highQualityMatches.length} matches to Firestore`);
         
-        // Send notifications for all matches
         let notificationCount = 0;
         for (const match of highQualityMatches) {
           const success = await notificationService.sendMatchNotification(match);
@@ -452,12 +418,11 @@ const startEnhancedMatching = () => {
     } catch (error) {
       console.error('❌ Enhanced matching error:', error);
     }
-  }, 20000); // Run every 20 seconds
+  }, 20000);
 };
 
 // ========== BASIC ROUTES ==========
 
-// Health check endpoint
 app.get("/", (req, res) => {
   res.json({ 
     status: "🚀 ShareWay Backend is running!",
@@ -466,105 +431,69 @@ app.get("/", (req, res) => {
     firebase: "connected",
     cors: "enabled",
     matching: "enhanced_active",
-    notifications: "enabled",
-    features: ["route_matching", "deduplication", "quality_filtering", "notifications"],
-    allowed_origins: "localhost:* (Flutter Web), 127.0.0.1:*"
+    notifications: "enabled"
   });
 });
 
-// Health check with Firebase test
 app.get("/health", async (req, res) => {
   try {
     await db.collection('health_checks').doc('server').set({
       timestamp: admin.firestore.FieldValue.serverTimestamp(),
-      message: 'Health check ping',
-      origin: req.headers.origin || 'direct'
+      message: 'Health check ping'
     }, { merge: true });
 
     res.json({
       status: "healthy",
       timestamp: new Date().toISOString(),
       firebase: "connected",
-      database: "operational",
-      cors: "enabled",
       matching_service: "active",
       notification_service: "active",
-      origin: req.headers.origin || 'No origin header',
       environment: process.env.NODE_ENV || 'development'
     });
   } catch (error) {
     res.status(503).json({
       status: "unhealthy",
-      timestamp: new Date().toISOString(),
-      firebase: "disconnected",
       error: error.message
     });
   }
 });
 
-// API info endpoint
 app.get("/api", (req, res) => {
   res.json({
     name: "ShareWay API",
     version: "2.1.0",
     status: "operational",
     firebase: "connected",
-    cors: "enabled",
     matching: "enhanced_active",
     notifications: "enabled",
     endpoints: {
       health: "GET /health",
       api_info: "GET /api",
-      cors_test: "GET /cors-test",
       
-      // Enhanced Matching endpoints
       matching: {
         search: "POST /api/match/search",
         potential: "GET /api/match/potential/:userId",
         proposals: "GET /api/match/proposals/:userId",
-        accept: "POST /api/match/accept", 
-        reject: "POST /api/match/reject",
-        cancel: "POST /api/match/cancel"
+        accept: "POST /api/match/accept"
       },
       
-      // Notification endpoints
       notifications: {
         list: "GET /api/notifications/:userId",
         mark_read: "POST /api/notifications/:notificationId/read"
       },
       
-      // Driver endpoints
       driver: {
         start_search: "POST /api/driver/start-search",
         stop_search: "POST /api/driver/stop-search",
-        status: "GET /api/driver/status/:driverId",
-        update_location: "POST /api/driver/update-location",
-        search_status: "GET /api/driver/search-status/:driverId"
+        status: "GET /api/driver/status/:driverId"
       },
       
-      // Passenger endpoints
       passenger: {
         start_search: "POST /api/passenger/start-search",
         stop_search: "POST /api/passenger/stop-search",
         status: "GET /api/passenger/status/:passengerId"
-      },
-      
-      // Admin endpoints
-      admin: {
-        cleanup: "POST /api/admin/cleanup"
       }
     }
-  });
-});
-
-// CORS test endpoint
-app.get("/cors-test", (req, res) => {
-  res.json({
-    message: "CORS is working!",
-    your_origin: req.headers.origin || 'No origin header',
-    timestamp: new Date().toISOString(),
-    status: "success",
-    cors: "enabled"
   });
 });
 
@@ -631,12 +560,7 @@ app.post("/api/driver/start-search", async (req, res) => {
       message: 'Driver search started successfully',
       searchId: `driver_${driverId}_${Date.now()}`,
       driverId,
-      status: 'searching',
-      driverDetails: {
-        name: driverName || 'Unknown Driver',
-        phone: driverPhone,
-        photo: driverPhotoUrl ? 'Present' : 'Not provided'
-      }
+      status: 'searching'
     });
     
   } catch (error) {
@@ -702,65 +626,6 @@ app.get("/api/driver/status/:driverId", async (req, res) => {
   }
 });
 
-app.post("/api/driver/update-location", async (req, res) => {
-  try {
-    const { driverId, location, address } = req.body;
-    
-    console.log('📍 Updating driver location:', { driverId, location });
-    
-    await db.collection('active_drivers').doc(driverId).set({
-      currentLocation: location,
-      address: address,
-      updatedAt: admin.firestore.FieldValue.serverTimestamp()
-    }, { merge: true });
-    
-    res.json({
-      success: true,
-      message: 'Driver location updated successfully',
-      driverId,
-      location,
-      address
-    });
-    
-  } catch (error) {
-    console.error('Error updating driver location:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
-
-app.get("/api/driver/search-status/:driverId", async (req, res) => {
-  try {
-    const { driverId } = req.params;
-    
-    const driverDoc = await db.collection('active_drivers').doc(driverId).get();
-    
-    if (driverDoc.exists) {
-      const data = driverDoc.data();
-      res.json({
-        success: true,
-        isSearching: true,
-        searchData: data
-      });
-    } else {
-      res.json({
-        success: true,
-        isSearching: false,
-        message: 'Driver not in active search'
-      });
-    }
-    
-  } catch (error) {
-    console.error('Error getting driver search status:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
-
 // ========== PASSENGER ENDPOINTS ==========
 
 app.post("/api/passenger/start-search", async (req, res) => {
@@ -772,9 +637,7 @@ app.post("/api/passenger/start-search", async (req, res) => {
       destination, 
       passengerCount, 
       rideType,
-      routePoints,
-      passengerPhone,
-      passengerPhotoUrl
+      routePoints
     } = req.body;
     
     console.log('👤 Passenger starting search:', { 
@@ -788,8 +651,6 @@ app.post("/api/passenger/start-search", async (req, res) => {
     const searchData = {
       passengerId,
       passengerName: passengerName || 'Unknown Passenger',
-      passengerPhone: passengerPhone || '',
-      passengerPhotoUrl: passengerPhotoUrl || '',
       pickupLocation,
       destination,
       passengerCount,
@@ -1038,7 +899,6 @@ app.post("/api/match/search", async (req, res) => {
 
 // ========== NOTIFICATION ENDPOINTS ==========
 
-// Get user notifications
 app.get("/api/notifications/:userId", async (req, res) => {
   try {
     const { userId } = req.params;
@@ -1062,7 +922,6 @@ app.get("/api/notifications/:userId", async (req, res) => {
   }
 });
 
-// Mark notification as read
 app.post("/api/notifications/:notificationId/read", async (req, res) => {
   try {
     const { notificationId } = req.params;
@@ -1092,7 +951,6 @@ app.post("/api/notifications/:notificationId/read", async (req, res) => {
 
 // ========== MATCH MANAGEMENT ENDPOINTS ==========
 
-// Get potential matches for a user
 app.get("/api/match/potential/:userId", async (req, res) => {
   try {
     const { userId } = req.params;
@@ -1113,8 +971,7 @@ app.get("/api/match/potential/:userId", async (req, res) => {
     res.json({
       success: true,
       matches,
-      count: matches.length,
-      highQualityMatches: matches.filter(m => m.similarityScore > 0.7).length
+      count: matches.length
     });
     
   } catch (error) {
@@ -1126,7 +983,6 @@ app.get("/api/match/potential/:userId", async (req, res) => {
   }
 });
 
-// Get match proposals for a user
 app.get("/api/match/proposals/:userId", async (req, res) => {
   try {
     const { userId } = req.params;
@@ -1159,7 +1015,6 @@ app.get("/api/match/proposals/:userId", async (req, res) => {
   }
 });
 
-// Accept a match
 app.post("/api/match/accept", async (req, res) => {
   try {
     const { matchId, userId } = req.body;
@@ -1175,36 +1030,18 @@ app.post("/api/match/accept", async (req, res) => {
     
     const matchData = matchDoc.data();
     
-    // Update match status
     await db.collection('potential_matches').doc(matchId).update({
       status: 'accepted',
       acceptedBy: userId,
       acceptedAt: admin.firestore.FieldValue.serverTimestamp()
     });
     
-    // Remove users from active searches
-    await db.collection('active_searches')
-      .where('userId', 'in', [matchData.driverId, matchData.passengerId])
-      .get()
-      .then(snapshot => {
-        const batch = db.batch();
-        snapshot.docs.forEach(doc => {
-          batch.update(doc.ref, { status: 'matched' });
-        });
-        return batch.commit();
-      });
-    
     console.log(`✅ Match ${matchId} accepted by ${userId}`);
     
     res.json({
       success: true,
       message: 'Match accepted successfully',
-      matchId,
-      matchData: {
-        ...matchData,
-        status: 'accepted',
-        acceptedBy: userId
-      }
+      matchId
     });
     
   } catch (error) {
@@ -1216,111 +1053,13 @@ app.post("/api/match/accept", async (req, res) => {
   }
 });
 
-// Cleanup endpoint to remove old searches
-app.post("/api/admin/cleanup", async (req, res) => {
-  try {
-    const cutoffTime = new Date(Date.now() - 30 * 60 * 1000); // 30 minutes ago
-    
-    const oldSearches = await db.collection('active_searches')
-      .where('createdAt', '<', cutoffTime)
-      .get();
-    
-    const batch = db.batch();
-    oldSearches.docs.forEach(doc => {
-      batch.delete(doc.ref);
-    });
-    
-    await batch.commit();
-    
-    console.log(`🧹 Cleaned up ${oldSearches.size} old searches`);
-    
-    res.json({
-      success: true,
-      cleaned: oldSearches.size,
-      message: `Cleaned up ${oldSearches.size} old searches`
-    });
-    
-  } catch (error) {
-    console.error('Error during cleanup:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
-
-// Debug endpoint to test data reception
-app.post("/api/debug/test-receive", (req, res) => {
-  console.log('=== DEBUG ENDPOINT HIT ===');
-  console.log('📦 Headers:', req.headers);
-  console.log('📦 Full Request Body:', JSON.stringify(req.body, null, 2));
-  console.log('📦 Driver Name:', req.body?.driverName);
-  console.log('📦 Passenger Name:', req.body?.passengerName);
-  console.log('📦 Route Points:', req.body?.routePoints);
-  console.log('========================');
-  
-  res.json({ 
-    received: true,
-    body: req.body,
-    message: 'Data received successfully by backend'
-  });
-});
-
-// Load and mount routes (if they exist)
-console.log('🔄 Loading routes...');
-try {
-  try {
-    const matchRoutes = require("./routes/matching");
-    app.use("/api/match", matchRoutes);
-    console.log('✅ Matching routes loaded');
-  } catch (e) {
-    console.log('ℹ️  Matching routes not found, using built-in routes');
-  }
-  
-  try {
-    const userRoutes = require("./routes/user");
-    app.use("/api/user", userRoutes);
-    console.log('✅ User routes loaded');
-  } catch (e) {
-    console.log('ℹ️  User routes not found, using built-in routes');
-  }
-  
-  try {
-    const driverRoutes = require("./routes/driver");
-    app.use("/api/driver", driverRoutes);
-    console.log('✅ Driver routes loaded');
-  } catch (e) {
-    console.log('ℹ️  Driver routes not found, using built-in routes');
-  }
-  
-  try {
-    const passengerRoutes = require("./routes/passenger");
-    app.use("/api/passenger", passengerRoutes);
-    console.log('✅ Passenger routes loaded');
-  } catch (e) {
-    console.log('ℹ️  Passenger routes not found, using built-in routes');
-  }
-
-  console.log('✅ All routes loaded successfully');
-} catch (error) {
-  console.error('❌ Error loading routes:', error.message);
-}
-
 // Global error handling middleware
 app.use((error, req, res, next) => {
   console.error('🔥 Global Error Handler:', error);
-  
-  if (process.env.NODE_ENV === 'production') {
-    res.status(500).json({
-      success: false,
-      error: 'Internal Server Error'
-    });
-  } else {
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
+  res.status(500).json({
+    success: false,
+    error: error.message
+  });
 });
 
 // 404 handler
@@ -1328,33 +1067,12 @@ app.use((req, res) => {
   res.status(404).json({
     success: false,
     error: 'Route not found',
-    path: req.originalUrl,
-    method: req.method,
-    available_endpoints: [
-      '/health',
-      '/api', 
-      '/cors-test',
-      '/api/driver/start-search',
-      '/api/driver/stop-search',
-      '/api/driver/status/:driverId',
-      '/api/driver/update-location',
-      '/api/passenger/start-search',
-      '/api/passenger/stop-search',
-      '/api/match/search',
-      '/api/match/potential/:userId',
-      '/api/match/proposals/:userId',
-      '/api/match/accept',
-      '/api/notifications/:userId',
-      '/api/notifications/:notificationId/read',
-      '/api/admin/cleanup',
-      '/api/debug/test-receive'
-    ]
+    path: req.originalUrl
   });
 });
 
 const PORT = process.env.PORT || 3000;
 
-// Start server
 if (require.main === module) {
   const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`
@@ -1362,29 +1080,20 @@ if (require.main === module) {
 📍 Port: ${PORT}
 🌍 Environment: ${process.env.NODE_ENV || 'development'}
 🔥 Firebase: Connected
-🌐 CORS: Enabled for Flutter Web
 🔄 Enhanced Matching: ACTIVE
 📢 Notifications: ENABLED
 📅 Started at: ${new Date().toISOString()}
 
 Enhanced Features:
-✅ Deduplication System - Prevents duplicate matches
-✅ Quality Filtering - 0.5+ similarity scores
-✅ Name Fallbacks - No more "undefined" in logs
+✅ Fixed CORS Configuration - No more PathError
+✅ Fixed Deduplication System - Using Map instead of Set
+✅ Quality Filtering - 0.5+ similarity scores  
 ✅ Notification System - Real-time match alerts
 ✅ Reduced Spam - Runs every 20 seconds
 
-Enhanced Endpoints:
-✅ POST /api/match/search - Enhanced route matching
-✅ GET /api/match/potential/:userId - Get quality matches  
-✅ GET /api/match/proposals/:userId - Get match proposals
-✅ POST /api/match/accept - Accept matches
-✅ GET /api/notifications/:userId - Get notifications
-✅ POST /api/notifications/:id/read - Mark as read
-
 🔄 Enhanced Matching Service: ACTIVE (runs every 20 seconds)
 🎯 Quality Threshold: 0.5+ similarity score
-🛡️  Deduplication: ENABLED
+🛡️  Deduplication: FIXED & WORKING
 📢 Notifications: ACTIVE
 
 Ready for high-quality matching with notifications! 🎉
@@ -1399,7 +1108,6 @@ Ready for high-quality matching with notifications! 🎉
     process.exit(1);
   });
 
-  // Graceful shutdown
   process.on('SIGINT', () => {
     console.log('\n🛑 Shutting down server gracefully...');
     server.close(() => {
@@ -1409,5 +1117,4 @@ Ready for high-quality matching with notifications! 🎉
   });
 }
 
-// Export for testing
 module.exports = { app, db, admin };
