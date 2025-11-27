@@ -1,82 +1,173 @@
-// src/websocketServer.js - ENHANCED WITH SCHEDULED MATCH SUPPORT
+// src/websocketServer.js - COMPLETELY FIXED VERSION
 const WebSocket = require('ws');
 
 class WebSocketServer {
   constructor(server) {
-    this.wss = new WebSocket.Server({ server });
+    this.wss = new WebSocket.Server({ 
+      server,
+      perMessageDeflate: false,
+      clientTracking: true
+    });
     this.connectedClients = new Map(); // userId -> WebSocket
     
     this.setupWebSocket();
+    console.log('✅ WebSocket Server Constructor Initialized');
   }
 
   setupWebSocket() {
     this.wss.on('connection', (ws, req) => {
-      console.log('🔌 New WebSocket connection');
+      console.log('🔌 New WebSocket connection attempt');
       
-      // Extract userId from query parameters
-      const url = new URL(req.url, `http://${req.headers.host}`);
-      const userId = url.searchParams.get('userId');
-      
-      if (userId) {
-        this.connectedClients.set(userId, ws);
+      try {
+        // Extract userId from query parameters - FIXED URL PARSING
+        const url = new URL(req.url, `http://${req.headers.host}`);
+        const userId = url.searchParams.get('userId');
+        
+        if (!userId) {
+          console.log('❌ WebSocket connection rejected: No userId provided');
+          ws.close(1008, 'User ID required');
+          return;
+        }
+
         console.log(`✅ Flutter app connected: ${userId}`);
         
-        // Send welcome message
+        // Store connection
+        this.connectedClients.set(userId, ws);
+        
+        // Send immediate welcome message
         this.sendToUser(userId, {
           type: 'CONNECTED',
           message: 'WebSocket connected successfully',
           timestamp: Date.now(),
-          serverTime: new Date().toISOString()
+          serverTime: new Date().toISOString(),
+          userId: userId
         });
+
+        // ✅ ADDED: Send connection stats
+        console.log(`📊 Connection established - Total: ${this.connectedClients.size}, Users: ${Array.from(this.connectedClients.keys()).join(', ')}`);
+
+        ws.on('message', (message) => {
+          try {
+            const data = JSON.parse(message);
+            console.log(`📨 Received from ${userId}: ${data.type}`);
+            this.handleMessage(userId, data);
+          } catch (error) {
+            console.error('❌ Error parsing WebSocket message:', error);
+            this.sendToUser(userId, {
+              type: 'ERROR',
+              message: 'Invalid message format',
+              timestamp: new Date().toISOString()
+            });
+          }
+        });
+
+        ws.on('close', (code, reason) => {
+          console.log(`❌ Flutter app disconnected: ${userId} (Code: ${code}, Reason: ${reason})`);
+          if (userId) {
+            this.connectedClients.delete(userId);
+          }
+        });
+
+        ws.on('error', (error) => {
+          console.error(`❌ WebSocket error for ${userId}:`, error);
+          if (userId) {
+            this.connectedClients.delete(userId);
+          }
+        });
+
+        // ✅ ADDED: Heartbeat/ping to keep connection alive
+        ws.isAlive = true;
+        ws.on('pong', () => {
+          ws.isAlive = true;
+        });
+
+      } catch (error) {
+        console.error('❌ WebSocket connection setup error:', error);
+        ws.close(1011, 'Server error');
       }
-
-      ws.on('message', (message) => {
-        try {
-          const data = JSON.parse(message);
-          console.log(`📨 Received WebSocket message from ${userId}: ${data.type}`);
-          this.handleMessage(userId, data);
-        } catch (error) {
-          console.error('❌ Error parsing WebSocket message:', error);
-        }
-      });
-
-      ws.on('close', () => {
-        if (userId) {
-          this.connectedClients.delete(userId);
-          console.log(`❌ Flutter app disconnected: ${userId}`);
-        }
-      });
-
-      ws.on('error', (error) => {
-        console.error(`❌ WebSocket error for user ${userId}:`, error);
-        if (userId) {
-          this.connectedClients.delete(userId);
-        }
-      });
     });
 
-    console.log('✅ WebSocket Server Started');
+    // ✅ ADDED: Heartbeat interval to detect dead connections
+    const heartbeatInterval = setInterval(() => {
+      this.wss.clients.forEach((ws) => {
+        if (ws.isAlive === false) {
+          console.log('💔 Terminating dead WebSocket connection');
+          return ws.terminate();
+        }
+        ws.isAlive = false;
+        ws.ping();
+      });
+    }, 30000);
+
+    this.wss.on('close', () => {
+      clearInterval(heartbeatInterval);
+    });
+
+    console.log('✅ WebSocket Server Started Successfully');
   }
 
-  // Send message to specific user
+  // ✅ IMPROVED: Send message to specific user with better error handling
   sendToUser(userId, message) {
     try {
+      if (!userId) {
+        console.log('⚠️ Cannot send message: userId is null/undefined');
+        return false;
+      }
+
       const client = this.connectedClients.get(userId);
-      if (client && client.readyState === WebSocket.OPEN) {
-        client.send(JSON.stringify(message));
+      
+      if (!client) {
+        console.log(`⚠️ User ${userId} not connected in connectedClients map`);
+        console.log(`📊 Currently connected users: ${Array.from(this.connectedClients.keys()).join(', ') || 'None'}`);
+        return false;
+      }
+
+      if (client.readyState === WebSocket.OPEN) {
+        const messageString = JSON.stringify(message);
+        client.send(messageString);
         console.log(`📱 Message sent to ${userId}: ${message.type}`);
         return true;
       } else {
-        console.log(`⚠️ User ${userId} not connected or WebSocket not open`);
+        console.log(`⚠️ WebSocket not open for ${userId}. State: ${client.readyState}`);
+        // Remove stale connection
+        if (client.readyState === WebSocket.CLOSED || client.readyState === WebSocket.CLOSING) {
+          this.connectedClients.delete(userId);
+          console.log(`🧹 Removed stale connection for ${userId}`);
+        }
         return false;
       }
     } catch (error) {
       console.error(`❌ Error sending message to ${userId}:`, error);
+      // Remove problematic connection
+      this.connectedClients.delete(userId);
       return false;
     }
   }
 
-  // ✅ ENHANCED: Send match to both driver and passenger (supports both immediate & scheduled)
+  // ✅ NEW: Send search started notification (CRITICAL FOR YOUR ISSUE)
+  sendSearchStarted(userId, searchData) {
+    const message = {
+      type: 'SEARCH_STARTED',
+      data: {
+        searchId: searchData.searchId,
+        userId: userId,
+        status: 'searching',
+        rideType: searchData.rideType || 'immediate',
+        pickupName: searchData.pickupName,
+        destinationName: searchData.destinationName,
+        passengerCapacity: searchData.capacity || searchData.passengerCapacity || 1,
+        scheduledTime: searchData.scheduledTime,
+        message: 'Search started successfully',
+        timestamp: new Date().toISOString()
+      }
+    };
+
+    const sent = this.sendToUser(userId, message);
+    console.log(`🎯 Search started notification sent to ${userId}: ${sent}`);
+    return sent;
+  }
+
+  // ✅ ENHANCED: Send match to both driver and passenger
   sendMatchToUsers(matchData) {
     const isScheduled = matchData.rideType === 'scheduled' || matchData.isScheduled;
     const matchType = isScheduled ? 'SCHEDULED_' : '';
@@ -136,79 +227,11 @@ class WebSocketServer {
     const driverSent = this.sendToUser(matchData.driverId, driverMessage);
     const passengerSent = this.sendToUser(matchData.passengerId, passengerMessage);
 
-    console.log(`📱 ${isScheduled ? 'SCHEDULED ' : ''}Match forwarded - Driver: ${driverSent}, Passenger: ${passengerSent}`);
+    console.log(`📱 ${isScheduled ? 'SCHEDULED ' : ''}Match sent - Driver: ${driverSent}, Passenger: ${passengerSent}`);
     return { driverSent, passengerSent };
   }
 
-  // ✅ NEW: Send scheduled match notification (for pre-matches)
-  sendScheduledMatchNotification(matchData) {
-    const scheduledTime = new Date(matchData.scheduledTime);
-    const timeString = scheduledTime.toLocaleString();
-    
-    const driverMessage = {
-      type: 'SCHEDULED_PASSENGER_FOUND',
-      data: {
-        matchId: matchData.matchId,
-        passenger: {
-          id: matchData.passengerId,
-          name: matchData.passengerName,
-          similarityScore: matchData.similarityScore,
-          pickupLocation: matchData.pickupLocation,
-          destinationLocation: matchData.destinationLocation,
-          passengerCount: matchData.passengerCount || 1
-        },
-        route: {
-          pickupName: matchData.pickupName,
-          destinationName: matchData.destinationName
-        },
-        scheduleInfo: {
-          isScheduled: true,
-          scheduledTime: matchData.scheduledTime,
-          formattedTime: timeString,
-          matchType: 'pre_match', // This is a pre-match before the actual ride
-          daysUntilRide: this.calculateDaysUntil(matchData.scheduledTime),
-          notificationType: 'advance_notice'
-        },
-        timestamp: matchData.timestamp || new Date().toISOString()
-      }
-    };
-
-    const passengerMessage = {
-      type: 'SCHEDULED_DRIVER_FOUND',
-      data: {
-        matchId: matchData.matchId,
-        driver: {
-          id: matchData.driverId,
-          name: matchData.driverName,
-          similarityScore: matchData.similarityScore,
-          vehicleInfo: matchData.vehicleInfo || {},
-          capacity: matchData.capacity || 4,
-          vehicleType: matchData.vehicleType || 'car'
-        },
-        route: {
-          pickupName: matchData.pickupName,
-          destinationName: matchData.destinationName
-        },
-        scheduleInfo: {
-          isScheduled: true,
-          scheduledTime: matchData.scheduledTime,
-          formattedTime: timeString,
-          matchType: 'pre_match',
-          daysUntilRide: this.calculateDaysUntil(matchData.scheduledTime),
-          notificationType: 'advance_notice'
-        },
-        timestamp: matchData.timestamp || new Date().toISOString()
-      }
-    };
-
-    const driverSent = this.sendToUser(matchData.driverId, driverMessage);
-    const passengerSent = this.sendToUser(matchData.passengerId, passengerMessage);
-
-    console.log(`📅 SCHEDULED pre-match notification sent - Driver: ${driverSent}, Passenger: ${passengerSent}`);
-    return { driverSent, passengerSent };
-  }
-
-  // ✅ NEW: Send search status updates
+  // ✅ Send search status updates
   sendSearchStatusUpdate(userId, statusData) {
     const message = {
       type: 'SEARCH_STATUS_UPDATE',
@@ -219,6 +242,8 @@ class WebSocketServer {
         matchesFound: statusData.matchesFound || 0,
         timeRemaining: statusData.timeRemaining,
         scheduledTime: statusData.scheduledTime,
+        pickupName: statusData.pickupName,
+        destinationName: statusData.destinationName,
         timestamp: new Date().toISOString()
       }
     };
@@ -226,7 +251,7 @@ class WebSocketServer {
     return this.sendToUser(userId, message);
   }
 
-  // ✅ NEW: Send search timeout notification
+  // ✅ Send search timeout notification
   sendSearchTimeout(userId, timeoutData) {
     const message = {
       type: 'SEARCH_TIMEOUT',
@@ -243,7 +268,22 @@ class WebSocketServer {
     return this.sendToUser(userId, message);
   }
 
-  // ✅ NEW: Send scheduled search activation notification
+  // ✅ Send search stopped notification
+  sendSearchStopped(userId, stopData) {
+    const message = {
+      type: 'SEARCH_STOPPED',
+      data: {
+        searchId: stopData.searchId,
+        message: 'Search stopped successfully',
+        rideType: stopData.rideType,
+        timestamp: new Date().toISOString()
+      }
+    };
+
+    return this.sendToUser(userId, message);
+  }
+
+  // ✅ Send scheduled search activation notification
   sendScheduledSearchActivated(userId, activationData) {
     const message = {
       type: 'SCHEDULED_SEARCH_ACTIVATED',
@@ -260,13 +300,13 @@ class WebSocketServer {
     return this.sendToUser(userId, message);
   }
 
-  // ✅ NEW: Send match decision updates
+  // ✅ Send match decision updates
   sendMatchDecisionUpdate(userId, decisionData) {
     const message = {
       type: 'MATCH_DECISION_UPDATE',
       data: {
         matchId: decisionData.matchId,
-        decision: decisionData.decision, // 'accepted' or 'rejected'
+        decision: decisionData.decision,
         decidedBy: decisionData.decidedBy,
         timestamp: new Date().toISOString()
       }
@@ -275,7 +315,7 @@ class WebSocketServer {
     return this.sendToUser(userId, message);
   }
 
-  // ✅ NEW: Send ride reminder (for scheduled matches)
+  // ✅ Send ride reminder (for scheduled matches)
   sendRideReminder(userId, reminderData) {
     const message = {
       type: 'RIDE_REMINDER',
@@ -326,20 +366,25 @@ class WebSocketServer {
         console.log(`✅ Match acknowledged by ${userId}: ${data.matchId}`);
         this.handleMatchAcknowledgment(userId, data);
         break;
+
+      case 'CLIENT_CONNECTED':
+        console.log(`📱 Client connection confirmed by ${userId}`);
+        this.sendToUser(userId, {
+          type: 'CONNECTION_CONFIRMED',
+          message: 'Connection confirmed by server',
+          timestamp: new Date().toISOString()
+        });
+        break;
         
       default:
         console.log(`📨 Unknown message type from ${userId}:`, data.type);
     }
   }
 
-  // ✅ NEW: Handle match decisions
+  // Handle match decisions
   handleMatchDecision(userId, data) {
     const { matchId, decision } = data;
     console.log(`🤝 Match decision from ${userId}: ${decision} for match ${matchId}`);
-    
-    // Forward to your match decision handler
-    // You'll need to implement this based on your backend logic
-    // handleWebSocketMatchDecision(matchId, decision, userId);
     
     // Send acknowledgment
     this.sendToUser(userId, {
@@ -350,31 +395,26 @@ class WebSocketServer {
     });
   }
 
-  // ✅ NEW: Handle search status requests
+  // Handle search status requests
   handleSearchStatusRequest(userId, data) {
-    // You can implement this to send current search status
-    // This would query your activeSearches/scheduledSearches maps
-    
     this.sendToUser(userId, {
       type: 'SEARCH_STATUS_RESPONSE',
       data: {
         userId: userId,
-        isSearching: true, // You'd calculate this
-        matchesFound: 0, // You'd calculate this
+        isSearching: false, // This should be calculated from your search state
+        matchesFound: 0,
         timestamp: new Date().toISOString()
       }
     });
   }
 
-  // ✅ NEW: Handle match acknowledgments
+  // Handle match acknowledgments
   handleMatchAcknowledgment(userId, data) {
     const { matchId } = data;
     console.log(`✅ Match ${matchId} acknowledged by ${userId}`);
-    
-    // You can update match status in your database here
   }
 
-  // ✅ NEW: Helper to calculate days until scheduled ride
+  // Helper to calculate days until scheduled ride
   calculateDaysUntil(scheduledTime) {
     const now = new Date();
     const scheduled = new Date(scheduledTime);
@@ -397,8 +437,7 @@ class WebSocketServer {
   broadcast(message) {
     let sentCount = 0;
     this.connectedClients.forEach((client, userId) => {
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(JSON.stringify(message));
+      if (this.sendToUser(userId, message)) {
         sentCount++;
       }
     });
@@ -406,19 +445,42 @@ class WebSocketServer {
     return sentCount;
   }
 
-  // ✅ NEW: Check if user is connected
+  // Check if user is connected
   isUserConnected(userId) {
     const client = this.connectedClients.get(userId);
     return client && client.readyState === WebSocket.OPEN;
   }
 
-  // ✅ NEW: Get connection statistics
+  // Get connection statistics
   getConnectionStats() {
     return {
       totalConnections: this.connectedClients.size,
       connectedUsers: Array.from(this.connectedClients.keys()),
       timestamp: new Date().toISOString()
     };
+  }
+
+  // ✅ NEW: Force disconnect user
+  disconnectUser(userId) {
+    const client = this.connectedClients.get(userId);
+    if (client) {
+      client.close(1000, 'Manual disconnect');
+      this.connectedClients.delete(userId);
+      console.log(`🔌 Manually disconnected user: ${userId}`);
+    }
+  }
+
+  // ✅ NEW: Get detailed connection info
+  getDetailedConnectionInfo() {
+    const connections = [];
+    this.connectedClients.forEach((client, userId) => {
+      connections.push({
+        userId: userId,
+        readyState: client.readyState,
+        isAlive: client.isAlive
+      });
+    });
+    return connections;
   }
 }
 

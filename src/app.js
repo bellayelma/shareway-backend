@@ -1,4 +1,4 @@
-// src/app.js - COMPLETE UPDATED WITH SCHEDULED & IMMEDIATE SEARCH TIMEOUTS
+// src/app.js - COMPLETELY UPDATED WITH WEB SOCKET INTEGRATION
 const express = require("express");
 const admin = require("firebase-admin");
 const cors = require("cors");
@@ -125,13 +125,11 @@ const setImmediateSearchTimeout = (userId, searchId) => {
       
       // Notify user via WebSocket
       if (websocketServer) {
-        websocketServer.sendToUser(userId, {
-          type: 'SEARCH_TIMEOUT',
-          data: {
-            searchId: searchId,
-            message: 'Search automatically stopped after 5 minutes',
-            duration: '5 minutes'
-          }
+        websocketServer.sendSearchTimeout(userId, {
+          searchId: searchId,
+          message: 'Search automatically stopped after 5 minutes',
+          duration: '5 minutes',
+          rideType: 'immediate'
         });
       }
       
@@ -264,7 +262,7 @@ const createActiveMatchForOverlay = async (matchData) => {
   }
 };
 
-// ========== ENHANCED SEARCH STORAGE FUNCTION ==========
+// ========== ENHANCED SEARCH STORAGE FUNCTION WITH WEB SOCKET ==========
 
 const storeSearchInMemory = (searchData) => {
   const { userId, userType, rideType = 'immediate' } = searchData;
@@ -301,8 +299,21 @@ const storeSearchInMemory = (searchData) => {
   if (rideType === 'scheduled') {
     scheduledSearches.set(userId, enhancedSearchData);
     console.log(`📅 SCHEDULED search stored: ${driverName || passengerName} (ID: ${userId}) for ${searchData.scheduledTime}`);
-    console.log(`   - Route points: ${enhancedSearchData.routePoints.length}`);
-    console.log(`   - Pickup: ${enhancedSearchData.pickupName} → Destination: ${enhancedSearchData.destinationName}`);
+    
+    // ✅ CRITICAL: Send WebSocket notification for scheduled search
+    if (websocketServer) {
+      const sent = websocketServer.sendSearchStarted(userId, enhancedSearchData);
+      console.log(`📤 WebSocket scheduled search notification: ${sent}`);
+      
+      websocketServer.sendSearchStatusUpdate(userId, {
+        searchId: enhancedSearchData.searchId,
+        status: 'scheduled',
+        rideType: 'scheduled',
+        scheduledTime: searchData.scheduledTime,
+        pickupName: enhancedSearchData.pickupName,
+        destinationName: enhancedSearchData.destinationName
+      });
+    }
     
     // Set scheduled activation timeout
     setScheduledMatchingTimeout(userId, enhancedSearchData.searchId, searchData.scheduledTime);
@@ -310,8 +321,23 @@ const storeSearchInMemory = (searchData) => {
   } else {
     activeSearches.set(userId, enhancedSearchData);
     console.log(`🎯 IMMEDIATE search stored: ${driverName || passengerName} (ID: ${userId})`);
-    console.log(`   - Route points: ${enhancedSearchData.routePoints.length}`);
-    console.log(`   - Pickup: ${enhancedSearchData.pickupName} → Destination: ${enhancedSearchData.destinationName}`);
+    
+    // ✅ CRITICAL: Send WebSocket notification for immediate search
+    if (websocketServer) {
+      const sent = websocketServer.sendSearchStarted(userId, enhancedSearchData);
+      console.log(`📤 WebSocket immediate search notification: ${sent}`);
+      
+      // Send initial status update
+      websocketServer.sendSearchStatusUpdate(userId, {
+        searchId: enhancedSearchData.searchId,
+        status: 'searching',
+        rideType: 'immediate',
+        matchesFound: 0,
+        timeRemaining: 300, // 5 minutes in seconds
+        pickupName: enhancedSearchData.pickupName,
+        destinationName: enhancedSearchData.destinationName
+      });
+    }
     
     // Set 5-minute timeout for immediate search
     setImmediateSearchTimeout(userId, enhancedSearchData.searchId);
@@ -347,6 +373,17 @@ const activateScheduledSearch = (userId) => {
   scheduledSearch.activatedAt = new Date().toISOString();
   activeSearches.set(userId, scheduledSearch);
   scheduledSearches.delete(userId);
+  
+  // ✅ Send WebSocket notification for activation
+  if (websocketServer) {
+    websocketServer.sendScheduledSearchActivated(userId, {
+      searchId: scheduledSearch.searchId,
+      scheduledTime: scheduledSearch.scheduledTime,
+      timeUntilRide: 'Now active'
+    });
+    
+    websocketServer.sendSearchStarted(userId, scheduledSearch);
+  }
   
   // Set 5-minute timeout for the now-active search
   setImmediateSearchTimeout(userId, scheduledSearch.searchId);
@@ -399,6 +436,7 @@ const checkScheduledSearchActivation = () => {
 app.post("/api/match/search", async (req, res) => {
   try {
     console.log('🎯 === IMMEDIATE MATCH SEARCH ENDPOINT CALLED ===');
+    console.log('📦 FULL REQUEST BODY:', JSON.stringify(req.body, null, 2));
     
     const { 
       userId, 
@@ -612,13 +650,9 @@ app.post("/api/match/stop-search", async (req, res) => {
       
       // Notify user via WebSocket
       if (websocketServer) {
-        websocketServer.sendToUser(actualUserId, {
-          type: 'SEARCH_STOPPED',
-          data: {
-            searchId: searchData.searchId,
-            message: 'Search stopped successfully',
-            rideType: rideType
-          }
+        websocketServer.sendSearchStopped(actualUserId, {
+          searchId: searchData.searchId,
+          rideType: rideType
         });
       }
     } else {
@@ -712,6 +746,54 @@ app.get("/api/match/search-status/:userId", async (req, res) => {
       error: error.message 
     });
   }
+});
+
+// ========== DEBUG ENDPOINTS ==========
+
+// WebSocket connection debug endpoint
+app.get("/api/debug/websocket", (req, res) => {
+  if (!websocketServer) {
+    return res.json({ success: false, message: 'WebSocket server not initialized' });
+  }
+  
+  const connectedUsers = websocketServer.getConnectedUsers();
+  const totalConnections = websocketServer.getConnectedCount();
+  
+  res.json({
+    success: true,
+    connectedUsers: connectedUsers,
+    totalConnections: totalConnections,
+    detailedConnections: websocketServer.getDetailedConnectionInfo(),
+    serverTime: new Date().toISOString()
+  });
+});
+
+// Search status debug endpoint
+app.get("/api/debug/searches", (req, res) => {
+  const drivers = Array.from(activeSearches.values()).filter(s => s.userType === 'driver');
+  const passengers = Array.from(activeSearches.values()).filter(s => s.userType === 'passenger');
+  
+  res.json({
+    activeSearches: activeSearches.size,
+    scheduledSearches: scheduledSearches.size,
+    activeDrivers: drivers.map(d => ({
+      id: d.userId,
+      name: d.driverName,
+      status: d.status,
+      searchId: d.searchId,
+      pickup: d.pickupName,
+      destination: d.destinationName,
+      connected: websocketServer ? websocketServer.isUserConnected(d.userId) : false
+    })),
+    activePassengers: passengers.map(p => ({
+      id: p.userId, 
+      name: p.passengerName,
+      status: p.status,
+      searchId: p.searchId
+    })),
+    activeTimeouts: searchTimeouts.size,
+    processedMatches: processedMatches.size
+  });
 });
 
 // ========== FIXED OPTIMIZED MATCHING SERVICE ==========
@@ -833,13 +915,6 @@ const startOptimizedMatching = () => {
                 processedMatches.set(matchKey, Date.now());
                 
                 console.log(`🎉 MATCH CREATED: ${driver.driverName || 'Driver'} ↔ ${passenger.passengerName || 'Passenger'} (Score: ${similarity.toFixed(3)})`);
-                
-                // Stop searches for matched users (optional - you can remove this if you want continuous matching)
-                // clearSearchTimeout(driver.userId);
-                // clearSearchTimeout(passenger.userId);
-                // activeSearches.delete(driver.userId);
-                // activeSearches.delete(passenger.userId);
-                // console.log(`🛑 Stopped searches for matched users`);
               }
             } else {
               console.log(`🔁 Skipping duplicate match: ${matchKey}`);
@@ -909,7 +984,7 @@ app.get("/", (req, res) => {
   const scheduled = Array.from(scheduledSearches.values());
   
   res.json({ 
-    status: "🚀 Server running (AUTO-TIMEOUT MODE)",
+    status: "🚀 Server running (WEB SOCKET ACTIVE MODE)",
     timestamp: new Date().toISOString(),
     memoryStats: {
       activeSearches: activeSearches.size,
@@ -933,7 +1008,8 @@ app.get("/", (req, res) => {
       rideType: d.rideType,
       routePoints: d.routePoints?.length || 0,
       pickup: d.pickupName,
-      destination: d.destinationName
+      destination: d.destinationName,
+      connected: websocketServer ? websocketServer.isUserConnected(d.userId) : false
     })),
     activePassengers: passengers.map(p => ({
       id: p.userId, 
@@ -1019,12 +1095,12 @@ const PORT = process.env.PORT || 3000;
 if (require.main === module) {
   const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`
-🚀 ShareWay AUTO-TIMEOUT Server Started!
+🚀 ShareWay WEB SOCKET ACTIVE Server Started!
 📍 Port: ${PORT}
 🌍 Environment: ${process.env.NODE_ENV || 'development'}
 🔥 Firebase: Minimal Usage Mode
 💾 Memory Cache: ENABLED
-🔌 WebSocket: ENABLED
+🔌 WebSocket: ACTIVE & INTEGRATED
 ⏰ Auto Timeouts: ENABLED
 
 📊 Current Stats:
@@ -1040,7 +1116,7 @@ if (require.main === module) {
 - Matching Interval: 30 seconds
 - Scheduled Check: 10 seconds
 
-✅ AUTO-TIMEOUT SYSTEM ACTIVE! 🎉
+✅ WEB SOCKET ACTIVE SEARCH MANAGEMENT ENABLED! 🎉
     `);
   });
 
