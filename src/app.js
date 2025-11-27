@@ -1,4 +1,4 @@
-// src/app.js - COMPLETELY UPDATED WITH WEB SOCKET CONNECTION TIMING FIX
+// src/app.js - MODIFIED FOR IMMEDIATE SCHEDULED SEARCH MATCHING
 const express = require("express");
 const admin = require("firebase-admin");
 const cors = require("cors");
@@ -35,6 +35,10 @@ app.use((req, res, next) => {
   }
   next();
 });
+
+// ========== TEST MODE CONFIGURATION ==========
+const TEST_MODE = true; // Set to true for immediate scheduled search testing
+const TEST_MATCHING_INTERVAL = 5000; // 5 seconds for testing
 
 // Initialize Firebase Admin
 let db;
@@ -201,6 +205,12 @@ const clearSearchTimeout = (userId) => {
 
 // Set timeout for scheduled search matching cycles
 const setScheduledMatchingTimeout = (userId, searchId, scheduledTime) => {
+  // 🎯 TEST MODE: Skip timeout for immediate activation
+  if (TEST_MODE) {
+    console.log(`🧪 TEST MODE: Skipping scheduled timeout for immediate activation`);
+    return;
+  }
+
   const scheduledDate = new Date(scheduledTime);
   const now = new Date();
   
@@ -298,10 +308,10 @@ const createActiveMatchForOverlay = async (matchData) => {
   }
 };
 
-// ========== ENHANCED SEARCH STORAGE FUNCTION WITH WEB SOCKET ==========
+// ========== ENHANCED SEARCH STORAGE FUNCTION WITH IMMEDIATE SCHEDULED MATCHING ==========
 
-const storeSearchInMemory = async (searchData) => { // Make this async
-  const { userId, userType, rideType = 'immediate' } = searchData;
+const storeSearchInMemory = async (searchData) => {
+  const { userId, userType, rideType = 'immediate', activateImmediately = TEST_MODE } = searchData;
   
   if (!userId) throw new Error('userId is required');
 
@@ -326,48 +336,61 @@ const storeSearchInMemory = async (searchData) => { // Make this async
     rideType: rideType,
     scheduledTime: searchData.scheduledTime,
     searchId: searchData.searchId || `${rideType}_${userId}_${Date.now()}`,
-    status: rideType === 'scheduled' ? 'scheduled' : 'searching',
+    // 🎯 SET STATUS BASED ON IMMEDIATE ACTIVATION
+    status: (rideType === 'scheduled' && !activateImmediately) ? 'scheduled' : 'searching',
     lastUpdated: Date.now(),
-    createdAt: searchData.createdAt || new Date().toISOString()
+    createdAt: searchData.createdAt || new Date().toISOString(),
+    // 🎯 STORE ACTIVATION FLAG
+    activateImmediately: activateImmediately
   };
 
   // Store in appropriate memory store
-  if (rideType === 'scheduled') {
+  if (rideType === 'scheduled' && !activateImmediately) {
+    // NORMAL SCHEDULED SEARCH (wait 30 minutes)
     scheduledSearches.set(userId, enhancedSearchData);
     console.log(`📅 SCHEDULED search stored: ${driverName || passengerName} (ID: ${userId}) for ${searchData.scheduledTime}`);
-    
-    // ✅ WAIT for WebSocket connection before sending notification
-    const isConnected = await waitForWebSocketConnection(userId);
-    if (websocketServer && isConnected) {
-      const sent = websocketServer.sendSearchStarted(userId, enhancedSearchData);
-      console.log(`📤 WebSocket scheduled search notification: ${sent}`);
-      
-      websocketServer.sendSearchStatusUpdate(userId, {
-        searchId: enhancedSearchData.searchId,
-        status: 'scheduled',
-        rideType: 'scheduled',
-        scheduledTime: searchData.scheduledTime,
-        pickupName: enhancedSearchData.pickupName,
-        destinationName: enhancedSearchData.destinationName
-      });
-    } else {
-      console.log(`⚠️ WebSocket not connected for ${userId}, cannot send search notification`);
-    }
     
     // Set scheduled activation timeout
     setScheduledMatchingTimeout(userId, enhancedSearchData.searchId, searchData.scheduledTime);
     
   } else {
+    // 🎯 IMMEDIATE SEARCH OR IMMEDIATELY ACTIVATED SCHEDULED SEARCH
     activeSearches.set(userId, enhancedSearchData);
-    console.log(`🎯 IMMEDIATE search stored: ${driverName || passengerName} (ID: ${userId})`);
     
-    // ✅ WAIT for WebSocket connection before sending notification
-    const isConnected = await waitForWebSocketConnection(userId);
-    if (websocketServer && isConnected) {
-      const sent = websocketServer.sendSearchStarted(userId, enhancedSearchData);
-      console.log(`📤 WebSocket immediate search notification: ${sent}`);
-      
-      // Send initial status update
+    if (rideType === 'scheduled') {
+      console.log(`🎯 SCHEDULED search ACTIVATED IMMEDIATELY: ${driverName || passengerName} (ID: ${userId})`);
+      console.log(`   - Will start matching immediately in next cycle`);
+    } else {
+      console.log(`🎯 IMMEDIATE search stored: ${driverName || passengerName} (ID: ${userId})`);
+    }
+    
+    // Set 5-minute timeout (skip in test mode for scheduled)
+    if (!TEST_MODE || rideType !== 'scheduled') {
+      setImmediateSearchTimeout(userId, enhancedSearchData.searchId);
+    } else {
+      console.log(`🧪 TEST MODE: No timeout for immediate scheduled search`);
+    }
+  }
+
+  // ✅ WAIT for WebSocket connection before sending notification
+  const isConnected = await waitForWebSocketConnection(userId);
+  if (websocketServer && isConnected) {
+    const sent = websocketServer.sendSearchStarted(userId, enhancedSearchData);
+    console.log(`📤 WebSocket search notification: ${sent}`);
+    
+    if (rideType === 'scheduled') {
+      websocketServer.sendSearchStatusUpdate(userId, {
+        searchId: enhancedSearchData.searchId,
+        status: enhancedSearchData.status,
+        rideType: 'scheduled',
+        scheduledTime: searchData.scheduledTime,
+        pickupName: enhancedSearchData.pickupName,
+        destinationName: enhancedSearchData.destinationName,
+        // 🎯 ADD ACTIVATION INFO
+        activatedImmediately: activateImmediately,
+        matchingStatus: activateImmediately ? 'Starting immediately' : 'Will start 30 minutes before scheduled time'
+      });
+    } else {
       websocketServer.sendSearchStatusUpdate(userId, {
         searchId: enhancedSearchData.searchId,
         status: 'searching',
@@ -377,12 +400,9 @@ const storeSearchInMemory = async (searchData) => { // Make this async
         pickupName: enhancedSearchData.pickupName,
         destinationName: enhancedSearchData.destinationName
       });
-    } else {
-      console.log(`⚠️ WebSocket not connected for ${userId}, cannot send search notification`);
     }
-    
-    // Set 5-minute timeout for immediate search
-    setImmediateSearchTimeout(userId, enhancedSearchData.searchId);
+  } else {
+    console.log(`⚠️ WebSocket not connected for ${userId}, cannot send search notification`);
   }
   
   // DEBUG: Show current searches by type
@@ -394,6 +414,7 @@ const storeSearchInMemory = async (searchData) => { // Make this async
   console.log(`📊 Memory Stats - Active: ${activeSearches.size} (D:${currentDrivers.length} P:${currentPassengers.length})`);
   console.log(`📊 Memory Stats - Scheduled: ${scheduledSearches.size} (D:${scheduledDrivers.length} P:${scheduledPassengers.length})`);
   console.log(`⏰ Active Timeouts: ${searchTimeouts.size}`);
+  console.log(`🧪 TEST MODE: ${TEST_MODE ? 'ACTIVE - Scheduled searches start immediately' : 'INACTIVE'}`);
   
   return enhancedSearchData;
 };
@@ -547,7 +568,8 @@ app.post("/api/match/search", async (req, res) => {
       matches: [],
       matchCount: 0,
       matchingAlgorithm: 'enhanced_route_similarity_v2',
-      websocketConnected: websocketServer ? websocketServer.isUserConnected(actualUserId) : false
+      websocketConnected: websocketServer ? websocketServer.isUserConnected(actualUserId) : false,
+      testMode: TEST_MODE
     });
     
   } catch (error) {
@@ -559,7 +581,7 @@ app.post("/api/match/search", async (req, res) => {
   }
 });
 
-// ========== SCHEDULED SEARCH ENDPOINT ==========
+// ========== SCHEDULED SEARCH ENDPOINT WITH IMMEDIATE MATCHING ==========
 
 app.post("/api/match/scheduled-search", async (req, res) => {
   try {
@@ -579,11 +601,13 @@ app.post("/api/match/scheduled-search", async (req, res) => {
       capacity,
       passengerCount,
       scheduledTime, // Required for scheduled searches
-      searchId
+      searchId,
+      // 🎯 ADD IMMEDIATE ACTIVATION FLAG
+      activateImmediately = TEST_MODE // Default to TEST_MODE value
     } = req.body;
     
-    // Validate scheduled time
-    if (!scheduledTime) {
+    // Validate scheduled time (unless activating immediately)
+    if (!scheduledTime && !activateImmediately) {
       return res.status(400).json({ 
         success: false, 
         error: 'scheduledTime is required for scheduled searches' 
@@ -621,7 +645,9 @@ app.post("/api/match/scheduled-search", async (req, res) => {
       passengerCount: passengerCount,
       rideType: 'scheduled',
       scheduledTime: scheduledTime,
-      searchId: searchId || `scheduled_${actualUserId}_${Date.now()}`
+      searchId: searchId || `scheduled_${actualUserId}_${Date.now()}`,
+      // 🎯 ADD IMMEDIATE ACTIVATION FLAG
+      activateImmediately: activateImmediately
     };
 
     // ✅ AWAIT the search storage
@@ -629,14 +655,22 @@ app.post("/api/match/scheduled-search", async (req, res) => {
 
     res.json({
       success: true,
-      message: 'Scheduled search created successfully',
+      message: activateImmediately ? 
+        'Scheduled search created and ACTIVATED IMMEDIATELY - will start matching now!' : 
+        'Scheduled search created successfully',
       searchId: searchData.searchId,
       userId: actualUserId,
       rideType: 'scheduled',
       scheduledTime: scheduledTime,
-      status: 'scheduled',
-      activationTime: '30 minutes before scheduled time',
-      matches: []
+      status: activateImmediately ? 'searching' : 'scheduled',
+      activationTime: activateImmediately ? 'IMMEDIATELY' : '30 minutes before scheduled time',
+      matches: [],
+      // 🎯 ADD ACTIVATION INFO
+      activatedImmediately: activateImmediately,
+      testMode: TEST_MODE,
+      matchingStatus: activateImmediately ? 
+        'Will start matching in next cycle (5-30 seconds)' : 
+        'Will start 30 minutes before scheduled time'
     });
     
   } catch (error) {
@@ -775,7 +809,10 @@ app.get("/api/match/search-status/:userId", async (req, res) => {
         lastUpdated: searchData.lastUpdated,
         pickupName: searchData.pickupName,
         destinationName: searchData.destinationName,
-        timeRemaining: timeRemaining ? Math.round(timeRemaining / 1000) : null
+        timeRemaining: timeRemaining ? Math.round(timeRemaining / 1000) : null,
+        // 🎯 ADD TEST MODE INFO
+        activatedImmediately: searchData.activateImmediately,
+        testMode: TEST_MODE
       },
       memoryStats: {
         activeSearches: activeSearches.size,
@@ -809,7 +846,8 @@ app.get("/api/debug/websocket", (req, res) => {
     connectedUsers: connectedUsers,
     totalConnections: totalConnections,
     detailedConnections: websocketServer.getDetailedConnectionInfo(),
-    serverTime: new Date().toISOString()
+    serverTime: new Date().toISOString(),
+    testMode: TEST_MODE
   });
 });
 
@@ -817,6 +855,8 @@ app.get("/api/debug/websocket", (req, res) => {
 app.get("/api/debug/searches", (req, res) => {
   const drivers = Array.from(activeSearches.values()).filter(s => s.userType === 'driver');
   const passengers = Array.from(activeSearches.values()).filter(s => s.userType === 'passenger');
+  const scheduledDrivers = Array.from(scheduledSearches.values()).filter(s => s.userType === 'driver');
+  const scheduledPassengers = Array.from(scheduledSearches.values()).filter(s => s.userType === 'passenger');
   
   res.json({
     activeSearches: activeSearches.size,
@@ -828,33 +868,56 @@ app.get("/api/debug/searches", (req, res) => {
       searchId: d.searchId,
       pickup: d.pickupName,
       destination: d.destinationName,
+      rideType: d.rideType,
+      activatedImmediately: d.activateImmediately,
       connected: websocketServer ? websocketServer.isUserConnected(d.userId) : false
     })),
     activePassengers: passengers.map(p => ({
       id: p.userId, 
       name: p.passengerName,
       status: p.status,
+      searchId: p.searchId,
+      rideType: p.rideType,
+      activatedImmediately: p.activateImmediately
+    })),
+    scheduledDrivers: scheduledDrivers.map(d => ({
+      id: d.userId,
+      name: d.driverName,
+      status: d.status,
+      scheduledTime: d.scheduledTime,
+      searchId: d.searchId
+    })),
+    scheduledPassengers: scheduledPassengers.map(p => ({
+      id: p.userId,
+      name: p.passengerName,
+      status: p.status,
+      scheduledTime: p.scheduledTime,
       searchId: p.searchId
     })),
     activeTimeouts: searchTimeouts.size,
-    processedMatches: processedMatches.size
+    processedMatches: processedMatches.size,
+    testMode: TEST_MODE
   });
 });
 
-// ========== FIXED OPTIMIZED MATCHING SERVICE ==========
+// ========== FIXED OPTIMIZED MATCHING SERVICE WITH IMMEDIATE SCHEDULED MATCHING ==========
 
 const startOptimizedMatching = () => {
   console.log('🔄 Starting Optimized Matching Service...');
+  console.log(`🧪 TEST MODE: ${TEST_MODE ? 'ACTIVE - Scheduled searches start immediately' : 'INACTIVE'}`);
   
-  // Run every 30 seconds for better responsiveness
+  // 🎯 USE TEST INTERVAL IN TEST MODE
+  const matchingInterval = TEST_MODE ? TEST_MATCHING_INTERVAL : 30000;
+  
   setInterval(async () => {
     try {
       console.log(`\n📊 ===== MATCHING CYCLE START =====`);
+      console.log(`🧪 TEST MODE: ${TEST_MODE ? 'ACTIVE' : 'INACTIVE'}`);
       
       // First, activate any scheduled searches that are due
       checkScheduledSearchActivation();
 
-      // Get drivers and passengers from memory
+      // Get drivers and passengers from memory - INCLUDES IMMEDIATE SCHEDULED SEARCHES
       const drivers = Array.from(activeSearches.values())
         .filter(search => search.userType === 'driver' && search.status === 'searching');
       
@@ -862,6 +925,13 @@ const startOptimizedMatching = () => {
         .filter(search => search.userType === 'passenger' && search.status === 'searching');
 
       console.log(`📊 Matching: ${drivers.length} drivers vs ${passengers.length} passengers`);
+      
+      // 🎯 LOG SCHEDULED SEARCHES THAT ARE ACTIVE
+      const scheduledDrivers = drivers.filter(d => d.rideType === 'scheduled');
+      const scheduledPassengers = passengers.filter(p => p.rideType === 'scheduled');
+      if (scheduledDrivers.length > 0 || scheduledPassengers.length > 0) {
+        console.log(`📅 ACTIVE SCHEDULED SEARCHES - Drivers: ${scheduledDrivers.length}, Passengers: ${scheduledPassengers.length}`);
+      }
       
       if (drivers.length === 0 || passengers.length === 0) {
         console.log(`💤 No matches possible - Drivers: ${drivers.length}, Passengers: ${passengers.length}`);
@@ -881,21 +951,21 @@ const startOptimizedMatching = () => {
       // Log actual search details
       console.log('🚗 Active Drivers:');
       drivers.forEach(driver => {
-        console.log(`   - ${driver.driverName} (${driver.userId}) - ${driver.rideType}`);
+        console.log(`   - ${driver.driverName} (${driver.userId}) - ${driver.rideType}${driver.activateImmediately ? ' [IMMEDIATE ACTIVATION]' : ''}`);
         console.log(`     Route: ${driver.pickupName} → ${driver.destinationName}`);
         console.log(`     Points: ${driver.routePoints ? driver.routePoints.length : 0}`);
       });
 
       console.log('👤 Active Passengers:');
       passengers.forEach(passenger => {
-        console.log(`   - ${passenger.passengerName} (${passenger.userId}) - ${passenger.rideType}`);
+        console.log(`   - ${passenger.passengerName} (${passenger.userId}) - ${passenger.rideType}${passenger.activateImmediately ? ' [IMMEDIATE ACTIVATION]' : ''}`);
         console.log(`     Route: ${passenger.pickupName} → ${passenger.destinationName}`);
         console.log(`     Points: ${passenger.routePoints ? passenger.routePoints.length : 0}`);
       });
       
       let matchesCreated = 0;
       
-      // Optimized matching
+      // Optimized matching - INCLUDES SCHEDULED SEARCHES THAT ARE ACTIVE
       for (const driver of drivers) {
         for (const passenger of passengers) {
           // Enhanced validation with debugging
@@ -949,7 +1019,10 @@ const startOptimizedMatching = () => {
                 vehicleType: driver.vehicleType || 'car',
                 rideType: driver.rideType || passenger.rideType || 'immediate',
                 scheduledTime: driver.scheduledTime || passenger.scheduledTime,
-                timestamp: new Date().toISOString()
+                timestamp: new Date().toISOString(),
+                // 🎯 ADD MATCH TYPE INFO
+                matchType: (driver.rideType === 'scheduled' || passenger.rideType === 'scheduled') ? 
+                  'scheduled_immediate_match' : 'immediate_match'
               };
 
               // Create overlay match (now uses WebSocket)
@@ -960,6 +1033,9 @@ const startOptimizedMatching = () => {
                 processedMatches.set(matchKey, Date.now());
                 
                 console.log(`🎉 MATCH CREATED: ${driver.driverName || 'Driver'} ↔ ${passenger.passengerName || 'Passenger'} (Score: ${similarity.toFixed(3)})`);
+                if (driver.rideType === 'scheduled' || passenger.rideType === 'scheduled') {
+                  console.log(`   📅 SCHEDULED SEARCH MATCH!`);
+                }
               }
             } else {
               console.log(`🔁 Skipping duplicate match: ${matchKey}`);
@@ -981,7 +1057,7 @@ const startOptimizedMatching = () => {
     } catch (error) {
       console.error('❌ Matching error:', error);
     }
-  }, 30000); // 30 seconds
+  }, matchingInterval); // 🎯 USE DYNAMIC INTERVAL
 
   // Check scheduled searches every 10 seconds
   setInterval(checkScheduledSearchActivation, SCHEDULED_SEARCH_CHECK_INTERVAL);
@@ -1017,7 +1093,9 @@ app.get("/api/websocket/status", (req, res) => {
       totalScheduledSearches: scheduledSearches.size,
       totalProcessedMatches: processedMatches.size,
       activeTimeouts: searchTimeouts.size
-    }
+    },
+    testMode: TEST_MODE,
+    immediateScheduledMatching: TEST_MODE ? 'ACTIVE' : 'INACTIVE'
   });
 });
 
@@ -1029,7 +1107,7 @@ app.get("/", (req, res) => {
   const scheduled = Array.from(scheduledSearches.values());
   
   res.json({ 
-    status: "🚀 Server running (WEB SOCKET CONNECTION FIXED)",
+    status: "🚀 Server running (IMMEDIATE SCHEDULED SEARCH MATCHING)",
     timestamp: new Date().toISOString(),
     memoryStats: {
       activeSearches: activeSearches.size,
@@ -1042,10 +1120,12 @@ app.get("/", (req, res) => {
     },
     timeoutSettings: {
       immediateSearch: "5 minutes",
-      scheduledActivation: "30 minutes before ride time",
-      matchingInterval: "30 seconds",
+      scheduledActivation: TEST_MODE ? "IMMEDIATE (TEST MODE)" : "30 minutes before ride time",
+      matchingInterval: TEST_MODE ? "5 seconds" : "30 seconds",
       scheduledCheck: "10 seconds"
     },
+    testMode: TEST_MODE,
+    immediateScheduledMatching: TEST_MODE ? "ACTIVE - Scheduled searches start matching immediately" : "INACTIVE",
     activeDrivers: drivers.map(d => ({
       id: d.userId,
       name: d.driverName,
@@ -1054,6 +1134,7 @@ app.get("/", (req, res) => {
       routePoints: d.routePoints?.length || 0,
       pickup: d.pickupName,
       destination: d.destinationName,
+      activatedImmediately: d.activateImmediately,
       connected: websocketServer ? websocketServer.isUserConnected(d.userId) : false
     })),
     activePassengers: passengers.map(p => ({
@@ -1063,7 +1144,8 @@ app.get("/", (req, res) => {
       rideType: p.rideType,
       routePoints: p.routePoints?.length || 0,
       pickup: p.pickupName,
-      destination: p.destinationName
+      destination: p.destinationName,
+      activatedImmediately: p.activateImmediately
     })),
     scheduledSearches: scheduled.map(s => ({
       id: s.userId,
@@ -1098,7 +1180,8 @@ app.get("/api/match/active/:userId", async (req, res) => {
     res.json({
       success: true,
       activeMatches,
-      count: activeMatches.length
+      count: activeMatches.length,
+      testMode: TEST_MODE
     });
     
   } catch (error) {
@@ -1140,13 +1223,16 @@ const PORT = process.env.PORT || 3000;
 if (require.main === module) {
   const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`
-🚀 ShareWay WEB SOCKET CONNECTION FIXED Server Started!
+🚀 ShareWay IMMEDIATE SCHEDULED SEARCH MATCHING Server Started!
 📍 Port: ${PORT}
 🌍 Environment: ${process.env.NODE_ENV || 'development'}
 🔥 Firebase: Minimal Usage Mode
 💾 Memory Cache: ENABLED
 🔌 WebSocket: CONNECTION TIMING FIXED
 ⏰ Auto Timeouts: ENABLED
+
+🎯 SCHEDULED SEARCH MATCHING: IMMEDIATE!
+🧪 TEST MODE: ${TEST_MODE ? 'ACTIVE' : 'INACTIVE'}
 
 📊 Current Stats:
 - Active Searches: ${activeSearches.size} (in memory)
@@ -1157,11 +1243,11 @@ if (require.main === module) {
 
 ⏰ TIMEOUT SETTINGS:
 - Immediate Search: 5 minutes
-- Scheduled Activation: 30 minutes before ride time  
-- Matching Interval: 30 seconds
+- Scheduled Activation: ${TEST_MODE ? 'IMMEDIATE (TEST MODE)' : '30 minutes before ride time'}  
+- Matching Interval: ${TEST_MODE ? '5 seconds' : '30 seconds'}
 - Scheduled Check: 10 seconds
 
-✅ WEB SOCKET CONNECTION TIMING FIXED! 🎉
+✅ SCHEDULED SEARCHES WILL START MATCHING IMMEDIATELY! 🎉
     `);
   });
 
