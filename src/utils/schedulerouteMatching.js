@@ -1,14 +1,14 @@
 // utils/schedulerouteMatching.js - FIXED FOR IMMEDIATE TESTING
 const admin = require('firebase-admin');
 
+// TEST MODE - Set to true for immediate testing
+const TEST_MODE = true;
+const TEST_ACTIVATION_BUFFER = 1 * 60 * 1000; // 1 minute for testing
+
 // Scheduled search management
 const scheduledSearches = new Map();
 const scheduledMatches = new Map();
 const ACTIVATION_BUFFER = 30 * 60 * 1000; // 30 minutes before scheduled time
-
-// TEST MODE - Set to true for immediate testing
-const TEST_MODE = true;
-const TEST_ACTIVATION_BUFFER = 1 * 60 * 1000; // 1 minute for testing
 
 // Initialize scheduled search
 const initializeScheduledSearch = (searchData) => {
@@ -31,7 +31,8 @@ const initializeScheduledSearch = (searchData) => {
     scheduledTime: new Date(scheduledTime),
     status: 'scheduled', // scheduled, activating, active, expired
     createdAt: new Date(),
-    lastUpdated: Date.now()
+    lastUpdated: Date.now(),
+    testMode: TEST_MODE // Add test mode flag
   };
 
   scheduledSearches.set(userId, scheduledSearch);
@@ -40,30 +41,32 @@ const initializeScheduledSearch = (searchData) => {
   console.log(`   - User: ${userId} (${userType})`);
   console.log(`   - Scheduled: ${scheduledSearch.scheduledTime.toISOString()}`);
   console.log(`   - Route: ${scheduledSearch.pickupName} → ${scheduledSearch.destinationName}`);
-  console.log(`   - TEST MODE: ${TEST_MODE ? 'ACTIVE' : 'INACTIVE'}`);
+  console.log(`   - TEST MODE: ${TEST_MODE ? 'ACTIVE - Auto-activating!' : 'INACTIVE'}`);
   
-  // IMMEDIATE ACTIVATION FOR TESTING
+  // 🎯 CRITICAL FIX: Auto-activate immediately in test mode
   if (TEST_MODE) {
     console.log(`   🚨 TEST MODE: Auto-activating scheduled search immediately!`);
     scheduledSearch.status = 'activating';
     scheduledSearch.lastUpdated = Date.now();
+    scheduledSearch.forceActivated = true;
   }
   
   return scheduledSearch;
 };
 
-// Check and activate scheduled searches - FIXED FOR TESTING
+// 🎯 FIXED: Check and activate scheduled searches with TEST MODE
 const checkScheduledSearchActivation = () => {
   const now = new Date();
   let activatedCount = 0;
   let expiredCount = 0;
 
   console.log(`\n🕒 Checking scheduled searches activation... (Total: ${scheduledSearches.size})`);
+  console.log(`🧪 TEST MODE: ${TEST_MODE ? 'ACTIVE' : 'INACTIVE'}`);
 
   for (const [userId, search] of scheduledSearches.entries()) {
     const timeUntilRide = search.scheduledTime.getTime() - now.getTime();
     
-    // USE TEST BUFFER IN TEST MODE
+    // 🎯 USE TEST BUFFER IN TEST MODE
     const activationBuffer = TEST_MODE ? TEST_ACTIVATION_BUFFER : ACTIVATION_BUFFER;
     const timeUntilActivation = timeUntilRide - activationBuffer;
     
@@ -82,10 +85,11 @@ const checkScheduledSearchActivation = () => {
       continue;
     }
 
-    // TEST MODE: Auto-activate all searches immediately
+    // 🎯 TEST MODE: Auto-activate all searches immediately
     if (TEST_MODE && search.status === 'scheduled') {
       search.status = 'activating';
       search.lastUpdated = Date.now();
+      search.forceActivated = true;
       activatedCount++;
       console.log(`     🚨 TEST MODE: Auto-activating immediately!`);
       continue;
@@ -122,7 +126,7 @@ const checkScheduledSearchActivation = () => {
   return { activatedCount, expiredCount };
 };
 
-// Get scheduled searches ready for matching - FIXED FOR TESTING
+// 🎯 FIXED: Get scheduled searches ready for matching with TEST MODE
 const getScheduledSearchesForMatching = (userType) => {
   const matchingSearches = Array.from(scheduledSearches.values())
     .filter(search => {
@@ -131,6 +135,9 @@ const getScheduledSearchesForMatching = (userType) => {
       
       if (shouldMatch) {
         console.log(`   ✅ ${search.driverName || search.passengerName}: ${search.status} - READY FOR MATCHING`);
+        if (search.forceActivated) {
+          console.log(`      🚨 FORCE ACTIVATED FOR TESTING`);
+        }
       }
       
       return shouldMatch;
@@ -144,17 +151,21 @@ const getScheduledSearchesForMatching = (userType) => {
       .filter(s => s.userType === userType)
       .forEach(s => {
         console.log(`     - ${s.driverName || s.passengerName}: ${s.status}`);
+        if (s.status === 'scheduled') {
+          const timeUntilRide = s.scheduledTime.getTime() - new Date().getTime();
+          console.log(`       ⏰ Time until activation: ${Math.round((timeUntilRide - ACTIVATION_BUFFER) / 60000)}min`);
+        }
       });
   }
 
   return matchingSearches;
 };
 
-// Dedicated scheduled search matching - FIXED FOR TESTING
+// 🎯 FIXED: Dedicated scheduled search matching with TEST MODE
 const performScheduledMatching = async (db) => {
   try {
     console.log(`\n📅 ===== SCHEDULED MATCHING CYCLE START =====`);
-    console.log(`🚨 TEST MODE: ${TEST_MODE ? 'ACTIVE - Matching immediately!' : 'INACTIVE'}`);
+    console.log(`🧪 TEST MODE: ${TEST_MODE ? 'ACTIVE - Matching immediately!' : 'INACTIVE'}`);
     
     // First, check and update activation status
     const activationResult = checkScheduledSearchActivation();
@@ -210,13 +221,13 @@ const performScheduledMatching = async (db) => {
           driver.routePoints,
           { 
             similarityThreshold: 0.001, 
-            maxDistanceThreshold: 100.0 // Increased for testing
+            maxDistanceThreshold: TEST_MODE ? 100.0 : 50.0 // Increased for testing
           }
         );
 
         console.log(`🔍 SCHEDULED ${driver.driverName} ↔ ${passenger.passengerName}: Score=${similarity.toFixed(3)}`);
 
-        // LOWER THRESHOLD FOR TESTING - match even with lower similarity
+        // 🎯 LOWER THRESHOLD FOR TESTING - match even with lower similarity
         const matchThreshold = TEST_MODE ? 0.005 : 0.01;
         
         if (similarity > matchThreshold) {
@@ -262,6 +273,15 @@ const performScheduledMatching = async (db) => {
           }
         } else {
           console.log(`📉 Scheduled similarity too low: ${similarity.toFixed(3)} (threshold: ${matchThreshold})`);
+          
+          // 🎯 TEST MODE: Force create match even with low similarity
+          if (TEST_MODE && similarity > 0.001) {
+            console.log(`🧪 TEST MODE: Force creating match despite low similarity`);
+            const forceMatch = await forceCreateScheduledMatch(db, driver, passenger, similarity);
+            if (forceMatch) {
+              matchesCreated++;
+            }
+          }
         }
       }
     }
@@ -274,6 +294,49 @@ const performScheduledMatching = async (db) => {
   } catch (error) {
     console.error('❌ Error in scheduled matching:', error);
     return { matchesCreated: 0, error: error.message };
+  }
+};
+
+// 🎯 NEW: Force create scheduled match for testing
+const forceCreateScheduledMatch = async (db, driver, passenger, similarity) => {
+  try {
+    const timestamp = Date.now();
+    const matchId = `force_scheduled_${driver.userId}_${passenger.userId}_${timestamp}`;
+    
+    const matchData = {
+      matchId,
+      driverId: driver.userId,
+      driverName: driver.driverName,
+      passengerId: passenger.userId,
+      passengerName: passenger.passengerName,
+      similarityScore: Math.max(similarity, 0.1), // Ensure minimum score
+      matchQuality: 'test_forced',
+      pickupName: passenger.pickupName || driver.pickupName || 'Test Location',
+      destinationName: passenger.destinationName || driver.destinationName || 'Test Destination',
+      pickupLocation: passenger.pickupLocation || driver.pickupLocation,
+      destinationLocation: passenger.destinationLocation || driver.destinationLocation,
+      passengerCount: passenger.passengerCount || 1,
+      capacity: driver.capacity || 4,
+      vehicleType: driver.vehicleType || 'car',
+      rideType: 'scheduled',
+      scheduledTime: driver.scheduledTime.toISOString(),
+      matchType: 'scheduled_forced_match',
+      status: 'proposed',
+      timestamp: new Date(timestamp).toISOString(),
+      forceCreated: true,
+      testMode: true
+    };
+
+    await db.collection('scheduled_matches').doc(matchId).set({
+      ...matchData,
+      createdAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    console.log(`🧪 FORCE CREATED SCHEDULED MATCH: ${driver.driverName} ↔ ${passenger.passengerName}`);
+    return matchData;
+  } catch (error) {
+    console.error('❌ Error force creating scheduled match:', error);
+    return null;
   }
 };
 
@@ -406,7 +469,7 @@ const sendScheduledMatchNotification = async (db, matchData) => {
   }
 };
 
-// Force activate all scheduled searches for testing
+// 🎯 NEW: Force activate all scheduled searches for testing
 const forceActivateAllScheduledSearches = () => {
   let activatedCount = 0;
   
@@ -414,6 +477,7 @@ const forceActivateAllScheduledSearches = () => {
     if (search.status === 'scheduled') {
       search.status = 'activating';
       search.lastUpdated = Date.now();
+      search.forceActivated = true;
       activatedCount++;
       console.log(`🚨 FORCE ACTIVATED: ${search.driverName || search.passengerName}`);
     }
@@ -448,7 +512,8 @@ const getScheduledSearchStatus = (userId) => {
     destinationName: search.destinationName,
     routePoints: search.routePoints.length,
     testMode: TEST_MODE,
-    readyForMatching: search.status === 'activating' || search.status === 'active'
+    readyForMatching: search.status === 'activating' || search.status === 'active',
+    forceActivated: search.forceActivated || false
   };
 };
 
@@ -468,6 +533,9 @@ const getScheduledMatchingStats = () => {
     testMode: TEST_MODE,
     readyForMatching: Array.from(scheduledSearches.values()).filter(s => 
       s.status === 'activating' || s.status === 'active'
+    ).length,
+    forceActivated: Array.from(scheduledSearches.values()).filter(s => 
+      s.forceActivated
     ).length
   };
 
@@ -499,6 +567,7 @@ module.exports = {
   
   // TESTING FUNCTIONS
   forceActivateAllScheduledSearches,
+  forceCreateScheduledMatch,
   
   // Maintenance
   cleanupOldScheduledMatches,
@@ -508,5 +577,8 @@ module.exports = {
   
   // Data access (for debugging)
   getAllScheduledSearches: () => Array.from(scheduledSearches.values()),
-  getAllScheduledMatches: () => Array.from(scheduledMatches.values())
+  getAllScheduledMatches: () => Array.from(scheduledMatches.values()),
+  
+  // Test mode flag
+  TEST_MODE
 };
