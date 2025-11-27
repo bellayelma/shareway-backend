@@ -1,4 +1,4 @@
-// src/app.js - COMPLETELY UPDATED WITH WEB SOCKET INTEGRATION
+// src/app.js - COMPLETELY UPDATED WITH WEB SOCKET CONNECTION TIMING FIX
 const express = require("express");
 const admin = require("firebase-admin");
 const cors = require("cors");
@@ -109,6 +109,42 @@ setInterval(() => {
 const generateMatchKey = (driverId, passengerId, timestamp = Date.now()) => {
   const timeWindow = Math.floor(timestamp / 30000); // 30-second windows
   return `${driverId}_${passengerId}_${timeWindow}`;
+};
+
+// ========== WEB SOCKET CONNECTION HELPER ==========
+
+// Wait for WebSocket connection with timeout
+const waitForWebSocketConnection = (userId, maxWaitTime = 5000) => {
+  return new Promise((resolve) => {
+    if (!websocketServer) {
+      console.log('❌ WebSocket server not available');
+      return resolve(false);
+    }
+
+    const startTime = Date.now();
+    
+    const checkConnection = () => {
+      const isConnected = websocketServer.isUserConnected(userId);
+      
+      if (isConnected) {
+        console.log(`✅ WebSocket connection confirmed for ${userId}`);
+        resolve(true);
+        return;
+      }
+      
+      const elapsed = Date.now() - startTime;
+      if (elapsed > maxWaitTime) {
+        console.log(`⏰ WebSocket connection timeout for ${userId}`);
+        resolve(false);
+        return;
+      }
+      
+      // Check again in 100ms
+      setTimeout(checkConnection, 100);
+    };
+    
+    checkConnection();
+  });
 };
 
 // ========== SEARCH TIMEOUT MANAGEMENT ==========
@@ -264,7 +300,7 @@ const createActiveMatchForOverlay = async (matchData) => {
 
 // ========== ENHANCED SEARCH STORAGE FUNCTION WITH WEB SOCKET ==========
 
-const storeSearchInMemory = (searchData) => {
+const storeSearchInMemory = async (searchData) => { // Make this async
   const { userId, userType, rideType = 'immediate' } = searchData;
   
   if (!userId) throw new Error('userId is required');
@@ -300,8 +336,9 @@ const storeSearchInMemory = (searchData) => {
     scheduledSearches.set(userId, enhancedSearchData);
     console.log(`📅 SCHEDULED search stored: ${driverName || passengerName} (ID: ${userId}) for ${searchData.scheduledTime}`);
     
-    // ✅ CRITICAL: Send WebSocket notification for scheduled search
-    if (websocketServer) {
+    // ✅ WAIT for WebSocket connection before sending notification
+    const isConnected = await waitForWebSocketConnection(userId);
+    if (websocketServer && isConnected) {
       const sent = websocketServer.sendSearchStarted(userId, enhancedSearchData);
       console.log(`📤 WebSocket scheduled search notification: ${sent}`);
       
@@ -313,6 +350,8 @@ const storeSearchInMemory = (searchData) => {
         pickupName: enhancedSearchData.pickupName,
         destinationName: enhancedSearchData.destinationName
       });
+    } else {
+      console.log(`⚠️ WebSocket not connected for ${userId}, cannot send search notification`);
     }
     
     // Set scheduled activation timeout
@@ -322,8 +361,9 @@ const storeSearchInMemory = (searchData) => {
     activeSearches.set(userId, enhancedSearchData);
     console.log(`🎯 IMMEDIATE search stored: ${driverName || passengerName} (ID: ${userId})`);
     
-    // ✅ CRITICAL: Send WebSocket notification for immediate search
-    if (websocketServer) {
+    // ✅ WAIT for WebSocket connection before sending notification
+    const isConnected = await waitForWebSocketConnection(userId);
+    if (websocketServer && isConnected) {
       const sent = websocketServer.sendSearchStarted(userId, enhancedSearchData);
       console.log(`📤 WebSocket immediate search notification: ${sent}`);
       
@@ -333,10 +373,12 @@ const storeSearchInMemory = (searchData) => {
         status: 'searching',
         rideType: 'immediate',
         matchesFound: 0,
-        timeRemaining: 300, // 5 minutes in seconds
+        timeRemaining: 300,
         pickupName: enhancedSearchData.pickupName,
         destinationName: enhancedSearchData.destinationName
       });
+    } else {
+      console.log(`⚠️ WebSocket not connected for ${userId}, cannot send search notification`);
     }
     
     // Set 5-minute timeout for immediate search
@@ -473,7 +515,7 @@ app.post("/api/match/search", async (req, res) => {
       activeSearches.delete(actualUserId);
     }
 
-    // Store the search in memory
+    // Store the search in memory - NOW ASYNC
     const searchData = {
       userId: actualUserId,
       userType: userType,
@@ -491,7 +533,8 @@ app.post("/api/match/search", async (req, res) => {
       searchId: searchId || `search_${actualUserId}_${Date.now()}`
     };
 
-    storeSearchInMemory(searchData);
+    // ✅ AWAIT the search storage to ensure WebSocket notification is sent
+    await storeSearchInMemory(searchData);
 
     // Return success response
     res.json({
@@ -503,7 +546,8 @@ app.post("/api/match/search", async (req, res) => {
       timeout: '5 minutes',
       matches: [],
       matchCount: 0,
-      matchingAlgorithm: 'enhanced_route_similarity_v2'
+      matchingAlgorithm: 'enhanced_route_similarity_v2',
+      websocketConnected: websocketServer ? websocketServer.isUserConnected(actualUserId) : false
     });
     
   } catch (error) {
@@ -580,7 +624,8 @@ app.post("/api/match/scheduled-search", async (req, res) => {
       searchId: searchId || `scheduled_${actualUserId}_${Date.now()}`
     };
 
-    storeSearchInMemory(searchData);
+    // ✅ AWAIT the search storage
+    await storeSearchInMemory(searchData);
 
     res.json({
       success: true,
@@ -984,7 +1029,7 @@ app.get("/", (req, res) => {
   const scheduled = Array.from(scheduledSearches.values());
   
   res.json({ 
-    status: "🚀 Server running (WEB SOCKET ACTIVE MODE)",
+    status: "🚀 Server running (WEB SOCKET CONNECTION FIXED)",
     timestamp: new Date().toISOString(),
     memoryStats: {
       activeSearches: activeSearches.size,
@@ -1095,12 +1140,12 @@ const PORT = process.env.PORT || 3000;
 if (require.main === module) {
   const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`
-🚀 ShareWay WEB SOCKET ACTIVE Server Started!
+🚀 ShareWay WEB SOCKET CONNECTION FIXED Server Started!
 📍 Port: ${PORT}
 🌍 Environment: ${process.env.NODE_ENV || 'development'}
 🔥 Firebase: Minimal Usage Mode
 💾 Memory Cache: ENABLED
-🔌 WebSocket: ACTIVE & INTEGRATED
+🔌 WebSocket: CONNECTION TIMING FIXED
 ⏰ Auto Timeouts: ENABLED
 
 📊 Current Stats:
@@ -1116,7 +1161,7 @@ if (require.main === module) {
 - Matching Interval: 30 seconds
 - Scheduled Check: 10 seconds
 
-✅ WEB SOCKET ACTIVE SEARCH MANAGEMENT ENABLED! 🎉
+✅ WEB SOCKET CONNECTION TIMING FIXED! 🎉
     `);
   });
 
