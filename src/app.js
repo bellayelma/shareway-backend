@@ -1,4 +1,4 @@
-// src/app.js - MODIFIED WITH FIRESTORE HYBRID STORAGE
+// src/app.js - MODIFIED FOR UNLIMITED PASSENGER CAPACITY
 const express = require("express");
 const admin = require("firebase-admin");
 const cors = require("cors");
@@ -9,8 +9,6 @@ require("dotenv").config({ path: path.join(__dirname, '../.env') });
 const routeMatching = require("./utils/routeMatching");
 // Import WebSocket Server
 const WebSocketServer = require("./websocketServer");
-// Import updated scheduled matching with Firestore hybrid
-const scheduledMatching = require("./utils/schedulerouteMatching");
 
 const app = express();
 
@@ -83,7 +81,7 @@ const setupWebSocket = (server) => {
 
 // In-memory storage to minimize Firestore reads/writes
 const activeSearches = new Map();
-const scheduledSearches = new Map(); // 🎯 NOW SYNCED WITH FIRESTORE
+const scheduledSearches = new Map();
 const processedMatches = new Map();
 const searchTimeouts = new Map(); // Track search timeouts
 const userMatches = new Map(); // Track matches per user
@@ -93,24 +91,6 @@ const IMMEDIATE_SEARCH_TIMEOUT = 5 * 60 * 1000; // 5 minutes
 const SCHEDULED_MATCHING_INTERVAL = 30 * 60 * 1000; // 30 minutes
 const SCHEDULED_SEARCH_CHECK_INTERVAL = 10000; // 10 seconds
 const MAX_MATCH_AGE = 300000; // 5 minutes
-
-// ========== SERVER STARTUP: RELOAD SCHEDULED SEARCHES FROM FIRESTORE ==========
-const reloadScheduledSearchesOnStartup = async () => {
-  try {
-    console.log('🔄 Reloading scheduled searches from Firestore after restart...');
-    const loadedCount = await scheduledMatching.loadScheduledSearchesToMemory(db);
-    console.log(`✅ Server restart recovery: Loaded ${loadedCount} scheduled searches to memory`);
-    
-    // Update our local scheduledSearches map with the loaded data
-    const allScheduledSearches = scheduledMatching.getAllScheduledSearches();
-    allScheduledSearches.forEach(search => {
-      scheduledSearches.set(search.userId, search);
-    });
-    
-  } catch (error) {
-    console.error('❌ Error reloading scheduled searches on startup:', error);
-  }
-};
 
 // Clean old data from memory
 setInterval(() => {
@@ -164,14 +144,11 @@ const stopUserSearch = (userId) => {
       }
     }
     
-    // Remove from scheduled searches (both memory and Firestore)
+    // Remove from scheduled searches
     if (scheduledSearches.has(userId)) {
       const search = scheduledSearches.get(userId);
       scheduledSearches.delete(userId);
       console.log(`✅ Stopped scheduled search for ${search.driverName || search.passengerName}`);
-      
-      // 🎯 ALSO update Firestore status to 'completed'
-      scheduledMatching.updateScheduledSearchStatus(db, userId, 'completed').catch(console.error);
     }
     
     return true;
@@ -431,7 +408,7 @@ const createActiveMatchForOverlay = async (matchData) => {
   }
 };
 
-// ========== ENHANCED SEARCH STORAGE FUNCTION WITH FIRESTORE HYBRID ==========
+// ========== ENHANCED SEARCH STORAGE FUNCTION WITH IMMEDIATE SCHEDULED MATCHING ==========
 
 const storeSearchInMemory = async (searchData) => {
   const { userId, userType, rideType = 'immediate', activateImmediately = TEST_MODE } = searchData;
@@ -469,20 +446,12 @@ const storeSearchInMemory = async (searchData) => {
 
   // Store in appropriate memory store
   if (rideType === 'scheduled' && !activateImmediately) {
-    // 🎯 SCHEDULED SEARCH: Save to Firestore for persistence + memory for matching
-    try {
-      const savedSearch = await scheduledMatching.initializeScheduledSearch(db, enhancedSearchData);
-      scheduledSearches.set(userId, savedSearch);
-      console.log(`📅 SCHEDULED search stored: ${driverName || passengerName} (ID: ${userId}) for ${searchData.scheduledTime}`);
-      console.log(`   💾 Saved to Firestore for persistence`);
-      
-      // Set scheduled activation timeout
-      setScheduledMatchingTimeout(userId, enhancedSearchData.searchId, searchData.scheduledTime);
-      
-    } catch (error) {
-      console.error('❌ Error saving scheduled search to Firestore:', error);
-      throw error;
-    }
+    // NORMAL SCHEDULED SEARCH (wait 30 minutes)
+    scheduledSearches.set(userId, enhancedSearchData);
+    console.log(`📅 SCHEDULED search stored: ${driverName || passengerName} (ID: ${userId}) for ${searchData.scheduledTime}`);
+    
+    // Set scheduled activation timeout
+    setScheduledMatchingTimeout(userId, enhancedSearchData.searchId, searchData.scheduledTime);
     
   } else {
     // 🎯 IMMEDIATE SEARCH OR IMMEDIATELY ACTIVATED SCHEDULED SEARCH
@@ -491,18 +460,6 @@ const storeSearchInMemory = async (searchData) => {
     if (rideType === 'scheduled') {
       console.log(`🎯 SCHEDULED search ACTIVATED IMMEDIATELY: ${driverName || passengerName} (ID: ${userId})`);
       console.log(`   - Will start matching immediately in next cycle`);
-      
-      // 🎯 ALSO save to Firestore for persistence
-      try {
-        await scheduledMatching.initializeScheduledSearch(db, {
-          ...enhancedSearchData,
-          status: 'activating',
-          forceActivated: true
-        });
-        console.log(`   💾 Also saved to Firestore for persistence`);
-      } catch (error) {
-        console.error('❌ Error saving immediate scheduled search to Firestore:', error);
-      }
     } else {
       console.log(`🎯 IMMEDIATE search stored: ${driverName || passengerName} (ID: ${userId})`);
     }
@@ -525,15 +482,14 @@ const storeSearchInMemory = async (searchData) => {
       websocketServer.sendSearchStatusUpdate(userId, {
         searchId: enhancedSearchData.searchId,
         status: enhancedSearchData.status,
-        rideType: 'scheduled',
+                        rideType: 'scheduled',
         scheduledTime: searchData.scheduledTime,
         pickupName: enhancedSearchData.pickupName,
         destinationName: enhancedSearchData.destinationName,
         // 🎯 ADD ACTIVATION INFO
         activatedImmediately: activateImmediately,
         matchingStatus: activateImmediately ? 'Starting immediately' : 'Will start 30 minutes before scheduled time',
-        autoStop: 'Will stop when match found',
-        storage: 'Firestore (persistent) + Memory (fast matching)'
+        autoStop: 'Will stop when match found'
       });
     } else {
       websocketServer.sendSearchStatusUpdate(userId, {
@@ -563,7 +519,6 @@ const storeSearchInMemory = async (searchData) => {
   console.log(`🎯 User Matches: ${userMatches.size} users with matches`);
   console.log(`🧪 TEST MODE: ${TEST_MODE ? 'ACTIVE - Scheduled searches start immediately' : 'INACTIVE'}`);
   console.log(`🎯 UNLIMITED CAPACITY: ${UNLIMITED_CAPACITY ? 'ACTIVE - Drivers accept unlimited passengers' : 'INACTIVE'}`);
-  console.log(`💾 STORAGE: Scheduled searches saved to Firestore for persistence`);
   
   return enhancedSearchData;
 };
@@ -586,9 +541,6 @@ const activateScheduledSearch = (userId) => {
   activeSearches.set(userId, scheduledSearch);
   scheduledSearches.delete(userId);
   
-  // 🎯 UPDATE FIRESTORE STATUS
-  scheduledMatching.updateScheduledSearchStatus(db, userId, 'searching').catch(console.error);
-  
   // ✅ Send WebSocket notification for activation
   if (websocketServer) {
     websocketServer.sendScheduledSearchActivated(userId, {
@@ -607,7 +559,6 @@ const activateScheduledSearch = (userId) => {
   console.log(`🔄 ACTIVATED scheduled search: ${scheduledSearch.driverName || scheduledSearch.passengerName}`);
   console.log(`   - Scheduled: ${scheduledSearch.scheduledTime}`);
   console.log(`   - Activated: ${scheduledSearch.activatedAt}`);
-  console.log(`   - Firestore: Status updated to 'searching'`);
   
   return scheduledSearch;
 };
@@ -647,34 +598,6 @@ const checkScheduledSearchActivation = () => {
     console.log(`⏳ No scheduled searches ready for activation yet`);
   }
 };
-
-// ========== NEW ENDPOINT: GET SCHEDULED SEARCH STATUS FROM FIRESTORE ==========
-
-app.get("/api/match/scheduled-status/:userId", async (req, res) => {
-  try {
-    const { userId } = req.params;
-    
-    console.log(`🔍 Checking scheduled search status from Firestore for: ${userId}`);
-    
-    // 🎯 USE HYBRID APPROACH: Check memory first, then Firestore
-    const status = await scheduledMatching.getScheduledSearchStatus(db, userId);
-    
-    res.json({
-      success: true,
-      ...status,
-      testMode: TEST_MODE,
-      unlimitedCapacity: UNLIMITED_CAPACITY,
-      storageInfo: 'Hybrid: Memory (fast) + Firestore (persistent)'
-    });
-    
-  } catch (error) {
-    console.error('❌ Error getting scheduled search status:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: error.message 
-    });
-  }
-});
 
 // ========== IMMEDIATE MATCH SEARCH ENDPOINT ==========
 
@@ -753,7 +676,6 @@ app.post("/api/match/search", async (req, res) => {
       websocketConnected: websocketServer ? websocketServer.isUserConnected(actualUserId) : false,
       testMode: TEST_MODE,
       unlimitedCapacity: UNLIMITED_CAPACITY,
-      storageStrategy: rideType === 'scheduled' ? 'Firestore (persistent) + Memory (fast)' : 'Memory only',
       autoStop: UNLIMITED_CAPACITY ? 
         'Drivers: NEVER (unlimited mode) | Passengers: After first match' : 
         'Search will stop automatically when match is found'
@@ -768,7 +690,7 @@ app.post("/api/match/search", async (req, res) => {
   }
 });
 
-// ========== SCHEDULED SEARCH ENDPOINT WITH FIRESTORE INTEGRATION ==========
+// ========== SCHEDULED SEARCH ENDPOINT WITH IMMEDIATE MATCHING ==========
 
 app.post("/api/match/scheduled-search", async (req, res) => {
   try {
@@ -837,7 +759,7 @@ app.post("/api/match/scheduled-search", async (req, res) => {
       activateImmediately: activateImmediately
     };
 
-    // ✅ AWAIT the search storage (now includes Firestore saving)
+    // ✅ AWAIT the search storage
     await storeSearchInMemory(searchData);
 
     res.json({
@@ -856,8 +778,6 @@ app.post("/api/match/scheduled-search", async (req, res) => {
       activatedImmediately: activateImmediately,
       testMode: TEST_MODE,
       unlimitedCapacity: UNLIMITED_CAPACITY,
-      storage: 'Firestore (persistent) + Memory (fast matching)',
-      costOptimization: 'Matching uses memory (free), persistence uses Firestore (cheap)',
       matchingStatus: activateImmediately ? 
         'Will start matching in next cycle (5-30 seconds)' : 
         'Will start 30 minutes before scheduled time',
@@ -907,10 +827,6 @@ app.post("/api/match/stop-search", async (req, res) => {
         scheduledSearches.delete(actualUserId);
         clearSearchTimeout(actualUserId);
         stoppedFrom = 'scheduled searches';
-        
-        // 🎯 ALSO update Firestore status
-        await scheduledMatching.updateScheduledSearchStatus(db, actualUserId, 'completed');
-        console.log(`💾 Firestore status updated to 'completed' for ${actualUserId}`);
       }
     } else {
       if (activeSearches.has(actualUserId)) {
@@ -969,26 +885,7 @@ app.get("/api/match/search-status/:userId", async (req, res) => {
     let timeRemaining = null;
     
     if (rideType === 'scheduled') {
-      // 🎯 FOR SCHEDULED: Use hybrid approach (memory + Firestore)
       searchData = scheduledSearches.get(userId);
-      if (!searchData) {
-        // Fallback to Firestore check
-        const firestoreStatus = await scheduledMatching.getScheduledSearchStatus(db, userId);
-        if (firestoreStatus.exists) {
-          searchData = {
-            userId: firestoreStatus.userId,
-            userType: firestoreStatus.userType,
-            rideType: 'scheduled',
-            status: firestoreStatus.status,
-            searchId: firestoreStatus.searchId,
-            scheduledTime: new Date(firestoreStatus.scheduledTime),
-            lastUpdated: Date.now(),
-            pickupName: firestoreStatus.pickupName,
-            destinationName: firestoreStatus.destinationName,
-            source: 'firestore'
-          };
-        }
-      }
       searchType = 'scheduled';
     } else {
       searchData = activeSearches.get(userId);
@@ -1034,8 +931,7 @@ app.get("/api/match/search-status/:userId", async (req, res) => {
         // 🎯 ADD TEST MODE INFO
         activatedImmediately: searchData.activateImmediately,
         testMode: TEST_MODE,
-        unlimitedCapacity: UNLIMITED_CAPACITY,
-        source: searchData.source || 'memory'
+        unlimitedCapacity: UNLIMITED_CAPACITY
       },
       matchStats: {
         matchesFound: matchCount,
@@ -1080,8 +976,7 @@ app.get("/api/debug/websocket", (req, res) => {
     detailedConnections: websocketServer.getDetailedConnectionInfo(),
     serverTime: new Date().toISOString(),
     testMode: TEST_MODE,
-    unlimitedCapacity: UNLIMITED_CAPACITY,
-    storageStrategy: 'Hybrid: Firestore (persistence) + Memory (matching)'
+    unlimitedCapacity: UNLIMITED_CAPACITY
   });
 });
 
@@ -1113,9 +1008,6 @@ app.get("/api/debug/searches", (req, res) => {
       matchCount: matches.size
     }));
   
-  // Get scheduled matching stats
-  const scheduledStats = scheduledMatching.getScheduledMatchingStats();
-  
   res.json({
     activeSearches: activeSearches.size,
     scheduledSearches: scheduledSearches.size,
@@ -1131,8 +1023,7 @@ app.get("/api/debug/searches", (req, res) => {
       capacity: d.capacity,
       connected: websocketServer ? websocketServer.isUserConnected(d.userId) : false,
       matchesFound: userMatches.get(d.userId)?.size || 0,
-      unlimitedMode: UNLIMITED_CAPACITY ? 'ACTIVE - No capacity limit' : 'Normal capacity',
-      storage: d.rideType === 'scheduled' ? 'Firestore + Memory' : 'Memory only'
+      unlimitedMode: UNLIMITED_CAPACITY ? 'ACTIVE - No capacity limit' : 'Normal capacity'
     })),
     activePassengers: passengers.map(p => ({
       id: p.userId, 
@@ -1141,8 +1032,7 @@ app.get("/api/debug/searches", (req, res) => {
       searchId: p.searchId,
       rideType: p.rideType,
       activatedImmediately: p.activateImmediately,
-      matchesFound: userMatches.get(p.userId)?.size || 0,
-      storage: p.rideType === 'scheduled' ? 'Firestore + Memory' : 'Memory only'
+      matchesFound: userMatches.get(p.userId)?.size || 0
     })),
     scheduledDrivers: scheduledDrivers.map(d => ({
       id: d.userId,
@@ -1150,16 +1040,14 @@ app.get("/api/debug/searches", (req, res) => {
       status: d.status,
       scheduledTime: d.scheduledTime,
       searchId: d.searchId,
-      capacity: d.capacity,
-      storage: 'Firestore + Memory'
+      capacity: d.capacity
     })),
     scheduledPassengers: scheduledPassengers.map(p => ({
       id: p.userId,
       name: p.passengerName,
       status: p.status,
       scheduledTime: p.scheduledTime,
-      searchId: p.searchId,
-      storage: 'Firestore + Memory'
+      searchId: p.searchId
     })),
     activeTimeouts: searchTimeouts.size,
     processedMatches: processedMatches.size,
@@ -1168,22 +1056,18 @@ app.get("/api/debug/searches", (req, res) => {
       driverMatches: driverMatches,
       passengerMatches: passengerMatches
     },
-    scheduledMatchingStats: scheduledStats,
     testMode: TEST_MODE,
-    unlimitedCapacity: UNLIMITED_CAPACITY,
-    storageStrategy: 'HYBRID: Firestore persistence + Memory matching',
-    costOptimization: 'Matching: FREE (memory) | Persistence: CHEAP (Firestore)'
+    unlimitedCapacity: UNLIMITED_CAPACITY
   });
 });
 
-// ========== FIXED OPTIMIZED MATCHING SERVICE WITH FIRESTORE INTEGRATION ==========
+// ========== FIXED OPTIMIZED MATCHING SERVICE WITH UNLIMITED CAPACITY ==========
 
 const startOptimizedMatching = () => {
   console.log('🔄 Starting Optimized Matching Service...');
   console.log(`🧪 TEST MODE: ${TEST_MODE ? 'ACTIVE - Scheduled searches start immediately' : 'INACTIVE'}`);
   console.log(`🎯 UNLIMITED CAPACITY: ${UNLIMITED_CAPACITY ? 'ACTIVE - Drivers accept unlimited passengers' : 'INACTIVE'}`);
-  console.log(`💾 STORAGE: Hybrid - Firestore (persistence) + Memory (matching)`);
-  console.log(`💰 COST OPTIMIZATION: Matching uses memory (FREE), schedule checks use Firestore (CHEAP)`);
+  console.log(`🎯 AUTO-STOP: Passengers stop after 1 match, Drivers ${UNLIMITED_CAPACITY ? 'NEVER stop (unlimited mode)' : 'stop when capacity reached'}`);
   
   // 🎯 USE TEST INTERVAL IN TEST MODE
   const matchingInterval = TEST_MODE ? TEST_MATCHING_INTERVAL : 30000;
@@ -1211,7 +1095,6 @@ const startOptimizedMatching = () => {
       const scheduledPassengers = passengers.filter(p => p.rideType === 'scheduled');
       if (scheduledDrivers.length > 0 || scheduledPassengers.length > 0) {
         console.log(`📅 ACTIVE SCHEDULED SEARCHES - Drivers: ${scheduledDrivers.length}, Passengers: ${scheduledPassengers.length}`);
-        console.log(`   💾 All scheduled searches persisted in Firestore`);
       }
       
       if (drivers.length === 0 || passengers.length === 0) {
@@ -1235,7 +1118,6 @@ const startOptimizedMatching = () => {
         const matchCount = userMatches.get(driver.userId)?.size || 0;
         console.log(`   - ${driver.driverName} (${driver.userId}) - ${driver.rideType} - Matches: ${matchCount}/${UNLIMITED_CAPACITY ? '∞' : driver.capacity || 4}`);
         console.log(`     Route: ${driver.pickupName} → ${driver.destinationName}`);
-        console.log(`     Storage: ${driver.rideType === 'scheduled' ? 'Firestore + Memory' : 'Memory only'}`);
       });
 
       console.log('👤 Active Passengers:');
@@ -1243,7 +1125,6 @@ const startOptimizedMatching = () => {
         const matchCount = userMatches.get(passenger.userId)?.size || 0;
         console.log(`   - ${passenger.passengerName} (${passenger.userId}) - ${passenger.rideType} - Matches: ${matchCount}/1`);
         console.log(`     Route: ${passenger.pickupName} → ${passenger.destinationName}`);
-        console.log(`     Storage: ${passenger.rideType === 'scheduled' ? 'Firestore + Memory' : 'Memory only'}`);
       });
       
       let matchesCreated = 0;
@@ -1329,10 +1210,7 @@ const startOptimizedMatching = () => {
                 matchType: (driver.rideType === 'scheduled' || passenger.rideType === 'scheduled') ? 
                   'scheduled_immediate_match' : 'immediate_match',
                 // 🎯 ADD UNLIMITED MODE FLAG
-                unlimitedMode: UNLIMITED_CAPACITY,
-                // 🎯 ADD STORAGE INFO
-                storage: (driver.rideType === 'scheduled' || passenger.rideType === 'scheduled') ? 
-                  'Firestore + Memory' : 'Memory only'
+                unlimitedMode: UNLIMITED_CAPACITY
               };
 
               // Create overlay match (now uses WebSocket)
@@ -1345,7 +1223,6 @@ const startOptimizedMatching = () => {
                 console.log(`🎉 MATCH CREATED: ${driver.driverName || 'Driver'} ↔ ${passenger.passengerName || 'Passenger'} (Score: ${similarity.toFixed(3)})`);
                 if (driver.rideType === 'scheduled' || passenger.rideType === 'scheduled') {
                   console.log(`   📅 SCHEDULED SEARCH MATCH!`);
-                  console.log(`   💾 Match data persisted in Firestore`);
                 }
                 if (UNLIMITED_CAPACITY) {
                   console.log(`   🎯 UNLIMITED MODE: Driver can accept more passengers`);
@@ -1375,16 +1252,6 @@ const startOptimizedMatching = () => {
 
   // Check scheduled searches every 10 seconds
   setInterval(checkScheduledSearchActivation, SCHEDULED_SEARCH_CHECK_INTERVAL);
-  
-  // 🎯 START SCHEDULED MATCHING SERVICE
-  setInterval(async () => {
-    try {
-      console.log(`\n📅 ===== SCHEDULED MATCHING SERVICE =====`);
-      await scheduledMatching.performScheduledMatching(db);
-    } catch (error) {
-      console.error('❌ Error in scheduled matching service:', error);
-    }
-  }, TEST_MODE ? 10000 : 30000); // 10 seconds in test mode, 30 seconds in production
 };
 
 // ========== WEB SOCKET ENDPOINTS ==========
@@ -1403,8 +1270,6 @@ app.get("/api/websocket/status", (req, res) => {
   const scheduledDrivers = Array.from(scheduledSearches.values()).filter(s => s.userType === 'driver');
   const scheduledPassengers = Array.from(scheduledSearches.values()).filter(s => s.userType === 'passenger');
   
-  const scheduledStats = scheduledMatching.getScheduledMatchingStats();
-  
   res.json({
     success: true,
     connectedClients: websocketServer.getConnectedCount(),
@@ -1421,15 +1286,8 @@ app.get("/api/websocket/status", (req, res) => {
       activeTimeouts: searchTimeouts.size,
       usersWithMatches: userMatches.size
     },
-    scheduledStats: scheduledStats,
     testMode: TEST_MODE,
     unlimitedCapacity: UNLIMITED_CAPACITY,
-    storageStrategy: 'HYBRID: Firestore persistence + Memory matching',
-    costOptimization: {
-      matching: 'FREE (memory)',
-      persistence: 'CHEAP (Firestore writes)',
-      scheduleChecks: 'CHEAP (Firestore reads)'
-    },
     immediateScheduledMatching: TEST_MODE ? 'ACTIVE' : 'INACTIVE',
     autoStopEnabled: true,
     autoStopRules: {
@@ -1446,10 +1304,8 @@ app.get("/", (req, res) => {
   const passengers = Array.from(activeSearches.values()).filter(s => s.userType === 'passenger');
   const scheduled = Array.from(scheduledSearches.values());
   
-  const scheduledStats = scheduledMatching.getScheduledMatchingStats();
-  
   res.json({ 
-    status: "🚀 Server running (FIRESTORE HYBRID STORAGE)",
+    status: "🚀 Server running (UNLIMITED CAPACITY MODE)",
     timestamp: new Date().toISOString(),
     memoryStats: {
       activeSearches: activeSearches.size,
@@ -1461,7 +1317,6 @@ app.get("/", (req, res) => {
       websocketConnections: websocketServer ? websocketServer.getConnectedCount() : 0,
       usersWithMatches: userMatches.size
     },
-    scheduledStats: scheduledStats,
     timeoutSettings: {
       immediateSearch: "5 minutes (or until match found)",
       scheduledActivation: TEST_MODE ? "IMMEDIATE (TEST MODE)" : "30 minutes before ride time",
@@ -1472,12 +1327,6 @@ app.get("/", (req, res) => {
       unlimitedMode: UNLIMITED_CAPACITY ? "ACTIVE" : "INACTIVE",
       passengerRule: "Stop after first match",
       driverRule: UNLIMITED_CAPACITY ? "NEVER stop (unlimited passengers)" : "Stop when capacity reached"
-    },
-    storageSettings: {
-      strategy: "HYBRID",
-      immediateSearches: "Memory only",
-      scheduledSearches: "Firestore (persistence) + Memory (matching)",
-      costOptimization: "Matching: FREE | Persistence: CHEAP"
     },
     testMode: TEST_MODE,
     unlimitedCapacity: UNLIMITED_CAPACITY,
@@ -1494,8 +1343,7 @@ app.get("/", (req, res) => {
       capacity: d.capacity,
       matchesFound: userMatches.get(d.userId)?.size || 0,
       connected: websocketServer ? websocketServer.isUserConnected(d.userId) : false,
-      capacityMode: UNLIMITED_CAPACITY ? 'UNLIMITED' : 'NORMAL',
-      storage: d.rideType === 'scheduled' ? 'Firestore + Memory' : 'Memory only'
+      capacityMode: UNLIMITED_CAPACITY ? 'UNLIMITED' : 'NORMAL'
     })),
     activePassengers: passengers.map(p => ({
       id: p.userId, 
@@ -1506,8 +1354,7 @@ app.get("/", (req, res) => {
       pickup: p.pickupName,
       destination: p.destinationName,
       activatedImmediately: p.activateImmediately,
-      matchesFound: userMatches.get(p.userId)?.size || 0,
-      storage: p.rideType === 'scheduled' ? 'Firestore + Memory' : 'Memory only'
+      matchesFound: userMatches.get(p.userId)?.size || 0
     })),
     scheduledSearches: scheduled.map(s => ({
       id: s.userId,
@@ -1517,8 +1364,7 @@ app.get("/", (req, res) => {
       status: s.status,
       pickup: s.pickupName,
       destination: s.destinationName,
-      capacity: s.capacity,
-      storage: 'Firestore + Memory'
+      capacity: s.capacity
     }))
   });
 });
@@ -1582,6 +1428,62 @@ app.post("/api/match/decision", async (req, res) => {
   }
 });
 
+// ========== DEBUG ENDPOINTS FOR UNLIMITED MODE ==========
+
+// Reset driver matches endpoint
+app.post("/api/debug/reset-driver/:userId", (req, res) => {
+  const { userId } = req.params;
+  
+  // Clear match tracking for this driver
+  if (userMatches.has(userId)) {
+    userMatches.delete(userId);
+  }
+  
+  // Clear any timeouts
+  clearSearchTimeout(userId);
+  
+  console.log(`🔄 Reset driver ${userId} - cleared matches and timeouts`);
+  
+  res.json({
+    success: true,
+    message: `Driver ${userId} reset successfully`,
+    currentMatches: userMatches.get(userId)?.size || 0,
+    unlimitedCapacity: UNLIMITED_CAPACITY
+  });
+});
+
+// Check driver status endpoint
+app.get("/api/debug/driver-status/:userId", (req, res) => {
+  const { userId } = req.params;
+  
+  const driverSearch = activeSearches.get(userId);
+  const matchCount = userMatches.get(userId)?.size || 0;
+  const capacity = driverSearch?.capacity || 4;
+  
+  res.json({
+    driverId: userId,
+    isSearching: !!driverSearch,
+    matchCount: matchCount,
+    capacity: capacity,
+    isFull: matchCount >= capacity,
+    unlimitedMode: UNLIMITED_CAPACITY,
+    canAcceptMore: UNLIMITED_CAPACITY ? true : matchCount < capacity,
+    searchData: driverSearch,
+    shouldStop: shouldStopSearching(userId, 'driver')
+  });
+});
+
+// Toggle unlimited capacity mode
+app.post("/api/debug/toggle-unlimited", (req, res) => {
+  UNLIMITED_CAPACITY = !UNLIMITED_CAPACITY;
+  
+  res.json({
+    success: true,
+    unlimitedCapacity: UNLIMITED_CAPACITY,
+    message: `Unlimited capacity mode ${UNLIMITED_CAPACITY ? 'ENABLED' : 'DISABLED'}`
+  });
+});
+
 // ========== START SERVER ==========
 
 const PORT = process.env.PORT || 3000;
@@ -1589,12 +1491,11 @@ const PORT = process.env.PORT || 3000;
 if (require.main === module) {
   const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`
-🚀 ShareWay FIRESTORE HYBRID STORAGE Server Started!
+🚀 ShareWay UNLIMITED CAPACITY Server Started!
 📍 Port: ${PORT}
 🌍 Environment: ${process.env.NODE_ENV || 'development'}
-🔥 Firebase: Hybrid Usage Mode
-💾 Memory Cache: ENABLED (for matching)
-💾 Firestore: ENABLED (for persistence)
+🔥 Firebase: Minimal Usage Mode
+💾 Memory Cache: ENABLED
 🔌 WebSocket: CONNECTION TIMING FIXED
 ⏰ Auto Timeouts: ENABLED
 
@@ -1602,16 +1503,11 @@ if (require.main === module) {
    - Passengers: Stop after first match
    - Drivers: ${UNLIMITED_CAPACITY ? 'NEVER stop - accept unlimited passengers!' : 'Stop when capacity reached'}
 
-💾 STORAGE STRATEGY: HYBRID
-   - Immediate searches: Memory only (fast)
-   - Scheduled searches: Firestore + Memory (persistent + fast)
-   - Cost optimization: Matching FREE, Persistence CHEAP
-
 🧪 TEST MODE: ${TEST_MODE ? 'ACTIVE' : 'INACTIVE'}
 
 📊 Current Stats:
 - Active Searches: ${activeSearches.size} (in memory)
-- Scheduled Searches: ${scheduledSearches.size} (in memory + Firestore)
+- Scheduled Searches: ${scheduledSearches.size} (in memory)
 - Processed Matches: ${processedMatches.size} (in memory)
 - Active Timeouts: ${searchTimeouts.size} (in memory)
 - Users with Matches: ${userMatches.size} (in memory)
@@ -1623,23 +1519,15 @@ if (require.main === module) {
 - Matching Interval: ${TEST_MODE ? '5 seconds' : '30 seconds'}
 - Scheduled Check: 10 seconds
 
-💰 COST OPTIMIZATION:
-- Matching cycles: FREE (memory)
-- Schedule checks: CHEAP (Firestore reads)
-- Data persistence: CHEAP (Firestore writes)
-
-✅ SCHEDULED SEARCHES NOW PERSISTED IN FIRESTORE! 🎉
+✅ DRIVERS WILL NOW ACCEPT UNLIMITED PASSENGERS! 🎉
     `);
   });
 
   // ✅ Initialize WebSocket server
   setupWebSocket(server);
 
-  // 🎯 RELOAD SCHEDULED SEARCHES FROM FIRESTORE ON STARTUP
-  reloadScheduledSearchesOnStartup().then(() => {
-    // Start the optimized matching service after reloading scheduled searches
-    startOptimizedMatching();
-  });
+  // Start the optimized matching service
+  startOptimizedMatching();
 
   server.on('error', (error) => {
     console.error('❌ Server error:', error);
