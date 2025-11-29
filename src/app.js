@@ -1,4 +1,4 @@
-// src/app.js - MODIFIED TO STOP SEARCHING AFTER PASSENGER IS FOUND
+// src/app.js - MODIFIED FOR UNLIMITED PASSENGER CAPACITY
 const express = require("express");
 const admin = require("firebase-admin");
 const cors = require("cors");
@@ -39,6 +39,7 @@ app.use((req, res, next) => {
 // ========== TEST MODE CONFIGURATION ==========
 const TEST_MODE = true; // Set to true for immediate scheduled search testing
 const TEST_MATCHING_INTERVAL = 5000; // 5 seconds for testing
+const UNLIMITED_CAPACITY = true; // 🎯 NEW: Allow unlimited passengers for testing
 
 // Initialize Firebase Admin
 let db;
@@ -116,7 +117,7 @@ const generateMatchKey = (driverId, passengerId, timestamp = Date.now()) => {
   return `${driverId}_${passengerId}_${timeWindow}`;
 };
 
-// ========== STOP SEARCHING AFTER MATCH FUNCTIONS ==========
+// ========== MODIFIED: STOP SEARCHING AFTER MATCH FUNCTIONS ==========
 
 // Stop search for a user and clean up
 const stopUserSearch = (userId) => {
@@ -166,15 +167,20 @@ const trackUserMatch = (userId, matchId, matchedUserId) => {
   console.log(`📝 Tracked match ${matchId} for user ${userId}`);
 };
 
-// Check if user should stop searching (based on match count)
+// 🎯 MODIFIED: Check if user should stop searching (UNLIMITED CAPACITY FOR TESTING)
 const shouldStopSearching = (userId, userType) => {
-  // Drivers stop after finding enough passengers to fill capacity
+  // 🎯 UNLIMITED CAPACITY MODE: Drivers never stop searching
+  if (UNLIMITED_CAPACITY && userType === 'driver') {
+    console.log(`🎯 UNLIMITED CAPACITY: Driver ${userId} can accept unlimited passengers`);
+    return false; // Drivers never stop in unlimited mode
+  }
+  
   // Passengers stop after finding any driver
   if (userType === 'passenger') {
     return true; // Passengers stop after first match
   }
   
-  // For drivers, check if they reached capacity
+  // For drivers, check if they reached capacity (only in non-unlimited mode)
   if (userType === 'driver') {
     const search = activeSearches.get(userId) || scheduledSearches.get(userId);
     if (search) {
@@ -476,7 +482,7 @@ const storeSearchInMemory = async (searchData) => {
       websocketServer.sendSearchStatusUpdate(userId, {
         searchId: enhancedSearchData.searchId,
         status: enhancedSearchData.status,
-        rideType: 'scheduled',
+                        rideType: 'scheduled',
         scheduledTime: searchData.scheduledTime,
         pickupName: enhancedSearchData.pickupName,
         destinationName: enhancedSearchData.destinationName,
@@ -512,6 +518,7 @@ const storeSearchInMemory = async (searchData) => {
   console.log(`⏰ Active Timeouts: ${searchTimeouts.size}`);
   console.log(`🎯 User Matches: ${userMatches.size} users with matches`);
   console.log(`🧪 TEST MODE: ${TEST_MODE ? 'ACTIVE - Scheduled searches start immediately' : 'INACTIVE'}`);
+  console.log(`🎯 UNLIMITED CAPACITY: ${UNLIMITED_CAPACITY ? 'ACTIVE - Drivers accept unlimited passengers' : 'INACTIVE'}`);
   
   return enhancedSearchData;
 };
@@ -668,7 +675,10 @@ app.post("/api/match/search", async (req, res) => {
       matchingAlgorithm: 'enhanced_route_similarity_v2',
       websocketConnected: websocketServer ? websocketServer.isUserConnected(actualUserId) : false,
       testMode: TEST_MODE,
-      autoStop: 'Search will stop automatically when match is found'
+      unlimitedCapacity: UNLIMITED_CAPACITY,
+      autoStop: UNLIMITED_CAPACITY ? 
+        'Drivers: NEVER (unlimited mode) | Passengers: After first match' : 
+        'Search will stop automatically when match is found'
     });
     
   } catch (error) {
@@ -767,10 +777,13 @@ app.post("/api/match/scheduled-search", async (req, res) => {
       // 🎯 ADD ACTIVATION INFO
       activatedImmediately: activateImmediately,
       testMode: TEST_MODE,
+      unlimitedCapacity: UNLIMITED_CAPACITY,
       matchingStatus: activateImmediately ? 
         'Will start matching in next cycle (5-30 seconds)' : 
         'Will start 30 minutes before scheduled time',
-      autoStop: 'Search will stop automatically when match is found'
+      autoStop: UNLIMITED_CAPACITY ? 
+        'Drivers: NEVER (unlimited mode) | Passengers: After first match' : 
+        'Search will stop automatically when match is found'
     });
     
   } catch (error) {
@@ -917,13 +930,16 @@ app.get("/api/match/search-status/:userId", async (req, res) => {
         timeRemaining: timeRemaining ? Math.round(timeRemaining / 1000) : null,
         // 🎯 ADD TEST MODE INFO
         activatedImmediately: searchData.activateImmediately,
-        testMode: TEST_MODE
+        testMode: TEST_MODE,
+        unlimitedCapacity: UNLIMITED_CAPACITY
       },
       matchStats: {
         matchesFound: matchCount,
-        autoStop: searchData.userType === 'passenger' ? 
-          'Will stop after first match' : 
-          `Will stop after ${searchData.capacity || 4} matches`
+        autoStop: UNLIMITED_CAPACITY ? 
+          'Drivers: NEVER (unlimited mode) | Passengers: After first match' : 
+          (searchData.userType === 'passenger' ? 
+            'Will stop after first match' : 
+            `Will stop after ${searchData.capacity || 4} matches`)
       },
       memoryStats: {
         activeSearches: activeSearches.size,
@@ -959,7 +975,8 @@ app.get("/api/debug/websocket", (req, res) => {
     totalConnections: totalConnections,
     detailedConnections: websocketServer.getDetailedConnectionInfo(),
     serverTime: new Date().toISOString(),
-    testMode: TEST_MODE
+    testMode: TEST_MODE,
+    unlimitedCapacity: UNLIMITED_CAPACITY
   });
 });
 
@@ -1005,7 +1022,8 @@ app.get("/api/debug/searches", (req, res) => {
       activatedImmediately: d.activateImmediately,
       capacity: d.capacity,
       connected: websocketServer ? websocketServer.isUserConnected(d.userId) : false,
-      matchesFound: userMatches.get(d.userId)?.size || 0
+      matchesFound: userMatches.get(d.userId)?.size || 0,
+      unlimitedMode: UNLIMITED_CAPACITY ? 'ACTIVE - No capacity limit' : 'Normal capacity'
     })),
     activePassengers: passengers.map(p => ({
       id: p.userId, 
@@ -1038,16 +1056,18 @@ app.get("/api/debug/searches", (req, res) => {
       driverMatches: driverMatches,
       passengerMatches: passengerMatches
     },
-    testMode: TEST_MODE
+    testMode: TEST_MODE,
+    unlimitedCapacity: UNLIMITED_CAPACITY
   });
 });
 
-// ========== FIXED OPTIMIZED MATCHING SERVICE WITH AUTO-STOP ==========
+// ========== FIXED OPTIMIZED MATCHING SERVICE WITH UNLIMITED CAPACITY ==========
 
 const startOptimizedMatching = () => {
   console.log('🔄 Starting Optimized Matching Service...');
   console.log(`🧪 TEST MODE: ${TEST_MODE ? 'ACTIVE - Scheduled searches start immediately' : 'INACTIVE'}`);
-  console.log(`🎯 AUTO-STOP: Enabled - Passengers stop after 1 match, Drivers stop when capacity reached`);
+  console.log(`🎯 UNLIMITED CAPACITY: ${UNLIMITED_CAPACITY ? 'ACTIVE - Drivers accept unlimited passengers' : 'INACTIVE'}`);
+  console.log(`🎯 AUTO-STOP: Passengers stop after 1 match, Drivers ${UNLIMITED_CAPACITY ? 'NEVER stop (unlimited mode)' : 'stop when capacity reached'}`);
   
   // 🎯 USE TEST INTERVAL IN TEST MODE
   const matchingInterval = TEST_MODE ? TEST_MATCHING_INTERVAL : 30000;
@@ -1056,6 +1076,7 @@ const startOptimizedMatching = () => {
     try {
       console.log(`\n📊 ===== MATCHING CYCLE START =====`);
       console.log(`🧪 TEST MODE: ${TEST_MODE ? 'ACTIVE' : 'INACTIVE'}`);
+      console.log(`🎯 UNLIMITED CAPACITY: ${UNLIMITED_CAPACITY ? 'ACTIVE' : 'INACTIVE'}`);
       
       // First, activate any scheduled searches that are due
       checkScheduledSearchActivation();
@@ -1095,7 +1116,7 @@ const startOptimizedMatching = () => {
       console.log('🚗 Active Drivers:');
       drivers.forEach(driver => {
         const matchCount = userMatches.get(driver.userId)?.size || 0;
-        console.log(`   - ${driver.driverName} (${driver.userId}) - ${driver.rideType} - Matches: ${matchCount}/${driver.capacity || 4}`);
+        console.log(`   - ${driver.driverName} (${driver.userId}) - ${driver.rideType} - Matches: ${matchCount}/${UNLIMITED_CAPACITY ? '∞' : driver.capacity || 4}`);
         console.log(`     Route: ${driver.pickupName} → ${driver.destinationName}`);
       });
 
@@ -1110,11 +1131,17 @@ const startOptimizedMatching = () => {
       
       // Optimized matching - INCLUDES SCHEDULED SEARCHES THAT ARE ACTIVE
       for (const driver of drivers) {
-        // Skip driver if they reached capacity
-        const driverMatchCount = userMatches.get(driver.userId)?.size || 0;
-        if (driverMatchCount >= (driver.capacity || 4)) {
-          console.log(`⏭️ Skipping driver ${driver.driverName} - reached capacity: ${driverMatchCount}/${driver.capacity || 4}`);
-          continue;
+        // 🎯 MODIFIED: Skip driver ONLY if not in unlimited mode and capacity reached
+        if (!UNLIMITED_CAPACITY) {
+          const driverMatchCount = userMatches.get(driver.userId)?.size || 0;
+          if (driverMatchCount >= (driver.capacity || 4)) {
+            console.log(`⏭️ Skipping driver ${driver.driverName} - reached capacity: ${driverMatchCount}/${driver.capacity || 4}`);
+            continue;
+          }
+        } else {
+          // In unlimited mode, log current match count but don't skip
+          const driverMatchCount = userMatches.get(driver.userId)?.size || 0;
+          console.log(`🎯 UNLIMITED MODE: Driver ${driver.driverName} has ${driverMatchCount} matches (no capacity limit)`);
         }
         
         for (const passenger of passengers) {
@@ -1135,12 +1162,14 @@ const startOptimizedMatching = () => {
             continue;
           }
 
-          // Check capacity
-          const passengerCount = passenger.passengerCount || 1;
-          const hasSeats = routeMatching.hasCapacity(driver, passengerCount);
-          if (!hasSeats) {
-            console.log(`⚠️ Skipping - no capacity: ${driver.capacity} vs ${passengerCount}`);
-            continue;
+          // Check capacity (skip in unlimited mode)
+          if (!UNLIMITED_CAPACITY) {
+            const passengerCount = passenger.passengerCount || 1;
+            const hasSeats = routeMatching.hasCapacity(driver, passengerCount);
+            if (!hasSeats) {
+              console.log(`⚠️ Skipping - no capacity: ${driver.capacity} vs ${passengerCount}`);
+              continue;
+            }
           }
 
           // Calculate similarity
@@ -1179,7 +1208,9 @@ const startOptimizedMatching = () => {
                 timestamp: new Date().toISOString(),
                 // 🎯 ADD MATCH TYPE INFO
                 matchType: (driver.rideType === 'scheduled' || passenger.rideType === 'scheduled') ? 
-                  'scheduled_immediate_match' : 'immediate_match'
+                  'scheduled_immediate_match' : 'immediate_match',
+                // 🎯 ADD UNLIMITED MODE FLAG
+                unlimitedMode: UNLIMITED_CAPACITY
               };
 
               // Create overlay match (now uses WebSocket)
@@ -1192,6 +1223,9 @@ const startOptimizedMatching = () => {
                 console.log(`🎉 MATCH CREATED: ${driver.driverName || 'Driver'} ↔ ${passenger.passengerName || 'Passenger'} (Score: ${similarity.toFixed(3)})`);
                 if (driver.rideType === 'scheduled' || passenger.rideType === 'scheduled') {
                   console.log(`   📅 SCHEDULED SEARCH MATCH!`);
+                }
+                if (UNLIMITED_CAPACITY) {
+                  console.log(`   🎯 UNLIMITED MODE: Driver can accept more passengers`);
                 }
               }
             } else {
@@ -1253,11 +1287,12 @@ app.get("/api/websocket/status", (req, res) => {
       usersWithMatches: userMatches.size
     },
     testMode: TEST_MODE,
+    unlimitedCapacity: UNLIMITED_CAPACITY,
     immediateScheduledMatching: TEST_MODE ? 'ACTIVE' : 'INACTIVE',
     autoStopEnabled: true,
     autoStopRules: {
       passengers: 'Stop after first match',
-      drivers: 'Stop when capacity reached'
+      drivers: UNLIMITED_CAPACITY ? 'NEVER stop (unlimited mode)' : 'Stop when capacity reached'
     }
   });
 });
@@ -1270,7 +1305,7 @@ app.get("/", (req, res) => {
   const scheduled = Array.from(scheduledSearches.values());
   
   res.json({ 
-    status: "🚀 Server running (AUTO-STOP AFTER MATCH)",
+    status: "🚀 Server running (UNLIMITED CAPACITY MODE)",
     timestamp: new Date().toISOString(),
     memoryStats: {
       activeSearches: activeSearches.size,
@@ -1288,12 +1323,13 @@ app.get("/", (req, res) => {
       matchingInterval: TEST_MODE ? "5 seconds" : "30 seconds",
       scheduledCheck: "10 seconds"
     },
-    autoStopSettings: {
-      enabled: true,
+    capacitySettings: {
+      unlimitedMode: UNLIMITED_CAPACITY ? "ACTIVE" : "INACTIVE",
       passengerRule: "Stop after first match",
-      driverRule: "Stop when capacity reached"
+      driverRule: UNLIMITED_CAPACITY ? "NEVER stop (unlimited passengers)" : "Stop when capacity reached"
     },
     testMode: TEST_MODE,
+    unlimitedCapacity: UNLIMITED_CAPACITY,
     immediateScheduledMatching: TEST_MODE ? "ACTIVE - Scheduled searches start matching immediately" : "INACTIVE",
     activeDrivers: drivers.map(d => ({
       id: d.userId,
@@ -1306,7 +1342,8 @@ app.get("/", (req, res) => {
       activatedImmediately: d.activateImmediately,
       capacity: d.capacity,
       matchesFound: userMatches.get(d.userId)?.size || 0,
-      connected: websocketServer ? websocketServer.isUserConnected(d.userId) : false
+      connected: websocketServer ? websocketServer.isUserConnected(d.userId) : false,
+      capacityMode: UNLIMITED_CAPACITY ? 'UNLIMITED' : 'NORMAL'
     })),
     activePassengers: passengers.map(p => ({
       id: p.userId, 
@@ -1355,6 +1392,7 @@ app.get("/api/match/active/:userId", async (req, res) => {
       activeMatches,
       count: activeMatches.length,
       testMode: TEST_MODE,
+      unlimitedCapacity: UNLIMITED_CAPACITY,
       userMatchCount: userMatches.get(userId)?.size || 0
     });
     
@@ -1390,6 +1428,62 @@ app.post("/api/match/decision", async (req, res) => {
   }
 });
 
+// ========== DEBUG ENDPOINTS FOR UNLIMITED MODE ==========
+
+// Reset driver matches endpoint
+app.post("/api/debug/reset-driver/:userId", (req, res) => {
+  const { userId } = req.params;
+  
+  // Clear match tracking for this driver
+  if (userMatches.has(userId)) {
+    userMatches.delete(userId);
+  }
+  
+  // Clear any timeouts
+  clearSearchTimeout(userId);
+  
+  console.log(`🔄 Reset driver ${userId} - cleared matches and timeouts`);
+  
+  res.json({
+    success: true,
+    message: `Driver ${userId} reset successfully`,
+    currentMatches: userMatches.get(userId)?.size || 0,
+    unlimitedCapacity: UNLIMITED_CAPACITY
+  });
+});
+
+// Check driver status endpoint
+app.get("/api/debug/driver-status/:userId", (req, res) => {
+  const { userId } = req.params;
+  
+  const driverSearch = activeSearches.get(userId);
+  const matchCount = userMatches.get(userId)?.size || 0;
+  const capacity = driverSearch?.capacity || 4;
+  
+  res.json({
+    driverId: userId,
+    isSearching: !!driverSearch,
+    matchCount: matchCount,
+    capacity: capacity,
+    isFull: matchCount >= capacity,
+    unlimitedMode: UNLIMITED_CAPACITY,
+    canAcceptMore: UNLIMITED_CAPACITY ? true : matchCount < capacity,
+    searchData: driverSearch,
+    shouldStop: shouldStopSearching(userId, 'driver')
+  });
+});
+
+// Toggle unlimited capacity mode
+app.post("/api/debug/toggle-unlimited", (req, res) => {
+  UNLIMITED_CAPACITY = !UNLIMITED_CAPACITY;
+  
+  res.json({
+    success: true,
+    unlimitedCapacity: UNLIMITED_CAPACITY,
+    message: `Unlimited capacity mode ${UNLIMITED_CAPACITY ? 'ENABLED' : 'DISABLED'}`
+  });
+});
+
 // ========== START SERVER ==========
 
 const PORT = process.env.PORT || 3000;
@@ -1397,7 +1491,7 @@ const PORT = process.env.PORT || 3000;
 if (require.main === module) {
   const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`
-🚀 ShareWay AUTO-STOP AFTER MATCH Server Started!
+🚀 ShareWay UNLIMITED CAPACITY Server Started!
 📍 Port: ${PORT}
 🌍 Environment: ${process.env.NODE_ENV || 'development'}
 🔥 Firebase: Minimal Usage Mode
@@ -1405,9 +1499,9 @@ if (require.main === module) {
 🔌 WebSocket: CONNECTION TIMING FIXED
 ⏰ Auto Timeouts: ENABLED
 
-🎯 AUTO-STOP FEATURE: ENABLED!
+🎯 UNLIMITED CAPACITY MODE: ${UNLIMITED_CAPACITY ? 'ACTIVE 🚀' : 'INACTIVE'}
    - Passengers: Stop after first match
-   - Drivers: Stop when capacity reached
+   - Drivers: ${UNLIMITED_CAPACITY ? 'NEVER stop - accept unlimited passengers!' : 'Stop when capacity reached'}
 
 🧪 TEST MODE: ${TEST_MODE ? 'ACTIVE' : 'INACTIVE'}
 
@@ -1425,7 +1519,7 @@ if (require.main === module) {
 - Matching Interval: ${TEST_MODE ? '5 seconds' : '30 seconds'}
 - Scheduled Check: 10 seconds
 
-✅ SEARCHES WILL STOP AUTOMATICALLY WHEN MATCH IS FOUND! 🎉
+✅ DRIVERS WILL NOW ACCEPT UNLIMITED PASSENGERS! 🎉
     `);
   });
 
