@@ -1,4 +1,4 @@
-// src/app.js - MODIFIED WITH DEDICATED FIRESTORE SCHEDULED ROUTES COLLECTION
+// src/app.js - COMPLETE UPDATED SCRIPT WITH FULL DRIVER DATA SAVING
 const express = require("express");
 const admin = require("firebase-admin");
 const cors = require("cors");
@@ -97,26 +97,70 @@ const MAX_MATCH_AGE = 300000;
 
 // ========== DEDICATED FIRESTORE SCHEDULED ROUTES MANAGEMENT ==========
 
-// 🎯 Save driver scheduled route to Firestore collection
+// 🎯 Save driver scheduled route to Firestore collection WITH COMPLETE DRIVER DATA
 const saveScheduledRouteToFirestore = async (routeData) => {
   try {
     const routeId = routeData.routeId || `scheduled_route_${routeData.userId}_${Date.now()}`;
     
     const scheduledRoute = {
+      // ✅ BASIC IDENTIFICATION
       routeId: routeId,
       userId: routeData.userId,
       userType: 'driver',
+      
+      // ✅ COMPLETE DRIVER PROFILE DATA
       driverName: routeData.driverName || 'Unknown Driver',
+      driverPhone: routeData.driverPhone || 'Not provided',
+      driverPhotoUrl: routeData.driverPhotoUrl || '',
+      driverRating: routeData.driverRating || 5.0,
+      totalRides: routeData.totalRides || 0,
+      isVerified: routeData.isVerified || false,
+      totalEarnings: routeData.totalEarnings || 0.0,
+      completedRides: routeData.completedRides || 0,
+      isOnline: routeData.isOnline || true,
+      isSearching: routeData.isSearching || false,
+      
+      // ✅ COMPLETE VEHICLE INFORMATION
+      vehicleInfo: routeData.vehicleInfo || {
+        model: routeData.vehicleModel || 'Unknown Model',
+        plate: routeData.vehiclePlate || 'Unknown Plate',
+        color: routeData.vehicleColor || 'Unknown Color',
+        type: routeData.vehicleType || 'car',
+        year: routeData.vehicleYear || 'Unknown',
+        passengerCapacity: routeData.capacity || 4
+      },
+      
+      // ✅ LOCATION DATA
       pickupLocation: routeData.pickupLocation,
       destinationLocation: routeData.destinationLocation,
       pickupName: routeData.pickupName || 'Unknown Pickup',
       destinationName: routeData.destinationName || 'Unknown Destination',
+      
+      // ✅ ROUTE GEOMETRY
       routePoints: routeData.routePoints || [],
+      
+      // ✅ VEHICLE & CAPACITY DATA
       passengerCount: routeData.passengerCount || 0,
       capacity: routeData.capacity || 4,
       vehicleType: routeData.vehicleType || 'car',
+      
+      // ✅ ROUTE INFORMATION
+      distance: routeData.distance || 0,
+      duration: routeData.duration || 0,
+      fare: routeData.fare || 0,
+      estimatedFare: routeData.estimatedFare || 0,
+      
+      // ✅ PREFERENCES & SETTINGS
+      maxWaitTime: routeData.maxWaitTime || 30,
+      preferredVehicleType: routeData.preferredVehicleType || 'car',
+      specialRequests: routeData.specialRequests || '',
+      maxWalkDistance: routeData.maxWalkDistance || 0.5,
+      
+      // ✅ SCHEDULING DATA
       scheduledTime: admin.firestore.Timestamp.fromDate(new Date(routeData.scheduledTime)),
       status: 'scheduled', // scheduled, active, completed, cancelled
+      
+      // ✅ SYSTEM DATA
       activateImmediately: routeData.activateImmediately || TEST_MODE,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       updatedAt: admin.firestore.FieldValue.serverTimestamp()
@@ -124,8 +168,13 @@ const saveScheduledRouteToFirestore = async (routeData) => {
 
     await db.collection(SCHEDULED_ROUTES_COLLECTION).doc(routeId).set(scheduledRoute);
     
-    console.log(`💾 Saved scheduled route to Firestore: ${routeData.driverName}`);
+    console.log(`💾 Saved COMPLETE scheduled route to Firestore: ${routeData.driverName}`);
     console.log(`   - Route ID: ${routeId}`);
+    console.log(`   - Driver: ${routeData.driverName} (${routeData.driverPhone})`);
+    console.log(`   - Vehicle: ${routeData.vehicleInfo?.model || 'Unknown'}`);
+    console.log(`   - Rating: ${routeData.driverRating || 5.0}`);
+    console.log(`   - Rides: ${routeData.totalRides || 0}`);
+    console.log(`   - Verified: ${routeData.isVerified || false}`);
     console.log(`   - Scheduled: ${routeData.scheduledTime}`);
     console.log(`   - Collection: ${SCHEDULED_ROUTES_COLLECTION}`);
     
@@ -155,6 +204,9 @@ const getScheduledRouteFromFirestore = async (userId) => {
 
     const routeData = snapshot.docs[0].data();
     console.log(`✅ Found scheduled route in Firestore: ${routeData.routeId}`);
+    console.log(`   - Driver: ${routeData.driverName}`);
+    console.log(`   - Vehicle: ${routeData.vehicleInfo?.model || 'Unknown'}`);
+    console.log(`   - Rating: ${routeData.driverRating}`);
     
     return {
       ...routeData,
@@ -203,6 +255,10 @@ const getActiveScheduledRoutesFromFirestore = async () => {
     });
 
     console.log(`📊 Found ${activeRoutes.length} active scheduled routes in Firestore`);
+    activeRoutes.forEach(route => {
+      console.log(`   - ${route.driverName} (${route.vehicleInfo?.model || 'Unknown'}) - Rating: ${route.driverRating}`);
+    });
+    
     return activeRoutes;
   } catch (error) {
     console.error('❌ Error getting active scheduled routes:', error);
@@ -230,6 +286,8 @@ const checkScheduledRoutesActivation = async () => {
       const scheduledTime = routeData.scheduledTime.toDate();
       
       console.log(`   - ${routeData.driverName}:`);
+      console.log(`     Vehicle: ${routeData.vehicleInfo?.model || 'Unknown'}`);
+      console.log(`     Rating: ${routeData.driverRating}`);
       console.log(`     Scheduled: ${scheduledTime.toISOString()}`);
       console.log(`     Time until ride: ${Math.round((scheduledTime - now) / 60000)}min`);
       
@@ -246,6 +304,8 @@ const checkScheduledRoutesActivation = async () => {
       if (websocketServer) {
         websocketServer.sendScheduledSearchActivated(routeData.userId, {
           routeId: routeData.routeId,
+          driverName: routeData.driverName,
+          vehicleInfo: routeData.vehicleInfo,
           scheduledTime: scheduledTime.toISOString(),
           message: 'Your scheduled route is now active and searching for passengers!'
         });
@@ -448,6 +508,12 @@ const storeMatchInFirestore = async (matchData) => {
       matchId: matchData.matchId,
       driverId: matchData.driverId,
       driverName: matchData.driverName,
+      driverPhone: matchData.driverPhone,
+      driverPhotoUrl: matchData.driverPhotoUrl,
+      driverRating: matchData.driverRating,
+      totalRides: matchData.totalRides,
+      isVerified: matchData.isVerified,
+      vehicleInfo: matchData.vehicleInfo,
       passengerId: matchData.passengerId,
       passengerName: matchData.passengerName,
       similarityScore: matchData.similarityScore,
@@ -463,6 +529,9 @@ const storeMatchInFirestore = async (matchData) => {
 
     await db.collection(ACTIVE_MATCHES_COLLECTION).doc(matchData.matchId).set(activeMatchData);
     console.log(`✅ Match stored in Firestore: ${matchData.driverName} ↔ ${matchData.passengerName}`);
+    console.log(`   - Driver: ${matchData.driverName} (Rating: ${matchData.driverRating})`);
+    console.log(`   - Vehicle: ${matchData.vehicleInfo?.model || 'Unknown'}`);
+    
     return true;
     
   } catch (error) {
@@ -478,6 +547,8 @@ const createActiveMatchForOverlay = async (matchData) => {
       
       if (result.driverSent || result.passengerSent) {
         console.log(`✅ Match sent to Flutter apps via WebSocket: ${matchData.driverName} ↔ ${matchData.passengerName}`);
+        console.log(`   - Driver: ${matchData.driverName} (Rating: ${matchData.driverRating})`);
+        console.log(`   - Vehicle: ${matchData.vehicleInfo?.model || 'Unknown'}`);
         
         trackUserMatch(matchData.driverId, matchData.matchId, matchData.passengerId);
         trackUserMatch(matchData.passengerId, matchData.matchId, matchData.driverId);
@@ -531,14 +602,44 @@ const storeSearchInMemory = async (searchData) => {
     userType: actualUserType,
     driverName: driverName,
     passengerName: passengerName,
+    
+    // ✅ COMPLETE DRIVER PROFILE DATA
+    driverPhone: searchData.driverPhone,
+    driverPhotoUrl: searchData.driverPhotoUrl,
+    driverRating: searchData.driverRating,
+    totalRides: searchData.totalRides,
+    isVerified: searchData.isVerified,
+    totalEarnings: searchData.totalEarnings,
+    completedRides: searchData.completedRides,
+    isOnline: searchData.isOnline,
+    isSearching: searchData.isSearching,
+    
+    // ✅ VEHICLE INFORMATION
+    vehicleInfo: searchData.vehicleInfo,
+    
+    // ✅ LOCATION DATA
     pickupLocation: searchData.pickupLocation || {},
     destinationLocation: searchData.destinationLocation || {},
     pickupName: searchData.pickupName || 'Unknown Pickup',
     destinationName: searchData.destinationName || 'Unknown Destination',
     routePoints: searchData.routePoints || [],
+    
+    // ✅ CAPACITY & PREFERENCES
     passengerCount: searchData.passengerCount || 1,
     capacity: searchData.capacity || 4,
     vehicleType: searchData.vehicleType || 'car',
+    
+    // ✅ ROUTE INFORMATION
+    distance: searchData.distance,
+    duration: searchData.duration,
+    fare: searchData.fare,
+    estimatedFare: searchData.estimatedFare,
+    maxWaitTime: searchData.maxWaitTime,
+    preferredVehicleType: searchData.preferredVehicleType,
+    specialRequests: searchData.specialRequests,
+    maxWalkDistance: searchData.maxWalkDistance,
+    
+    // ✅ SEARCH METADATA
     rideType: rideType,
     scheduledTime: searchData.scheduledTime,
     searchId: searchData.searchId || `${rideType}_${userId}_${Date.now()}`,
@@ -557,6 +658,8 @@ const storeSearchInMemory = async (searchData) => {
       });
       
       console.log(`📅 SCHEDULED ROUTE saved to Firestore: ${driverName}`);
+      console.log(`   - Driver: ${driverName} (Rating: ${searchData.driverRating || 5.0})`);
+      console.log(`   - Vehicle: ${searchData.vehicleInfo?.model || 'Unknown'}`);
       
       // If activating immediately, also store in memory for immediate matching
       if (activateImmediately) {
@@ -579,6 +682,9 @@ const storeSearchInMemory = async (searchData) => {
       console.log(`🎯 IMMEDIATE search stored: ${driverName || passengerName}`);
     }
     
+    console.log(`   - Driver: ${driverName} (Rating: ${searchData.driverRating || 5.0})`);
+    console.log(`   - Vehicle: ${searchData.vehicleInfo?.model || 'Unknown'}`);
+    
     setImmediateSearchTimeout(userId, enhancedSearchData.searchId);
   }
 
@@ -596,6 +702,9 @@ const storeSearchInMemory = async (searchData) => {
         scheduledTime: searchData.scheduledTime,
         pickupName: enhancedSearchData.pickupName,
         destinationName: enhancedSearchData.destinationName,
+        driverName: enhancedSearchData.driverName,
+        driverRating: enhancedSearchData.driverRating,
+        vehicleInfo: enhancedSearchData.vehicleInfo,
         activatedImmediately: activateImmediately,
         storage: rideType === 'scheduled' && actualUserType === 'driver' ? 'Firestore Collection' : 'Memory',
         matchingStatus: activateImmediately ? 'Starting immediately' : 'Will start 30 minutes before scheduled time',
@@ -628,6 +737,15 @@ app.post("/api/match/scheduled-route", async (req, res) => {
       userId, 
       driverId,
       driverName,
+      driverPhone,
+      driverPhotoUrl,
+      driverRating,
+      totalRides,
+      isVerified,
+      totalEarnings,
+      completedRides,
+      isOnline,
+      isSearching,
       pickupLocation,
       destinationLocation,
       pickupName,
@@ -637,6 +755,15 @@ app.post("/api/match/scheduled-route", async (req, res) => {
       passengerCount,
       scheduledTime,
       vehicleType,
+      vehicleInfo,
+      distance,
+      duration,
+      fare,
+      estimatedFare,
+      maxWaitTime,
+      preferredVehicleType,
+      specialRequests,
+      maxWalkDistance,
       activateImmediately = TEST_MODE
     } = req.body;
     
@@ -656,19 +783,49 @@ app.post("/api/match/scheduled-route", async (req, res) => {
       });
     }
 
-    // 🎯 Save scheduled route to dedicated Firestore collection
+    // 🎯 Save scheduled route to dedicated Firestore collection WITH COMPLETE DATA
     const routeData = {
       userId: actualUserId,
+      
+      // ✅ DRIVER PROFILE
       driverName: driverName,
+      driverPhone: driverPhone,
+      driverPhotoUrl: driverPhotoUrl,
+      driverRating: driverRating,
+      totalRides: totalRides,
+      isVerified: isVerified,
+      totalEarnings: totalEarnings,
+      completedRides: completedRides,
+      isOnline: isOnline,
+      isSearching: isSearching,
+      
+      // ✅ VEHICLE INFO
+      vehicleInfo: vehicleInfo,
+      vehicleType: vehicleType,
+      
+      // ✅ LOCATION DATA
       pickupLocation: pickupLocation,
       destinationLocation: destinationLocation,
       pickupName: pickupName,
       destinationName: destinationName,
+      
+      // ✅ ROUTE DATA
       routePoints: routePoints,
       capacity: capacity,
       passengerCount: passengerCount,
+      distance: distance,
+      duration: duration,
+      fare: fare,
+      estimatedFare: estimatedFare,
+      
+      // ✅ PREFERENCES
+      maxWaitTime: maxWaitTime,
+      preferredVehicleType: preferredVehicleType,
+      specialRequests: specialRequests,
+      maxWalkDistance: maxWalkDistance,
+      
+      // ✅ SCHEDULING
       scheduledTime: scheduledTime,
-      vehicleType: vehicleType,
       activateImmediately: activateImmediately
     };
 
@@ -681,7 +838,20 @@ app.post("/api/match/scheduled-route", async (req, res) => {
       immediateSearchData = {
         userId: actualUserId,
         userType: 'driver',
+        
+        // ✅ INCLUDE ALL DRIVER DATA FOR IMMEDIATE SEARCH TOO
         driverName: driverName,
+        driverPhone: driverPhone,
+        driverPhotoUrl: driverPhotoUrl,
+        driverRating: driverRating,
+        totalRides: totalRides,
+        isVerified: isVerified,
+        totalEarnings: totalEarnings,
+        completedRides: completedRides,
+        isOnline: isOnline,
+        isSearching: isSearching,
+        vehicleInfo: vehicleInfo,
+        
         pickupLocation: pickupLocation,
         destinationLocation: destinationLocation,
         pickupName: pickupName,
@@ -689,6 +859,15 @@ app.post("/api/match/scheduled-route", async (req, res) => {
         routePoints: routePoints,
         capacity: capacity,
         passengerCount: passengerCount,
+        distance: distance,
+        duration: duration,
+        fare: fare,
+        estimatedFare: estimatedFare,
+        maxWaitTime: maxWaitTime,
+        preferredVehicleType: preferredVehicleType,
+        specialRequests: specialRequests,
+        maxWalkDistance: maxWalkDistance,
+        
         rideType: 'scheduled',
         scheduledTime: scheduledTime,
         vehicleType: vehicleType,
@@ -705,13 +884,23 @@ app.post("/api/match/scheduled-route", async (req, res) => {
         'Scheduled route created successfully',
       routeId: savedRoute.routeId,
       userId: actualUserId,
+      driverName: driverName,
+      driverRating: driverRating,
+      vehicleInfo: vehicleInfo,
       scheduledTime: scheduledTime,
       status: activateImmediately ? 'active' : 'scheduled',
       activationTime: activateImmediately ? 'IMMEDIATELY' : '30 minutes before scheduled time',
       storage: 'Firestore Collection: scheduled_routes',
       immediateSearch: activateImmediately ? 'Created' : 'Not created',
       testMode: TEST_MODE,
-      unlimitedCapacity: UNLIMITED_CAPACITY
+      unlimitedCapacity: UNLIMITED_CAPACITY,
+      dataSaved: {
+        driverProfile: true,
+        vehicleInfo: true,
+        routeData: true,
+        preferences: true,
+        scheduling: true
+      }
     });
     
   } catch (error) {
@@ -751,12 +940,21 @@ app.get("/api/match/scheduled-route/:userId", async (req, res) => {
       routeId: route.routeId,
       userId: route.userId,
       driverName: route.driverName,
+      driverPhone: route.driverPhone,
+      driverPhotoUrl: route.driverPhotoUrl,
+      driverRating: route.driverRating,
+      totalRides: route.totalRides,
+      isVerified: route.isVerified,
+      vehicleInfo: route.vehicleInfo,
       scheduledTime: route.scheduledTime.toISOString(),
       status: route.status,
       timeUntilRide: Math.round(timeUntilRide / 60000),
       pickupName: route.pickupName,
       destinationName: route.destinationName,
       capacity: route.capacity,
+      distance: route.distance,
+      duration: route.duration,
+      fare: route.fare,
       storage: 'Firestore Collection',
       testMode: TEST_MODE,
       source: route.source
@@ -782,6 +980,15 @@ app.post("/api/match/search", async (req, res) => {
       userType, 
       driverId,
       driverName,
+      driverPhone,
+      driverPhotoUrl,
+      driverRating,
+      totalRides,
+      isVerified,
+      totalEarnings,
+      completedRides,
+      isOnline,
+      isSearching,
       passengerName,
       pickupLocation,
       destinationLocation,
@@ -790,6 +997,15 @@ app.post("/api/match/search", async (req, res) => {
       routePoints,
       capacity,
       passengerCount,
+      vehicleInfo,
+      distance,
+      duration,
+      fare,
+      estimatedFare,
+      maxWaitTime,
+      preferredVehicleType,
+      specialRequests,
+      maxWalkDistance,
       rideType = 'immediate',
       scheduledTime,
       searchId
@@ -814,7 +1030,22 @@ app.post("/api/match/search", async (req, res) => {
     const searchData = {
       userId: actualUserId,
       userType: userType,
+      
+      // ✅ COMPLETE DRIVER DATA
       driverName: driverName,
+      driverPhone: driverPhone,
+      driverPhotoUrl: driverPhotoUrl,
+      driverRating: driverRating,
+      totalRides: totalRides,
+      isVerified: isVerified,
+      totalEarnings: totalEarnings,
+      completedRides: completedRides,
+      isOnline: isOnline,
+      isSearching: isSearching,
+      
+      // ✅ VEHICLE DATA
+      vehicleInfo: vehicleInfo,
+      
       passengerName: passengerName,
       pickupLocation: pickupLocation,
       destinationLocation: destinationLocation,
@@ -823,6 +1054,17 @@ app.post("/api/match/search", async (req, res) => {
       routePoints: routePoints,
       capacity: capacity,
       passengerCount: passengerCount,
+      
+      // ✅ ROUTE DATA
+      distance: distance,
+      duration: duration,
+      fare: fare,
+      estimatedFare: estimatedFare,
+      maxWaitTime: maxWaitTime,
+      preferredVehicleType: preferredVehicleType,
+      specialRequests: specialRequests,
+      maxWalkDistance: maxWalkDistance,
+      
       rideType: rideType,
       scheduledTime: scheduledTime,
       searchId: searchId || `search_${actualUserId}_${Date.now()}`
@@ -835,6 +1077,9 @@ app.post("/api/match/search", async (req, res) => {
       message: 'Immediate search started successfully',
       searchId: searchData.searchId,
       userId: actualUserId,
+      driverName: driverName,
+      driverRating: driverRating,
+      vehicleInfo: vehicleInfo,
       rideType: rideType,
       timeout: '5 minutes (or until match found)',
       matches: [],
@@ -843,6 +1088,12 @@ app.post("/api/match/search", async (req, res) => {
       websocketConnected: websocketServer ? websocketServer.isUserConnected(actualUserId) : false,
       testMode: TEST_MODE,
       unlimitedCapacity: UNLIMITED_CAPACITY,
+      dataIncluded: {
+        driverProfile: true,
+        vehicleInfo: true,
+        routeData: true,
+        preferences: true
+      },
       autoStop: UNLIMITED_CAPACITY ? 
         'Drivers: NEVER (unlimited mode) | Passengers: After first match' : 
         'Search will stop automatically when match is found'
@@ -898,7 +1149,9 @@ const startOptimizedMatching = () => {
       allDrivers.forEach(driver => {
         const matchCount = userMatches.get(driver.userId)?.size || 0;
         const source = driver.documentId ? 'Firestore' : 'Memory';
-        console.log(`   - ${driver.driverName} (${source}) - Matches: ${matchCount}/${UNLIMITED_CAPACITY ? '∞' : driver.capacity || 4}`);
+        console.log(`   - ${driver.driverName} (${source})`);
+        console.log(`     Vehicle: ${driver.vehicleInfo?.model || 'Unknown'}`);
+        console.log(`     Rating: ${driver.driverRating} | Matches: ${matchCount}/${UNLIMITED_CAPACITY ? '∞' : driver.capacity || 4}`);
       });
 
       console.log('👤 Active Passengers:');
@@ -954,6 +1207,12 @@ const startOptimizedMatching = () => {
                 matchId: `match_${driver.userId}_${passenger.userId}_${Date.now()}`,
                 driverId: driver.userId,
                 driverName: driver.driverName || 'Unknown Driver',
+                driverPhone: driver.driverPhone,
+                driverPhotoUrl: driver.driverPhotoUrl,
+                driverRating: driver.driverRating,
+                totalRides: driver.totalRides,
+                isVerified: driver.isVerified,
+                vehicleInfo: driver.vehicleInfo,
                 passengerId: passenger.userId,
                 passengerName: passenger.passengerName || 'Unknown Passenger',
                 similarityScore: similarity,
@@ -978,6 +1237,8 @@ const startOptimizedMatching = () => {
                 matchesCreated++;
                 processedMatches.set(matchKey, Date.now());
                 console.log(`🎉 MATCH CREATED: ${driver.driverName} ↔ ${passenger.passengerName}`);
+                console.log(`   - Driver Rating: ${driver.driverRating}`);
+                console.log(`   - Vehicle: ${driver.vehicleInfo?.model || 'Unknown'}`);
                 
                 if (driver.documentId) {
                   console.log(`   📅 SCHEDULED ROUTE MATCH from Firestore!`);
@@ -1003,10 +1264,225 @@ const startOptimizedMatching = () => {
   setInterval(checkScheduledRoutesActivation, SCHEDULED_SEARCH_CHECK_INTERVAL);
 };
 
-// ========== ADDITIONAL ENDPOINTS ==========
+// ========== STOP SEARCH ENDPOINT ==========
 
-// [Previous endpoints for stop-search, search-status, debug, etc. remain the same]
-// ... (include all the previous endpoints like stop-search, search-status, debug, etc.)
+app.post("/api/match/stop-search", async (req, res) => {
+  try {
+    const { userId, userType, rideType = 'immediate', driverId } = req.body;
+    const actualUserId = userId || driverId;
+    
+    if (!actualUserId) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'userId or driverId is required' 
+      });
+    }
+
+    console.log(`🛑 Stopping search for user: ${actualUserId}, rideType: ${rideType}`);
+    
+    let stoppedFromMemory = false;
+    let stoppedFromFirestore = false;
+    
+    // Stop from memory (immediate searches)
+    if (activeSearches.has(actualUserId)) {
+      const search = activeSearches.get(actualUserId);
+      clearSearchTimeout(actualUserId);
+      activeSearches.delete(actualUserId);
+      stoppedFromMemory = true;
+      console.log(`✅ Stopped memory search: ${search.driverName || search.passengerName}`);
+    }
+    
+    // Stop from Firestore (scheduled routes)
+    if (rideType === 'scheduled') {
+      const route = await getScheduledRouteFromFirestore(actualUserId);
+      if (route) {
+        await updateScheduledRouteStatus(route.routeId, 'cancelled');
+        stoppedFromFirestore = true;
+        console.log(`✅ Cancelled scheduled route in Firestore: ${route.routeId}`);
+      }
+    }
+    
+    // Notify via WebSocket
+    if (websocketServer) {
+      websocketServer.sendSearchStopped(actualUserId, {
+        rideType: rideType,
+        reason: 'user_requested',
+        message: 'Search stopped successfully',
+        stoppedFromMemory: stoppedFromMemory,
+        stoppedFromFirestore: stoppedFromFirestore
+      });
+    }
+    
+    res.json({
+      success: true,
+      message: 'Search stopped successfully',
+      userId: actualUserId,
+      rideType: rideType,
+      stoppedFromMemory: stoppedFromMemory,
+      stoppedFromFirestore: stoppedFromFirestore,
+      activeSearchesRemaining: activeSearches.size
+    });
+    
+  } catch (error) {
+    console.error('❌ Error stopping search:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message 
+    });
+  }
+});
+
+// ========== SEARCH STATUS ENDPOINT ==========
+
+app.get("/api/match/search-status/:userId", async (req, res) => {
+  try {
+    const { userId } = req.params;
+    
+    console.log(`🔍 Getting search status for user: ${userId}`);
+    
+    const memorySearch = activeSearches.get(userId);
+    const scheduledRoute = await getScheduledRouteFromFirestore(userId);
+    const userMatchCount = userMatches.get(userId)?.size || 0;
+    const timeout = searchTimeouts.get(userId);
+    
+    const status = {
+      success: true,
+      userId: userId,
+      memorySearch: memorySearch ? {
+        exists: true,
+        driverName: memorySearch.driverName,
+        passengerName: memorySearch.passengerName,
+        rideType: memorySearch.rideType,
+        status: memorySearch.status,
+        searchId: memorySearch.searchId,
+        createdAt: memorySearch.createdAt
+      } : { exists: false },
+      scheduledRoute: scheduledRoute ? {
+        exists: true,
+        routeId: scheduledRoute.routeId,
+        driverName: scheduledRoute.driverName,
+        scheduledTime: scheduledRoute.scheduledTime.toISOString(),
+        status: scheduledRoute.status,
+        activateImmediately: scheduledRoute.activateImmediately
+      } : { exists: false },
+      matches: {
+        count: userMatchCount,
+        hasMatches: userMatchCount > 0
+      },
+      timeout: timeout ? {
+        exists: true,
+        type: timeout.type,
+        startedAt: timeout.startedAt,
+        expiresAt: timeout.expiresAt
+      } : { exists: false },
+      websocketConnected: websocketServer ? websocketServer.isUserConnected(userId) : false,
+      stats: {
+        activeSearches: activeSearches.size,
+        activeTimeouts: searchTimeouts.size,
+        usersWithMatches: userMatches.size
+      }
+    };
+    
+    res.json(status);
+    
+  } catch (error) {
+    console.error('❌ Error getting search status:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message 
+    });
+  }
+});
+
+// ========== DEBUG ENDPOINT ==========
+
+app.get("/api/debug/status", async (req, res) => {
+  try {
+    const memoryDrivers = Array.from(activeSearches.values())
+      .filter(search => search.userType === 'driver');
+    const memoryPassengers = Array.from(activeSearches.values())
+      .filter(search => search.userType === 'passenger');
+    
+    const scheduledRoutesSnapshot = await db.collection(SCHEDULED_ROUTES_COLLECTION)
+      .where('status', 'in', ['scheduled', 'active'])
+      .get();
+    
+    const scheduledRoutes = [];
+    scheduledRoutesSnapshot.forEach(doc => {
+      const data = doc.data();
+      scheduledRoutes.push({
+        routeId: data.routeId,
+        driverName: data.driverName,
+        status: data.status,
+        scheduledTime: data.scheduledTime.toDate().toISOString(),
+        vehicleInfo: data.vehicleInfo,
+        driverRating: data.driverRating
+      });
+    });
+    
+    const debugInfo = {
+      server: {
+        timestamp: new Date().toISOString(),
+        testMode: TEST_MODE,
+        unlimitedCapacity: UNLIMITED_CAPACITY,
+        websocketConnections: websocketServer ? websocketServer.getConnectedCount() : 0
+      },
+      memory: {
+        totalSearches: activeSearches.size,
+        drivers: memoryDrivers.length,
+        passengers: memoryPassengers.length,
+        activeTimeouts: searchTimeouts.size,
+        processedMatches: processedMatches.size,
+        usersWithMatches: userMatches.size
+      },
+      firestore: {
+        scheduledRoutes: scheduledRoutes.length,
+        collection: SCHEDULED_ROUTES_COLLECTION
+      },
+      memoryDrivers: memoryDrivers.map(d => ({
+        driverName: d.driverName,
+        vehicleInfo: d.vehicleInfo,
+        rating: d.driverRating,
+        rideType: d.rideType,
+        matches: userMatches.get(d.userId)?.size || 0
+      })),
+      scheduledRoutes: scheduledRoutes
+    };
+    
+    res.json(debugInfo);
+    
+  } catch (error) {
+    console.error('❌ Error in debug endpoint:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message 
+    });
+  }
+});
+
+// ========== HEALTH CHECK ENDPOINT ==========
+
+app.get("/api/health", (req, res) => {
+  res.json({
+    success: true,
+    message: "ShareWay Matching Server is running",
+    timestamp: new Date().toISOString(),
+    version: "2.0.0",
+    features: {
+      immediateMatching: true,
+      scheduledRoutes: true,
+      firestoreStorage: true,
+      websocketNotifications: true,
+      testMode: TEST_MODE,
+      unlimitedCapacity: UNLIMITED_CAPACITY
+    },
+    stats: {
+      activeSearches: activeSearches.size,
+      scheduledRoutes: "Check /api/debug/status",
+      websocketConnections: websocketServer ? websocketServer.getConnectedCount() : 0
+    }
+  });
+});
 
 // ========== START SERVER ==========
 
@@ -1015,18 +1491,18 @@ const PORT = process.env.PORT || 3000;
 if (require.main === module) {
   const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`
-🚀 ShareWay DEDICATED FIRESTORE SCHEDULED ROUTES Server Started!
+🚀 ShareWay COMPLETE DRIVER DATA Server Started!
 📍 Port: ${PORT}
 🌍 Environment: ${process.env.NODE_ENV || 'development'}
 🔥 Firebase: Hybrid Storage Mode
 💾 Memory Cache: Immediate searches only
-💾 Firestore: Scheduled routes collection
+💾 Firestore: Scheduled routes with COMPLETE driver data
 🔌 WebSocket: CONNECTION TIMING FIXED
 
 🎯 STORAGE STRATEGY:
    - Immediate searches: Memory only (fast)
    - Scheduled driver routes: Firestore collection (persistent)
-   - Cost optimization: Matching FREE, Persistence CHEAP
+   - Complete driver data: ALL profile, vehicle, and rating info
 
 🧪 TEST MODE: ${TEST_MODE ? 'ACTIVE' : 'INACTIVE'}
 🎯 UNLIMITED CAPACITY: ${UNLIMITED_CAPACITY ? 'ACTIVE 🚀' : 'INACTIVE'}
@@ -1039,11 +1515,23 @@ if (require.main === module) {
 - WebSocket Connections: ${websocketServer ? websocketServer.getConnectedCount() : 0}
 
 💾 FIRESTORE COLLECTIONS:
-- ${SCHEDULED_ROUTES_COLLECTION}: Driver scheduled routes
-- ${ACTIVE_MATCHES_COLLECTION}: Active matches
+- ${SCHEDULED_ROUTES_COLLECTION}: Driver scheduled routes WITH COMPLETE DATA
+- ${ACTIVE_MATCHES_COLLECTION}: Active matches with driver profiles
 - ${NOTIFICATIONS_COLLECTION}: User notifications
 
-✅ SCHEDULED DRIVER ROUTES NOW STORED IN DEDICATED FIRESTORE COLLECTION! 🎉
+✅ COMPLETE DRIVER DATA NOW SAVED TO FIRESTORE! 🎉
+   - Driver profiles (name, phone, photo, rating, rides, verification)
+   - Vehicle information (model, plate, color, type, year)
+   - Route data (distance, duration, fare, preferences)
+   - Scheduling information
+
+📱 ENDPOINTS:
+- POST /api/match/scheduled-route - Save complete scheduled route
+- POST /api/match/search - Start immediate search with full data
+- GET /api/match/scheduled-route/:userId - Get scheduled route
+- POST /api/match/stop-search - Stop search
+- GET /api/debug/status - Debug information
+- GET /api/health - Health check
     `);
   });
 
