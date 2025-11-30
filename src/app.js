@@ -473,6 +473,25 @@ const storeMatchInFirestore = async (matchData) => {
 
 const createActiveMatchForOverlay = async (matchData) => {
   try {
+    // 🎯 ESSENTIAL: Log ONLY what driver data passenger receives
+    console.log('\n🎯 ==== DRIVER DATA PASSENGER RECEIVES ====');
+    console.log('📱 Driver ID:', matchData.driverId);
+    console.log('👤 Driver Name:', matchData.driverName);
+    console.log('📞 Phone:', matchData.driverProfile?.phoneNumber || 'NOT AVAILABLE');
+    console.log('📧 Email:', matchData.driverProfile?.email || 'NOT AVAILABLE');
+    console.log('⭐ Rating:', matchData.driverProfile?.rating || 'NOT AVAILABLE');
+    console.log('🚗 Vehicle:', matchData.driverProfile?.vehicleDetails || 'NOT AVAILABLE');
+    console.log('🛞 Total Rides:', matchData.driverProfile?.totalRides || 'NOT AVAILABLE');
+    console.log('🖼️ Profile Pic:', matchData.driverProfile?.profilePicture || 'NOT AVAILABLE');
+    
+    // 🎯 Log the ACTUAL match data structure
+    console.log('\n📦 ACTUAL MATCH DATA SENT:');
+    console.log(JSON.stringify({
+      driverId: matchData.driverId,
+      driverName: matchData.driverName,
+      driverProfile: matchData.driverProfile || 'NO PROFILE DATA'
+    }, null, 2));
+
     if (websocketServer) {
       const result = websocketServer.sendMatchToUsers(matchData);
       
