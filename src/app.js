@@ -921,6 +921,7 @@ const createActiveMatchForOverlay = async (matchData) => {
       matchId: matchData.matchId,
       matchedWith: matchData.passengerId,
       matchStatus: 'proposed',
+      matchProposedAt: admin.firestore.FieldValue.serverTimestamp(),
       lastUpdated: admin.firestore.FieldValue.serverTimestamp()
     };
     
@@ -931,6 +932,7 @@ const createActiveMatchForOverlay = async (matchData) => {
       matchId: matchData.matchId,
       matchedWith: matchData.driverId,
       matchStatus: 'proposed',
+      matchProposedAt: admin.firestore.FieldValue.serverTimestamp(),
       lastUpdated: admin.firestore.FieldValue.serverTimestamp()
     };
     
@@ -984,13 +986,17 @@ const createActiveMatchForOverlay = async (matchData) => {
           await updateDriverSearch(matchData.driverId, {
             matchId: null,
             matchedWith: null,
-            matchStatus: 'expired'
+            matchStatus: null,
+            passenger: null,
+            lastUpdated: admin.firestore.FieldValue.serverTimestamp()
           });
           
           await updatePassengerSearch(matchData.passengerId, {
             matchId: null,
             matchedWith: null,
-            matchStatus: 'expired'
+            matchStatus: null,
+            driver: null,
+            lastUpdated: admin.firestore.FieldValue.serverTimestamp()
           });
           
           // Update match document
@@ -1111,6 +1117,86 @@ const storeSearchInMemory = async (searchData) => {
   console.log(`🧪 TEST MODE: ${TEST_MODE ? 'ACTIVE' : 'INACTIVE'}`);
   
   return enhancedSearchData;
+};
+
+// ========== NEW: CLEAR EXPIRED MATCH PROPOSALS ==========
+
+// 🎯 NEW: Clear expired match proposals
+const clearExpiredMatchProposals = async () => {
+  try {
+    const expiryTime = new Date(Date.now() - MATCH_PROPOSAL_TIMEOUT);
+    const expiryTimestamp = admin.firestore.Timestamp.fromDate(expiryTime);
+    
+    console.log(`🧹 Clearing match proposals older than: ${expiryTime.toISOString()}`);
+    
+    // Find expired proposed matches
+    const expiredMatches = await db.collection(ACTIVE_MATCHES_COLLECTION)
+      .where('matchStatus', '==', 'proposed')
+      .where('createdAt', '<', expiryTimestamp)
+      .get();
+    
+    let clearedCount = 0;
+    
+    for (const matchDoc of expiredMatches.docs) {
+      const matchData = matchDoc.data();
+      
+      console.log(`⏰ Match expired: ${matchData.matchId} - Driver: ${matchData.driverName}, Passenger: ${matchData.passengerName}`);
+      
+      // Clear driver's match status
+      await db.collection(ACTIVE_SEARCHES_DRIVER_COLLECTION)
+        .doc(matchData.driverId)
+        .update({
+          matchId: null,
+          matchedWith: null,
+          matchStatus: null,
+          passenger: null,
+          lastUpdated: admin.firestore.FieldValue.serverTimestamp()
+        });
+      
+      // Clear passenger's match status
+      await db.collection(ACTIVE_SEARCHES_PASSENGER_COLLECTION)
+        .doc(matchData.passengerId)
+        .update({
+          matchId: null,
+          matchedWith: null,
+          matchStatus: null,
+          driver: null,
+          lastUpdated: admin.firestore.FieldValue.serverTimestamp()
+        });
+      
+      // Update match document as expired
+      await matchDoc.ref.update({
+        matchStatus: 'expired',
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        expiryReason: 'timeout',
+        expiryTime: admin.firestore.FieldValue.serverTimestamp()
+      });
+      
+      // Remove from processed matches cache
+      const matchKey = generateMatchKey(matchData.driverId, matchData.passengerId);
+      processedMatches.delete(matchKey);
+      
+      // Remove from userMatches tracking
+      if (userMatches.has(matchData.driverId)) {
+        userMatches.get(matchData.driverId).delete(matchData.matchId);
+      }
+      if (userMatches.has(matchData.passengerId)) {
+        userMatches.get(matchData.passengerId).delete(matchData.matchId);
+      }
+      
+      clearedCount++;
+    }
+    
+    if (clearedCount > 0) {
+      console.log(`✅ Cleared ${clearedCount} expired match proposals`);
+    }
+    
+    return clearedCount;
+    
+  } catch (error) {
+    console.error('❌ Error clearing expired match proposals:', error);
+    return 0;
+  }
 };
 
 // ========== DRIVER SCHEDULES ENDPOINT ==========
@@ -1673,7 +1759,44 @@ app.post("/api/match/reject", async (req, res) => {
       });
     }
     
-    await rejectMatch(actualUserId, userType, matchId);
+    // Clear from Firestore first
+    if (userType === 'driver') {
+      await db.collection(ACTIVE_SEARCHES_DRIVER_COLLECTION).doc(actualUserId).update({
+        matchId: null,
+        matchedWith: null,
+        matchStatus: null,
+        passenger: null,
+        lastUpdated: admin.firestore.FieldValue.serverTimestamp()
+      });
+    } else if (userType === 'passenger') {
+      await db.collection(ACTIVE_SEARCHES_PASSENGER_COLLECTION).doc(actualUserId).update({
+        matchId: null,
+        matchedWith: null,
+        matchStatus: null,
+        driver: null,
+        lastUpdated: admin.firestore.FieldValue.serverTimestamp()
+      });
+    }
+    
+    // Update match document
+    await db.collection(ACTIVE_MATCHES_COLLECTION).doc(matchId).update({
+      matchStatus: 'rejected',
+      rejectedAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      rejectedBy: userType,
+      rejectedByUserId: actualUserId
+    });
+    
+    // Clear from memory cache
+    const matchKey = generateMatchKey(actualUserId, passengerId);
+    processedMatches.delete(matchKey);
+    
+    // Clear from userMatches
+    if (userMatches.has(actualUserId)) {
+      userMatches.get(actualUserId).delete(matchId);
+    }
+    
+    console.log(`✅ Match ${matchId} rejected by ${userType} ${actualUserId}`);
     
     res.json({
       success: true,
@@ -2311,6 +2434,12 @@ const startOptimizedMatching = () => {
       console.log(`\n📊 ===== SYMMETRICAL MATCHING CYCLE START =====`);
       console.log(`🧪 TEST MODE: ${TEST_MODE ? 'ACTIVE' : 'INACTIVE'}`);
       
+      // 🎯 NEW: Clear expired match proposals before starting new matching
+      const expiredCleared = await clearExpiredMatchProposals();
+      if (expiredCleared > 0) {
+        console.log(`🔄 Freed ${expiredCleared} drivers/passengers for new matches`);
+      }
+      
       // 🎯 Get active searches from SEPARATE collections
       const allDrivers = await getAllActiveDriverSearches();
       const allPassengers = await getAllActivePassengerSearches();
@@ -2343,7 +2472,9 @@ const startOptimizedMatching = () => {
         
         // Skip if driver already has a match
         if (driver.matchStatus === 'proposed' || driver.matchStatus === 'accepted') {
-          console.log(`⏭️ Skipping driver ${driver.driverName} - already has match (${driver.matchStatus})`);
+          const matchTime = driver.matchProposedAt || driver.acceptedAt;
+          const timeAgo = matchTime ? Math.round((Date.now() - matchTime.toDate().getTime()) / 60000) : 'unknown';
+          console.log(`⏭️ Skipping driver ${driver.driverName} - has match (${driver.matchStatus}) for ${timeAgo} minutes`);
           continue;
         }
         
@@ -2753,6 +2884,7 @@ if (require.main === module) {
 
 🧪 TEST MODE: ${TEST_MODE ? 'ACTIVE' : 'INACTIVE'}
 🎯 UNLIMITED CAPACITY: ${UNLIMITED_CAPACITY ? 'ACTIVE 🚀' : 'INACTIVE'}
+🎯 EXPIRED MATCH CLEANUP: ACTIVE (every 2 minutes)
 
 📊 Current Stats:
 - Active Searches in Memory: ${activeSearches.size}
@@ -2773,6 +2905,7 @@ if (require.main === module) {
    - Drivers: ${ACTIVE_SEARCHES_DRIVER_COLLECTION}/{driverId}
    - Passengers: ${ACTIVE_SEARCHES_PASSENGER_COLLECTION}/{passengerId}
    - Match proposals with 2-minute timeout
+   - Auto-expiry of old matches
    - Real-time WebSocket notifications
    - Capacity tracking and seat management
 
