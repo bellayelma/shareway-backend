@@ -1,4 +1,4 @@
-// src/app.js - COMPLETE SYMMETRICAL SCRIPT WITH ROUTEMATCHING INTEGRATION
+// src/app.js - COMPLETE SYMMETRICAL SCRIPT WITH ROUTEMATCHING INTEGRATION & TRIP STATUS UPDATES
 const express = require("express");
 const admin = require("firebase-admin");
 const cors = require("cors");
@@ -45,6 +45,7 @@ const UNLIMITED_CAPACITY = true;
 const DRIVER_SCHEDULES_COLLECTION = 'driver_schedules';
 const ACTIVE_MATCHES_COLLECTION = 'active_matches';
 const NOTIFICATIONS_COLLECTION = 'notifications';
+const ACTIVE_SEARCHES_COLLECTION = 'active_searches';
 
 // Initialize Firebase Admin
 let db;
@@ -1258,6 +1259,153 @@ app.post("/api/passenger/update-location", async (req, res) => {
   }
 });
 
+// ========== TRIP STATUS UPDATE ENDPOINT ==========
+
+app.post("/api/trip/update-status", async (req, res) => {
+  try {
+    const { userId, tripStatus, location } = req.body;
+    
+    if (!userId) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'userId is required' 
+      });
+    }
+    
+    if (!tripStatus) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'tripStatus is required' 
+      });
+    }
+    
+    console.log(`🔄 === TRIP STATUS UPDATE ===`);
+    console.log(`   User: ${userId}`);
+    console.log(`   New Status: ${tripStatus}`);
+    if (location) {
+      console.log(`   Location: ${location.latitude}, ${location.longitude}`);
+    }
+    
+    // Update user's own active_searches
+    const userDoc = await db.collection(ACTIVE_SEARCHES_COLLECTION).doc(userId).get();
+    
+    if (!userDoc.exists) {
+      console.log(`❌ User not found in active_searches: ${userId}`);
+      return res.status(404).json({ 
+        success: false, 
+        error: 'User not found in active searches' 
+      });
+    }
+    
+    const updates = {
+      tripStatus: tripStatus,
+      lastUpdated: admin.firestore.FieldValue.serverTimestamp()
+    };
+    
+    // Add location if provided
+    if (location) {
+      updates.currentLocation = {
+        latitude: location.latitude,
+        longitude: location.longitude,
+        accuracy: location.accuracy || 0,
+        timestamp: admin.firestore.FieldValue.serverTimestamp()
+      };
+    }
+    
+    // Update trip milestones
+    if (tripStatus === 'arrived_at_pickup') {
+      updates.arrivedAtPickupTime = admin.firestore.FieldValue.serverTimestamp();
+    } else if (tripStatus === 'on_trip') {
+      updates.tripStartedAt = admin.firestore.FieldValue.serverTimestamp();
+    } else if (tripStatus === 'arrived_at_destination') {
+      updates.arrivedAtDestinationTime = admin.firestore.FieldValue.serverTimestamp();
+    }
+    
+    await db.collection(ACTIVE_SEARCHES_COLLECTION).doc(userId).update(updates);
+    console.log(`✅ Updated trip status for user ${userId}: ${tripStatus}`);
+    
+    // If driver, also update passenger's document with driver status
+    const userData = userDoc.data();
+    if (userData.userType === 'driver' && userData.matchedWith) {
+      console.log(`📤 Updating passenger ${userData.matchedWith} with driver status`);
+      
+      const passengerUpdates = {
+        [`driver.tripStatus`]: tripStatus,
+        lastUpdated: admin.firestore.FieldValue.serverTimestamp()
+      };
+      
+      if (location) {
+        passengerUpdates[`driver.currentLocation`] = {
+          latitude: location.latitude,
+          longitude: location.longitude,
+          timestamp: admin.firestore.FieldValue.serverTimestamp()
+        };
+      }
+      
+      await db.collection(ACTIVE_SEARCHES_COLLECTION).doc(userData.matchedWith).update(passengerUpdates);
+      console.log(`✅ Updated passenger with driver trip status: ${tripStatus}`);
+      
+      // Notify passenger via WebSocket
+      if (websocketServer) {
+        websocketServer.sendTripStatusUpdate(userData.matchedWith, {
+          driverId: userId,
+          driverName: userData.driverName,
+          tripStatus: tripStatus,
+          location: location,
+          timestamp: new Date().toISOString()
+        });
+      }
+    }
+    
+    // If passenger, also update driver's document with passenger status
+    if (userData.userType === 'passenger' && userData.matchedWith) {
+      console.log(`📤 Updating driver ${userData.matchedWith} with passenger status`);
+      
+      const driverUpdates = {
+        [`passenger.tripStatus`]: tripStatus,
+        lastUpdated: admin.firestore.FieldValue.serverTimestamp()
+      };
+      
+      if (location) {
+        driverUpdates[`passenger.currentLocation`] = {
+          latitude: location.latitude,
+          longitude: location.longitude,
+          timestamp: admin.firestore.FieldValue.serverTimestamp()
+        };
+      }
+      
+      await db.collection(ACTIVE_SEARCHES_COLLECTION).doc(userData.matchedWith).update(driverUpdates);
+      console.log(`✅ Updated driver with passenger trip status: ${tripStatus}`);
+      
+      // Notify driver via WebSocket
+      if (websocketServer) {
+        websocketServer.sendTripStatusUpdate(userData.matchedWith, {
+          passengerId: userId,
+          passengerName: userData.passengerName,
+          tripStatus: tripStatus,
+          location: location,
+          timestamp: new Date().toISOString()
+        });
+      }
+    }
+    
+    res.json({ 
+      success: true, 
+      tripStatus: tripStatus,
+      userId: userId,
+      userType: userData.userType,
+      timestamp: new Date().toISOString()
+    });
+    
+  } catch (error) {
+    console.error('❌ Error updating trip status:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message 
+    });
+  }
+});
+
 // ========== OPTIMIZED MATCHING SERVICE WITH FIRESTORE INTEGRATION ==========
 
 const startOptimizedMatching = () => {
@@ -1718,7 +1866,8 @@ app.get("/api/health", (req, res) => {
       unlimitedCapacity: UNLIMITED_CAPACITY,
       routeMatchingIntegration: true,
       realTimeLocationUpdates: true,
-      symmetricalEndpoints: true
+      symmetricalEndpoints: true,
+      tripStatusUpdates: true
     },
     endpoints: {
       symmetrical: {
@@ -1731,6 +1880,9 @@ app.get("/api/health", (req, res) => {
       driverSpecific: {
         schedule: "POST /api/match/driver-schedule",
         getSchedule: "GET /api/match/driver-schedule/:driverId"
+      },
+      trip: {
+        updateStatus: "POST /api/trip/update-status"
       },
       utility: {
         stopSearch: "POST /api/match/stop-search",
@@ -1766,6 +1918,7 @@ if (require.main === module) {
    - Separate but symmetrical location update endpoints
    - All data stored in Firestore via routeMatching.js
    - Bidirectional matching (Driver→Passenger & Passenger→Driver)
+   - Real-time trip status updates for progression
 
 🧪 TEST MODE: ${TEST_MODE ? 'ACTIVE' : 'INACTIVE'}
 🎯 UNLIMITED CAPACITY: ${UNLIMITED_CAPACITY ? 'ACTIVE 🚀' : 'INACTIVE'}
@@ -1779,13 +1932,14 @@ if (require.main === module) {
 
 💾 FIRESTORE COLLECTIONS:
 - ${DRIVER_SCHEDULES_COLLECTION}: Driver schedules with complete data
-- ACTIVE_SEARCHES: All active searches (via routeMatching.js)
+- ${ACTIVE_SEARCHES_COLLECTION}: All active searches (via routeMatching.js)
 - ${ACTIVE_MATCHES_COLLECTION}: Active matches with profiles
 - ${NOTIFICATIONS_COLLECTION}: User notifications
 
 ✅ FULLY SYMMETRICAL SYSTEM 🎉
    - Single search endpoint: /api/match/search
    - Symmetrical location updates: /api/driver/update-location & /api/passenger/update-location
+   - Trip status updates: /api/trip/update-status
    - Both use routeMatching.js functions
    - Bidirectional matching algorithm
 
@@ -1793,6 +1947,7 @@ if (require.main === module) {
 - POST /api/match/search - Start search (works for both drivers & passengers)
 - POST /api/driver/update-location - Update driver location (triggers matching)
 - POST /api/passenger/update-location - Update passenger location (triggers matching)
+- POST /api/trip/update-status - Update trip progression status
 - POST /api/match/driver-schedule - Create driver schedule (driver-specific)
 - GET /api/match/driver-schedule/:driverId - Get driver schedule
 - POST /api/match/stop-search - Stop search

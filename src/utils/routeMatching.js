@@ -585,13 +585,7 @@ const processUserLocationUpdateAndMatch = async (db, userId, userType, locationD
       }
       
       // Save match to Firestore
-      await createActiveMatchForOverlay(db, matchData);
-      
-      // Send WebSocket notification
-      if (websocketServer) {
-        websocketServer.sendMatchToUsers(matchData);
-        console.log(`📤 WebSocket notification sent for real-time match`);
-      }
+      await createActiveMatchForOverlay(db, matchData, websocketServer);
       
       return matchData;
     } else {
@@ -1092,52 +1086,105 @@ const createMatchIfNotExists = async (db, driverData, passengerData, similarityS
   }
 };
 
-const createActiveMatchForOverlay = async (db, matchData) => {
+// 🎯 UPDATED: Create embedded match directly in users' active_searches documents
+const createActiveMatchForOverlay = async (db, matchData, websocketServer = null) => {
   try {
-    console.log(`🎯 Creating active match for overlay: ${matchData.matchId}`);
+    console.log(`🎯 Creating embedded match in active_searches: ${matchData.matchId}`);
     
-    const activeMatchData = {
-      matchId: matchData.matchId,
-      driverId: matchData.driverId,
-      driverName: matchData.driverName,
-      passengerId: matchData.passengerId,
-      passengerName: matchData.passengerName,
-      similarityScore: matchData.similarityScore,
-      originalSimilarityScore: matchData.originalSimilarityScore,
-      proximityScore: matchData.proximityScore,
-      matchQuality: matchData.matchQuality,
+    const driverId = matchData.driverId;
+    const passengerId = matchData.passengerId;
+    const matchId = matchData.matchId;
+    const timestamp = admin.firestore.FieldValue.serverTimestamp();
+    
+    // 🎯 CRITICAL: UPDATE DRIVER'S active_searches DOCUMENT
+    const driverDocRef = db.collection('active_searches')
+      .where('userId', '==', driverId)
+      .where('isSearching', '==', true)
+      .limit(1);
+    
+    const driverSnapshot = await driverDocRef.get();
+    
+    if (!driverSnapshot.empty) {
+      const driverDoc = driverSnapshot.docs[0];
       
-      // 🎯 Location data for real-time tracking
-      driverCurrentLocation: matchData.driverCurrentLocation,
-      passengerPickupLocation: matchData.passengerPickupLocation,
-      distanceToPickup: matchData.distanceToPickup,
-      estimatedArrivalTime: matchData.estimatedArrivalTime,
+      await driverDoc.ref.update({
+        // 🎯 EMBED MATCH DATA INTO DRIVER'S DOCUMENT
+        matchId: matchId,
+        matchedWith: passengerId,
+        matchStatus: 'proposed', // proposed → accepted → completed
+        matchProposedAt: timestamp,
+        
+        // 🎯 EMBED PASSENGER INFO
+        passenger: {
+          userId: passengerId,
+          name: matchData.passengerName,
+          phone: matchData.passengerPhone || '',
+          photoUrl: matchData.passengerPhotoUrl || '',
+          rating: matchData.passengerRating || 5.0,
+          pickupLocation: matchData.pickupLocation,
+          destinationLocation: matchData.destinationLocation,
+          pickupName: matchData.pickupName,
+          destinationName: matchData.destinationName,
+          passengerCount: matchData.passengerCount || 1
+        },
+        
+        // Trip will start when accepted
+        tripStatus: 'match_proposed',
+        lastUpdated: timestamp
+      });
       
-      // Route information for overlay display
-      pickupName: matchData.pickupName || 'Unknown Location',
-      destinationName: matchData.destinationName || 'Unknown Destination',
-      pickupLocation: matchData.pickupLocation,
-      destinationLocation: matchData.destinationLocation,
+      console.log(`✅ Updated driver's active_searches with embedded passenger data`);
+    }
+    
+    // 🎯 CRITICAL: UPDATE PASSENGER'S active_searches DOCUMENT
+    const passengerDocRef = db.collection('active_searches')
+      .where('userId', '==', passengerId)
+      .where('isSearching', '==', true)
+      .limit(1);
+    
+    const passengerSnapshot = await passengerDocRef.get();
+    
+    if (!passengerSnapshot.empty) {
+      const passengerDoc = passengerSnapshot.docs[0];
       
-      // Session information
-      driverSessionId: matchData.driverSessionId,
-      passengerSessionId: matchData.passengerSessionId,
+      await passengerDoc.ref.update({
+        // 🎯 EMBED MATCH DATA INTO PASSENGER'S DOCUMENT
+        matchId: matchId,
+        matchedWith: driverId,
+        matchStatus: 'proposed',
+        matchProposedAt: timestamp,
+        
+        // 🎯 EMBED DRIVER INFO
+        driver: {
+          userId: driverId,
+          name: matchData.driverName,
+          phone: matchData.driverPhone || '',
+          photoUrl: matchData.driverPhotoUrl || '',
+          rating: matchData.driverRating || 5.0,
+          vehicleInfo: matchData.vehicleInfo || {},
+          currentLocation: matchData.driverCurrentLocation,
+          similarityScore: matchData.similarityScore
+        },
+        
+        // Trip info
+        tripStatus: 'match_proposed',
+        lastUpdated: timestamp
+      });
       
-      // Overlay trigger flag
-      overlayTriggered: true,
-      processedAt: null,
-      
-      // Single timestamp
-      createdAt: admin.firestore.FieldValue.serverTimestamp()
-    };
-
-    await db.collection(COLLECTIONS.ACTIVE_MATCHES).doc(matchData.matchId).set(activeMatchData);
-    console.log(`✅ Active match created for overlay: ${matchData.matchId}`);
-    return activeMatchData;
+      console.log(`✅ Updated passenger's active_searches with embedded driver data`);
+    }
+    
+    // Send WebSocket notifications
+    if (websocketServer) {
+      websocketServer.sendMatchToUsers(matchData);
+      console.log(`📤 WebSocket match notification sent`);
+    }
+    
+    return { success: true, matchId: matchId };
     
   } catch (error) {
-    console.error('❌ Error creating active match for overlay:', error);
-    return null;
+    console.error('❌ Error creating embedded match:', error);
+    return { success: false, error: error.message };
   }
 };
 
