@@ -1,8 +1,9 @@
-// src/app.js - COMPLETE SYMMETRICAL SCRIPT WITH ROUTEMATCHING INTEGRATION & TRIP STATUS UPDATES
+// src/app.js - COMPLETE SYMMETRICAL SCRIPT WITH MATCH ACCEPTANCE FUNCTIONALITY
 const express = require("express");
 const admin = require("firebase-admin");
 const cors = require("cors");
 const path = require("path");
+const { v4: uuidv4 } = require("uuid");
 require("dotenv").config({ path: path.join(__dirname, '../.env') });
 
 // Import route matching utilities
@@ -46,6 +47,7 @@ const DRIVER_SCHEDULES_COLLECTION = 'driver_schedules';
 const ACTIVE_MATCHES_COLLECTION = 'active_matches';
 const NOTIFICATIONS_COLLECTION = 'notifications';
 const ACTIVE_SEARCHES_COLLECTION = 'active_searches';
+const ACTIVE_RIDES_COLLECTION = 'active_rides';
 
 // Initialize Firebase Admin
 let db;
@@ -95,6 +97,7 @@ const userMatches = new Map();
 const IMMEDIATE_SEARCH_TIMEOUT = 5 * 60 * 1000;
 const SCHEDULED_SEARCH_CHECK_INTERVAL = 10000;
 const MAX_MATCH_AGE = 300000;
+const MATCH_PROPOSAL_TIMEOUT = 2 * 60 * 1000; // 2 minutes for match acceptance
 
 // ========== DEDICATED FIRESTORE DRIVER SCHEDULES MANAGEMENT ==========
 
@@ -150,6 +153,18 @@ const saveDriverScheduleToFirestore = async (scheduleData) => {
       capacity: scheduleData.capacity || 4,
       vehicleType: scheduleData.vehicleType || 'car',
       
+      // ✅ MATCH ACCEPTANCE FIELDS
+      matchId: null,
+      matchedWith: null,
+      matchStatus: null,
+      tripStatus: null,
+      rideId: null,
+      passenger: null,
+      driver: null,
+      currentPassengers: 0,
+      availableSeats: scheduleData.capacity || 4,
+      acceptedAt: null,
+      
       // ✅ ROUTE INFORMATION
       distance: scheduleData.distance || 0,
       duration: scheduleData.duration || 0,
@@ -178,13 +193,7 @@ const saveDriverScheduleToFirestore = async (scheduleData) => {
     console.log(`💾 Saved COMPLETE driver schedule to Firestore: ${scheduleData.driverName}`);
     console.log(`   - Schedule ID: ${scheduleId}`);
     console.log(`   - Driver ID: ${driverId}`);
-    console.log(`   - Driver: ${scheduleData.driverName} (${scheduleData.driverPhone})`);
-    console.log(`   - Vehicle: ${scheduleData.vehicleInfo?.model || 'Unknown'}`);
-    console.log(`   - Rating: ${scheduleData.driverRating || 5.0}`);
-    console.log(`   - Rides: ${scheduleData.totalRides || 0}`);
-    console.log(`   - Verified: ${scheduleData.isVerified || false}`);
-    console.log(`   - Scheduled: ${scheduleData.scheduledTime}`);
-    console.log(`   - Collection: ${DRIVER_SCHEDULES_COLLECTION}`);
+    console.log(`   - Available Seats: ${driverSchedule.availableSeats}`);
     
     return driverSchedule;
   } catch (error) {
@@ -212,9 +221,7 @@ const getDriverScheduleFromFirestore = async (driverId) => {
 
     const scheduleData = snapshot.docs[0].data();
     console.log(`✅ Found driver schedule in Firestore: ${scheduleData.scheduleId}`);
-    console.log(`   - Driver: ${scheduleData.driverName}`);
-    console.log(`   - Vehicle: ${scheduleData.vehicleInfo?.model || 'Unknown'}`);
-    console.log(`   - Rating: ${scheduleData.driverRating}`);
+    console.log(`   - Available Seats: ${scheduleData.availableSeats}/${scheduleData.capacity}`);
     
     return {
       ...scheduleData,
@@ -264,7 +271,7 @@ const getActiveDriverSchedulesFromFirestore = async () => {
 
     console.log(`📊 Found ${activeSchedules.length} active driver schedules in Firestore`);
     activeSchedules.forEach(schedule => {
-      console.log(`   - ${schedule.driverName} (${schedule.vehicleInfo?.model || 'Unknown'}) - Rating: ${schedule.driverRating}`);
+      console.log(`   - ${schedule.driverName}: ${schedule.availableSeats}/${schedule.capacity} seats available`);
     });
     
     return activeSchedules;
@@ -294,9 +301,7 @@ const checkDriverSchedulesActivation = async () => {
       const scheduledTime = scheduleData.scheduledTime.toDate();
       
       console.log(`   - ${scheduleData.driverName}:`);
-      console.log(`     Vehicle: ${scheduleData.vehicleInfo?.model || 'Unknown'}`);
-      console.log(`     Rating: ${scheduleData.driverRating}`);
-      console.log(`     Scheduled: ${scheduledTime.toISOString()}`);
+      console.log(`     Available Seats: ${scheduleData.availableSeats}/${scheduleData.capacity}`);
       console.log(`     Time until ride: ${Math.round((scheduledTime - now) / 60000)}min`);
       
       // Activate the schedule
@@ -315,6 +320,7 @@ const checkDriverSchedulesActivation = async () => {
           driverName: scheduleData.driverName,
           vehicleInfo: scheduleData.vehicleInfo,
           scheduledTime: scheduledTime.toISOString(),
+          availableSeats: scheduleData.availableSeats,
           message: 'Your scheduled route is now active and searching for passengers!'
         });
       }
@@ -356,6 +362,176 @@ setInterval(() => {
 const generateMatchKey = (driverId, passengerId, timestamp = Date.now()) => {
   const timeWindow = Math.floor(timestamp / 30000);
   return `${driverId}_${passengerId}_${timeWindow}`;
+};
+
+// ========== MATCH ACCEPTANCE FUNCTIONS ==========
+
+// Create a new active ride document
+const createActiveRide = async (driverData, passengerData) => {
+  try {
+    const rideId = `ride_${uuidv4()}`;
+    
+    const rideData = {
+      rideId: rideId,
+      driverId: driverData.userId,
+      driverName: driverData.driverName,
+      driverPhone: driverData.driverPhone,
+      driverPhotoUrl: driverData.driverPhotoUrl,
+      driverRating: driverData.driverRating,
+      vehicleInfo: driverData.vehicleInfo,
+      passengerId: passengerData.userId,
+      passengerName: passengerData.passengerName,
+      passengerPhone: passengerData.passengerPhone,
+      passengerPhotoUrl: passengerData.passengerPhotoUrl,
+      pickupLocation: passengerData.pickupLocation || driverData.pickupLocation,
+      pickupName: passengerData.pickupName || driverData.pickupName,
+      destinationLocation: passengerData.destinationLocation || driverData.destinationLocation,
+      destinationName: passengerData.destinationName || driverData.destinationName,
+      distance: passengerData.distance || driverData.distance,
+      duration: passengerData.duration || driverData.duration,
+      estimatedFare: passengerData.estimatedFare || driverData.estimatedFare,
+      rideType: driverData.rideType || passengerData.rideType || 'immediate',
+      scheduledTime: driverData.scheduledTime || passengerData.scheduledTime,
+      status: 'driver_accepted',
+      matchId: driverData.matchId,
+      tripStatus: 'driver_accepted',
+      acceptedAt: admin.firestore.FieldValue.serverTimestamp(),
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    };
+
+    await db.collection(ACTIVE_RIDES_COLLECTION).doc(rideId).set(rideData);
+    console.log(`✅ Created active ride: ${rideId}`);
+    console.log(`   - Driver: ${driverData.driverName}`);
+    console.log(`   - Passenger: ${passengerData.passengerName}`);
+    
+    return rideData;
+  } catch (error) {
+    console.error('❌ Error creating active ride:', error);
+    throw error;
+  }
+};
+
+// Update driver document with passenger acceptance
+const updateDriverWithPassenger = async (driverId, passengerData, matchId, rideId) => {
+  try {
+    const updates = {
+      matchId: matchId,
+      matchedWith: passengerData.userId,
+      matchStatus: 'accepted',
+      rideId: rideId,
+      tripStatus: 'driver_accepted',
+      passenger: {
+        userId: passengerData.userId,
+        passengerName: passengerData.passengerName,
+        passengerPhone: passengerData.passengerPhone,
+        passengerPhotoUrl: passengerData.passengerPhotoUrl,
+        pickupLocation: passengerData.pickupLocation,
+        pickupName: passengerData.pickupName,
+        destinationLocation: passengerData.destinationLocation,
+        destinationName: passengerData.destinationName,
+        passengerCount: passengerData.passengerCount || 1,
+        matchAcceptedAt: admin.firestore.FieldValue.serverTimestamp()
+      },
+      currentPassengers: admin.firestore.FieldValue.increment(passengerData.passengerCount || 1),
+      availableSeats: admin.firestore.FieldValue.increment(-(passengerData.passengerCount || 1)),
+      acceptedAt: admin.firestore.FieldValue.serverTimestamp(),
+      lastUpdated: admin.firestore.FieldValue.serverTimestamp()
+    };
+
+    await db.collection(ACTIVE_SEARCHES_COLLECTION).doc(driverId).update(updates);
+    console.log(`✅ Updated driver ${driverId} with passenger acceptance`);
+    
+    return true;
+  } catch (error) {
+    console.error('❌ Error updating driver with passenger:', error);
+    throw error;
+  }
+};
+
+// Update passenger document with driver acceptance
+const updatePassengerWithDriver = async (passengerId, driverData, matchId, rideId) => {
+  try {
+    const updates = {
+      matchId: matchId,
+      matchedWith: driverData.userId,
+      matchStatus: 'accepted',
+      rideId: rideId,
+      tripStatus: 'driver_accepted',
+      driver: {
+        userId: driverData.userId,
+        driverName: driverData.driverName,
+        driverPhone: driverData.driverPhone,
+        driverPhotoUrl: driverData.driverPhotoUrl,
+        driverRating: driverData.driverRating,
+        vehicleInfo: driverData.vehicleInfo,
+        vehicleType: driverData.vehicleType,
+        capacity: driverData.capacity,
+        currentPassengers: driverData.currentPassengers || 0,
+        availableSeats: driverData.availableSeats || driverData.capacity,
+        matchAcceptedAt: admin.firestore.FieldValue.serverTimestamp()
+      },
+      acceptedAt: admin.firestore.FieldValue.serverTimestamp(),
+      lastUpdated: admin.firestore.FieldValue.serverTimestamp()
+    };
+
+    await db.collection(ACTIVE_SEARCHES_COLLECTION).doc(passengerId).update(updates);
+    console.log(`✅ Updated passenger ${passengerId} with driver acceptance`);
+    
+    return true;
+  } catch (error) {
+    console.error('❌ Error updating passenger with driver:', error);
+    throw error;
+  }
+};
+
+// Reject a match proposal
+const rejectMatch = async (userId, matchId) => {
+  try {
+    const userDoc = await db.collection(ACTIVE_SEARCHES_COLLECTION).doc(userId).get();
+    if (!userDoc.exists) {
+      throw new Error('User not found');
+    }
+
+    const userData = userDoc.data();
+    
+    // If this is a driver rejecting, clear the match data
+    const updates = {
+      matchId: null,
+      matchedWith: null,
+      matchStatus: 'rejected',
+      lastUpdated: admin.firestore.FieldValue.serverTimestamp()
+    };
+
+    await db.collection(ACTIVE_SEARCHES_COLLECTION).doc(userId).update(updates);
+    
+    // If there's a matched user, also update their status
+    if (userData.matchedWith) {
+      await db.collection(ACTIVE_SEARCHES_COLLECTION).doc(userData.matchedWith).update({
+        matchStatus: 'rejected',
+        lastUpdated: admin.firestore.FieldValue.serverTimestamp()
+      });
+      
+      // Notify the other user via WebSocket
+      if (websocketServer) {
+        const rejectionMessage = userData.userType === 'driver' 
+          ? `Driver ${userData.driverName} rejected the match`
+          : `Passenger ${userData.passengerName} rejected the match`;
+        
+        websocketServer.sendMatchRejected(userData.matchedWith, {
+          matchId: matchId,
+          rejectedBy: userId,
+          message: rejectionMessage
+        });
+      }
+    }
+    
+    console.log(`✅ Match ${matchId} rejected by ${userId}`);
+    return true;
+  } catch (error) {
+    console.error('❌ Error rejecting match:', error);
+    throw error;
+  }
 };
 
 // ========== STOP SEARCHING AFTER MATCH FUNCTIONS ==========
@@ -524,6 +700,8 @@ const storeMatchInFirestore = async (matchData) => {
       vehicleInfo: matchData.vehicleInfo,
       passengerId: matchData.passengerId,
       passengerName: matchData.passengerName,
+      passengerPhone: matchData.passengerPhone,
+      passengerPhotoUrl: matchData.passengerPhotoUrl,
       similarityScore: matchData.similarityScore,
       pickupName: matchData.pickupName || 'Unknown',
       destinationName: matchData.destinationName || 'Unknown',
@@ -531,14 +709,12 @@ const storeMatchInFirestore = async (matchData) => {
       destinationLocation: matchData.destinationLocation,
       rideType: matchData.rideType || 'immediate',
       scheduledTime: matchData.scheduledTime,
-      overlayTriggered: true,
+      matchStatus: 'proposed',
       createdAt: admin.firestore.FieldValue.serverTimestamp()
     };
 
     await db.collection(ACTIVE_MATCHES_COLLECTION).doc(matchData.matchId).set(activeMatchData);
     console.log(`✅ Match stored in Firestore: ${matchData.driverName} ↔ ${matchData.passengerName}`);
-    console.log(`   - Driver: ${matchData.driverName} (Rating: ${matchData.driverRating})`);
-    console.log(`   - Vehicle: ${matchData.vehicleInfo?.model || 'Unknown'}`);
     
     return true;
     
@@ -550,43 +726,114 @@ const storeMatchInFirestore = async (matchData) => {
 
 const createActiveMatchForOverlay = async (matchData) => {
   try {
+    // First, store the match in Firestore
+    await storeMatchInFirestore(matchData);
+    
+    // Update driver's active_search document with match proposal
+    const driverUpdates = {
+      matchId: matchData.matchId,
+      matchedWith: matchData.passengerId,
+      matchStatus: 'proposed',
+      lastUpdated: admin.firestore.FieldValue.serverTimestamp()
+    };
+    
+    await db.collection(ACTIVE_SEARCHES_COLLECTION).doc(matchData.driverId).update(driverUpdates);
+    
+    // Update passenger's active_search document with match proposal
+    const passengerUpdates = {
+      matchId: matchData.matchId,
+      matchedWith: matchData.driverId,
+      matchStatus: 'proposed',
+      lastUpdated: admin.firestore.FieldValue.serverTimestamp()
+    };
+    
+    await db.collection(ACTIVE_SEARCHES_COLLECTION).doc(matchData.passengerId).update(passengerUpdates);
+    
+    console.log(`✅ Match proposal created: ${matchData.driverName} ↔ ${matchData.passengerName}`);
+    
+    // Send WebSocket notifications
     if (websocketServer) {
-      const result = websocketServer.sendMatchToUsers(matchData);
+      // Send to driver
+      websocketServer.sendMatchProposal(matchData.driverId, {
+        matchId: matchData.matchId,
+        passengerId: matchData.passengerId,
+        passengerName: matchData.passengerName,
+        passengerPhone: matchData.passengerPhone,
+        pickupName: matchData.pickupName,
+        destinationName: matchData.destinationName,
+        passengerCount: matchData.passengerCount || 1,
+        message: 'New passenger match found!',
+        timeout: MATCH_PROPOSAL_TIMEOUT
+      });
       
-      if (result.driverSent || result.passengerSent) {
-        console.log(`✅ Match sent to Flutter apps via WebSocket: ${matchData.driverName} ↔ ${matchData.passengerName}`);
-        console.log(`   - Driver: ${matchData.driverName} (Rating: ${matchData.driverRating})`);
-        console.log(`   - Vehicle: ${matchData.vehicleInfo?.model || 'Unknown'}`);
-        
-        trackUserMatch(matchData.driverId, matchData.matchId, matchData.passengerId);
-        trackUserMatch(matchData.passengerId, matchData.matchId, matchData.driverId);
-        
-        const driverSearch = activeSearches.get(matchData.driverId);
-        const passengerSearch = activeSearches.get(matchData.passengerId);
-        
-        if (driverSearch && shouldStopSearching(matchData.driverId, 'driver')) {
-          console.log(`🚗 Stopping driver search: ${matchData.driverName} found enough passengers`);
-          stopUserSearch(matchData.driverId);
-        }
-        
-        if (passengerSearch && shouldStopSearching(matchData.passengerId, 'passenger')) {
-          console.log(`👤 Stopping passenger search: ${matchData.passengerName} found a driver`);
-          stopUserSearch(matchData.passengerId);
-        }
-        
-        setTimeout(() => {
-          storeMatchInFirestore(matchData).catch(console.error);
-        }, 1000);
-        
-        return true;
-      } else {
-        console.log(`⚠️ Both users offline, storing in Firestore as backup`);
-        return await storeMatchInFirestore(matchData);
-      }
-    } else {
-      console.log('⚠️ WebSocket not available, using Firestore fallback');
-      return await storeMatchInFirestore(matchData);
+      // Send to passenger
+      websocketServer.sendMatchProposal(matchData.passengerId, {
+        matchId: matchData.matchId,
+        driverId: matchData.driverId,
+        driverName: matchData.driverName,
+        driverPhone: matchData.driverPhone,
+        driverPhotoUrl: matchData.driverPhotoUrl,
+        driverRating: matchData.driverRating,
+        vehicleInfo: matchData.vehicleInfo,
+        pickupName: matchData.pickupName,
+        destinationName: matchData.destinationName,
+        estimatedFare: matchData.estimatedFare,
+        message: 'Driver match found! Please wait for driver acceptance.',
+        timeout: MATCH_PROPOSAL_TIMEOUT
+      });
     }
+    
+    // Set timeout for match proposal
+    setTimeout(async () => {
+      const driverDoc = await db.collection(ACTIVE_SEARCHES_COLLECTION).doc(matchData.driverId).get();
+      const passengerDoc = await db.collection(ACTIVE_SEARCHES_COLLECTION).doc(matchData.passengerId).get();
+      
+      if (driverDoc.exists && passengerDoc.exists) {
+        const driverData = driverDoc.data();
+        const passengerData = passengerDoc.data();
+        
+        if (driverData.matchStatus === 'proposed' && driverData.matchId === matchData.matchId) {
+          // Match proposal expired
+          console.log(`⏰ Match proposal expired: ${matchData.matchId}`);
+          
+          // Reset match status
+          await db.collection(ACTIVE_SEARCHES_COLLECTION).doc(matchData.driverId).update({
+            matchId: null,
+            matchedWith: null,
+            matchStatus: 'expired',
+            lastUpdated: admin.firestore.FieldValue.serverTimestamp()
+          });
+          
+          await db.collection(ACTIVE_SEARCHES_COLLECTION).doc(matchData.passengerId).update({
+            matchId: null,
+            matchedWith: null,
+            matchStatus: 'expired',
+            lastUpdated: admin.firestore.FieldValue.serverTimestamp()
+          });
+          
+          // Update match document
+          await db.collection(ACTIVE_MATCHES_COLLECTION).doc(matchData.matchId).update({
+            matchStatus: 'expired',
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+          });
+          
+          // Notify users
+          if (websocketServer) {
+            websocketServer.sendMatchExpired(matchData.driverId, {
+              matchId: matchData.matchId,
+              message: 'Match proposal expired - passenger not accepted in time'
+            });
+            
+            websocketServer.sendMatchExpired(matchData.passengerId, {
+              matchId: matchData.matchId,
+              message: 'Match proposal expired'
+            });
+          }
+        }
+      }
+    }, MATCH_PROPOSAL_TIMEOUT);
+    
+    return true;
     
   } catch (error) {
     console.error('❌ Error creating overlay match:', error);
@@ -637,6 +884,18 @@ const storeSearchInMemory = async (searchData) => {
     capacity: searchData.capacity || 4,
     vehicleType: searchData.vehicleType || 'car',
     
+    // ✅ MATCH ACCEPTANCE FIELDS
+    matchId: null,
+    matchedWith: null,
+    matchStatus: null,
+    tripStatus: null,
+    rideId: null,
+    passenger: null,
+    driver: null,
+    currentPassengers: 0,
+    availableSeats: searchData.capacity || 4,
+    acceptedAt: null,
+    
     // ✅ ROUTE INFORMATION
     distance: searchData.distance,
     duration: searchData.duration,
@@ -667,9 +926,7 @@ const storeSearchInMemory = async (searchData) => {
       });
       
       console.log(`📅 DRIVER SCHEDULE saved to Firestore: ${driverName}`);
-      console.log(`   - Driver: ${driverName} (Rating: ${searchData.driverRating || 5.0})`);
-      console.log(`   - Vehicle: ${searchData.vehicleInfo?.model || 'Unknown'}`);
-      console.log(`   - Collection: ${DRIVER_SCHEDULES_COLLECTION}`);
+      console.log(`   - Available Seats: ${enhancedSearchData.availableSeats}/${enhancedSearchData.capacity}`);
       
       // If activating immediately, also store in memory for immediate matching
       if (activateImmediately) {
@@ -692,8 +949,7 @@ const storeSearchInMemory = async (searchData) => {
       console.log(`🎯 IMMEDIATE search stored: ${driverName || passengerName}`);
     }
     
-    console.log(`   - Driver: ${driverName} (Rating: ${searchData.driverRating || 5.0})`);
-    console.log(`   - Vehicle: ${searchData.vehicleInfo?.model || 'Unknown'}`);
+    console.log(`   - Available Seats: ${enhancedSearchData.availableSeats}/${enhancedSearchData.capacity}`);
     
     setImmediateSearchTimeout(userId, enhancedSearchData.searchId);
   }
@@ -710,12 +966,7 @@ const storeSearchInMemory = async (searchData) => {
         status: enhancedSearchData.status,
         rideType: 'scheduled',
         scheduledTime: searchData.scheduledTime,
-        pickupName: enhancedSearchData.pickupName,
-        destinationName: enhancedSearchData.destinationName,
-        driverName: enhancedSearchData.driverName,
-        driverRating: enhancedSearchData.driverRating,
-        vehicleInfo: enhancedSearchData.vehicleInfo,
-        activatedImmediately: activateImmediately,
+        availableSeats: enhancedSearchData.availableSeats,
         storage: rideType === 'scheduled' && actualUserType === 'driver' ? 'Firestore Collection' : 'Memory',
         matchingStatus: activateImmediately ? 'Starting immediately' : 'Will start 30 minutes before scheduled time',
         autoStop: 'Will stop when match found'
@@ -728,11 +979,8 @@ const storeSearchInMemory = async (searchData) => {
   const currentPassengers = Array.from(activeSearches.values()).filter(s => s.userType === 'passenger');
   
   console.log(`📊 Memory Stats - Active: ${activeSearches.size} (D:${currentDrivers.length} P:${currentPassengers.length})`);
-  console.log(`⏰ Active Timeouts: ${searchTimeouts.size}`);
-  console.log(`🎯 User Matches: ${userMatches.size} users with matches`);
+  console.log(`🎯 Available Seats: ${currentDrivers.reduce((sum, d) => sum + (d.availableSeats || 0), 0)} total`);
   console.log(`🧪 TEST MODE: ${TEST_MODE ? 'ACTIVE' : 'INACTIVE'}`);
-  console.log(`🎯 UNLIMITED CAPACITY: ${UNLIMITED_CAPACITY ? 'ACTIVE' : 'INACTIVE'}`);
-  console.log(`💾 DRIVER SCHEDULES: Stored in Firestore collection: ${DRIVER_SCHEDULES_COLLECTION}`);
   
   return enhancedSearchData;
 };
@@ -899,6 +1147,7 @@ app.post("/api/match/driver-schedule", async (req, res) => {
       vehicleInfo: vehicleInfo,
       scheduledTime: scheduledTime,
       status: activateImmediately ? 'active' : 'scheduled',
+      availableSeats: capacity || 4,
       activationTime: activateImmediately ? 'IMMEDIATELY' : '30 minutes before scheduled time',
       storage: `Firestore Collection: ${DRIVER_SCHEDULES_COLLECTION}`,
       immediateSearch: activateImmediately ? 'Created' : 'Not created',
@@ -909,7 +1158,8 @@ app.post("/api/match/driver-schedule", async (req, res) => {
         vehicleInfo: true,
         routeData: true,
         preferences: true,
-        scheduling: true
+        scheduling: true,
+        matchFields: true
       }
     });
     
@@ -965,6 +1215,10 @@ app.get("/api/match/driver-schedule/:driverId", async (req, res) => {
       distance: schedule.distance,
       duration: schedule.duration,
       fare: schedule.fare,
+      availableSeats: schedule.availableSeats,
+      currentPassengers: schedule.currentPassengers,
+      matchStatus: schedule.matchStatus,
+      rideId: schedule.rideId,
       storage: 'Firestore Collection',
       testMode: TEST_MODE,
       source: schedule.source
@@ -1000,6 +1254,8 @@ app.post("/api/match/search", async (req, res) => {
       isOnline,
       isSearching,
       passengerName,
+      passengerPhone,
+      passengerPhotoUrl,
       pickupLocation,
       destinationLocation,
       pickupName,
@@ -1065,6 +1321,8 @@ app.post("/api/match/search", async (req, res) => {
       
       // ✅ PASSENGER DATA (if passenger)
       passengerName: passengerName,
+      passengerPhone: passengerPhone,
+      passengerPhotoUrl: passengerPhotoUrl,
       
       // ✅ LOCATION DATA (both driver and passenger)
       pickupLocation: pickupLocation,
@@ -1076,6 +1334,18 @@ app.post("/api/match/search", async (req, res) => {
       // ✅ CAPACITY DATA
       capacity: capacity,
       passengerCount: passengerCount,
+      
+      // ✅ MATCH ACCEPTANCE FIELDS
+      matchId: null,
+      matchedWith: null,
+      matchStatus: null,
+      tripStatus: null,
+      rideId: null,
+      passenger: null,
+      driver: null,
+      currentPassengers: 0,
+      availableSeats: capacity || 4,
+      acceptedAt: null,
       
       // ✅ ROUTE DATA
       distance: distance,
@@ -1110,6 +1380,7 @@ app.post("/api/match/search", async (req, res) => {
       passengerName: passengerName,
       vehicleInfo: vehicleInfo,
       rideType: rideType,
+      availableSeats: searchData.availableSeats,
       timeout: '5 minutes (or until match found)',
       matches: [],
       matchCount: 0,
@@ -1122,7 +1393,8 @@ app.post("/api/match/search", async (req, res) => {
         passengerProfile: userType === 'passenger',
         vehicleInfo: userType === 'driver',
         routeData: true,
-        preferences: true
+        preferences: true,
+        matchFields: true
       },
       autoStop: UNLIMITED_CAPACITY ? 
         'Drivers: NEVER (unlimited mode) | Passengers: After first match' : 
@@ -1131,6 +1403,287 @@ app.post("/api/match/search", async (req, res) => {
     
   } catch (error) {
     console.error('❌ Error in symmetrical match search:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message 
+    });
+  }
+});
+
+// ========== DRIVER ACCEPT PASSENGER ENDPOINT ==========
+
+app.post("/api/match/accept", async (req, res) => {
+  try {
+    console.log('✅ === DRIVER ACCEPT PASSENGER ENDPOINT ===');
+    
+    const { 
+      driverId, 
+      userId,
+      matchId,
+      passengerId 
+    } = req.body;
+    
+    const actualDriverId = driverId || userId;
+    
+    if (!actualDriverId) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'driverId or userId is required' 
+      });
+    }
+    
+    if (!matchId) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'matchId is required' 
+      });
+    }
+    
+    if (!passengerId) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'passengerId is required' 
+      });
+    }
+    
+    console.log(`🤝 Driver ${actualDriverId} accepting match ${matchId} with passenger ${passengerId}`);
+    
+    // Get driver document
+    const driverDoc = await db.collection(ACTIVE_SEARCHES_COLLECTION).doc(actualDriverId).get();
+    if (!driverDoc.exists) {
+      return res.status(404).json({ 
+        success: false, 
+        error: 'Driver not found in active searches' 
+      });
+    }
+    
+    const driverData = driverDoc.data();
+    
+    // Verify match exists and is proposed
+    if (driverData.matchId !== matchId || driverData.matchStatus !== 'proposed') {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Invalid match or match already processed' 
+      });
+    }
+    
+    // Verify matched with correct passenger
+    if (driverData.matchedWith !== passengerId) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Passenger ID does not match proposed match' 
+      });
+    }
+    
+    // Get passenger document
+    const passengerDoc = await db.collection(ACTIVE_SEARCHES_COLLECTION).doc(passengerId).get();
+    if (!passengerDoc.exists) {
+      return res.status(404).json({ 
+        success: false, 
+        error: 'Passenger not found in active searches' 
+      });
+    }
+    
+    const passengerData = passengerDoc.data();
+    
+    // Check if driver has available seats
+    const passengerCount = passengerData.passengerCount || 1;
+    if (driverData.availableSeats < passengerCount) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Not enough available seats' 
+      });
+    }
+    
+    // Generate ride ID
+    const rideId = `ride_${uuidv4()}`;
+    
+    // Create active ride
+    const rideData = await createActiveRide(driverData, passengerData);
+    
+    // Update driver document
+    await updateDriverWithPassenger(actualDriverId, passengerData, matchId, rideId);
+    
+    // Update passenger document
+    await updatePassengerWithDriver(passengerId, driverData, matchId, rideId);
+    
+    // Update match document
+    await db.collection(ACTIVE_MATCHES_COLLECTION).doc(matchId).update({
+      matchStatus: 'accepted',
+      rideId: rideId,
+      acceptedAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+    
+    // Stop searching for passenger
+    stopUserSearch(passengerId);
+    
+    // Notify both users via WebSocket
+    if (websocketServer) {
+      // Notify driver
+      websocketServer.sendMatchAccepted(actualDriverId, {
+        matchId: matchId,
+        rideId: rideId,
+        passengerId: passengerId,
+        passengerName: passengerData.passengerName,
+        passengerPhone: passengerData.passengerPhone,
+        pickupName: passengerData.pickupName || driverData.pickupName,
+        destinationName: passengerData.destinationName || driverData.destinationName,
+        passengerCount: passengerCount,
+        message: 'Passenger accepted successfully!',
+        nextStep: 'Proceed to pickup location'
+      });
+      
+      // Notify passenger
+      websocketServer.sendMatchAccepted(passengerId, {
+        matchId: matchId,
+        rideId: rideId,
+        driverId: actualDriverId,
+        driverName: driverData.driverName,
+        driverPhone: driverData.driverPhone,
+        driverPhotoUrl: driverData.driverPhotoUrl,
+        driverRating: driverData.driverRating,
+        vehicleInfo: driverData.vehicleInfo,
+        pickupName: passengerData.pickupName || driverData.pickupName,
+        destinationName: passengerData.destinationName || driverData.destinationName,
+        estimatedFare: passengerData.estimatedFare || driverData.estimatedFare,
+        message: 'Driver has accepted your ride!',
+        nextStep: 'Wait for driver to arrive'
+      });
+    }
+    
+    res.json({
+      success: true,
+      message: 'Passenger accepted successfully',
+      matchId: matchId,
+      rideId: rideId,
+      driverId: actualDriverId,
+      driverName: driverData.driverName,
+      passengerId: passengerId,
+      passengerName: passengerData.passengerName,
+      passengerCount: passengerCount,
+      availableSeats: driverData.availableSeats - passengerCount,
+      currentPassengers: (driverData.currentPassengers || 0) + passengerCount,
+      rideData: rideData,
+      nextStep: 'Proceed to pickup location',
+      websocketNotification: true
+    });
+    
+  } catch (error) {
+    console.error('❌ Error accepting passenger:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message 
+    });
+  }
+});
+
+// ========== DRIVER REJECT PASSENGER ENDPOINT ==========
+
+app.post("/api/match/reject", async (req, res) => {
+  try {
+    console.log('❌ === DRIVER REJECT PASSENGER ENDPOINT ===');
+    
+    const { 
+      driverId, 
+      userId,
+      matchId,
+      passengerId 
+    } = req.body;
+    
+    const actualDriverId = driverId || userId;
+    
+    if (!actualDriverId) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'driverId or userId is required' 
+      });
+    }
+    
+    if (!matchId) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'matchId is required' 
+      });
+    }
+    
+    await rejectMatch(actualDriverId, matchId);
+    
+    res.json({
+      success: true,
+      message: 'Match rejected successfully',
+      matchId: matchId,
+      driverId: actualDriverId,
+      websocketNotification: true
+    });
+    
+  } catch (error) {
+    console.error('❌ Error rejecting match:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message 
+    });
+  }
+});
+
+// ========== GET MATCH STATUS ENDPOINT ==========
+
+app.get("/api/match/status/:userId", async (req, res) => {
+  try {
+    const { userId } = req.params;
+    
+    console.log(`🔍 Getting match status for user: ${userId}`);
+    
+    const userDoc = await db.collection(ACTIVE_SEARCHES_COLLECTION).doc(userId).get();
+    
+    if (!userDoc.exists) {
+      return res.json({
+        success: true,
+        exists: false,
+        message: 'User not found in active searches'
+      });
+    }
+    
+    const userData = userDoc.data();
+    
+    let matchData = null;
+    let rideData = null;
+    
+    if (userData.matchId) {
+      const matchDoc = await db.collection(ACTIVE_MATCHES_COLLECTION).doc(userData.matchId).get();
+      if (matchDoc.exists) {
+        matchData = matchDoc.data();
+      }
+    }
+    
+    if (userData.rideId) {
+      const rideDoc = await db.collection(ACTIVE_RIDES_COLLECTION).doc(userData.rideId).get();
+      if (rideDoc.exists) {
+        rideData = rideDoc.data();
+      }
+    }
+    
+    const status = {
+      success: true,
+      userId: userId,
+      userType: userData.userType,
+      matchStatus: userData.matchStatus,
+      matchId: userData.matchId,
+      matchedWith: userData.matchedWith,
+      tripStatus: userData.tripStatus,
+      rideId: userData.rideId,
+      currentPassengers: userData.currentPassengers || 0,
+      availableSeats: userData.availableSeats || (userData.capacity || 4),
+      acceptedAt: userData.acceptedAt,
+      matchData: matchData,
+      rideData: rideData,
+      embeddedData: userData.userType === 'driver' ? userData.passenger : userData.driver
+    };
+    
+    res.json(status);
+    
+  } catch (error) {
+    console.error('❌ Error getting match status:', error);
     res.status(500).json({ 
       success: false, 
       error: error.message 
@@ -1440,15 +1993,15 @@ const startOptimizedMatching = () => {
       console.log('🚗 Active Drivers:');
       allDrivers.forEach(driver => {
         const matchCount = userMatches.get(driver.userId || driver.driverId)?.size || 0;
+        const availableSeats = driver.availableSeats || driver.capacity || 4;
         console.log(`   - ${driver.driverName}`);
-        console.log(`     Vehicle: ${driver.vehicleInfo?.model || 'Unknown'}`);
-        console.log(`     Rating: ${driver.driverRating} | Matches: ${matchCount}/${UNLIMITED_CAPACITY ? '∞' : driver.capacity || 4}`);
+        console.log(`     Available Seats: ${availableSeats}/${driver.capacity || 4} | Match Status: ${driver.matchStatus || 'none'}`);
       });
 
       console.log('👤 Active Passengers:');
       allPassengers.forEach(passenger => {
         const matchCount = userMatches.get(passenger.userId)?.size || 0;
-        console.log(`   - ${passenger.passengerName} - Matches: ${matchCount}/1`);
+        console.log(`   - ${passenger.passengerName} - Match Status: ${passenger.matchStatus || 'none'}`);
       });
       
       let matchesCreated = 0;
@@ -1457,6 +2010,19 @@ const startOptimizedMatching = () => {
       // Driver → Passenger matching
       for (const driver of allDrivers) {
         const driverUserId = driver.userId || driver.driverId;
+        
+        // Skip if driver already has a match
+        if (driver.matchStatus === 'proposed' || driver.matchStatus === 'accepted') {
+          console.log(`⏭️ Skipping driver ${driver.driverName} - already has match (${driver.matchStatus})`);
+          continue;
+        }
+        
+        // Check available seats
+        const availableSeats = driver.availableSeats || driver.capacity || 4;
+        if (availableSeats <= 0) {
+          console.log(`⏭️ Skipping driver ${driver.driverName} - no available seats`);
+          continue;
+        }
         
         if (!UNLIMITED_CAPACITY) {
           const driverMatchCount = userMatches.get(driverUserId)?.size || 0;
@@ -1467,6 +2033,11 @@ const startOptimizedMatching = () => {
         }
         
         for (const passenger of allPassengers) {
+          // Skip if passenger already has a match
+          if (passenger.matchStatus === 'proposed' || passenger.matchStatus === 'accepted') {
+            continue;
+          }
+          
           const passengerMatchCount = userMatches.get(passenger.userId)?.size || 0;
           if (passengerMatchCount >= 1) {
             console.log(`⏭️ Skipping passenger ${passenger.passengerName} - already has match`);
@@ -1505,6 +2076,8 @@ const startOptimizedMatching = () => {
                 vehicleInfo: driver.vehicleInfo,
                 passengerId: passenger.userId,
                 passengerName: passenger.passengerName || 'Unknown Passenger',
+                passengerPhone: passenger.passengerPhone,
+                passengerPhotoUrl: passenger.passengerPhotoUrl,
                 similarityScore: match.similarityScore,
                 pickupName: passenger.pickupName || driver.pickupName || 'Unknown Location',
                 destinationName: passenger.destinationName || driver.destinationName || 'Unknown Destination',
@@ -1526,84 +2099,9 @@ const startOptimizedMatching = () => {
               if (matchCreated) {
                 matchesCreated++;
                 processedMatches.set(matchKey, Date.now());
-                console.log(`🎉 MATCH CREATED: ${driver.driverName} ↔ ${passenger.passengerName}`);
-                console.log(`   - Driver Rating: ${driver.driverRating}`);
-                console.log(`   - Vehicle: ${driver.vehicleInfo?.model || 'Unknown'}`);
-                console.log(`   - Similarity Score: ${match.similarityScore}`);
-              }
-            }
-          }
-        }
-      }
-      
-      // 🎯 BONUS: Also try Passenger → Driver (bidirectional initiation)
-      console.log(`🔄 Checking Passenger → Driver matching...`);
-      for (const passenger of allPassengers) {
-        const passengerMatchCount = userMatches.get(passenger.userId)?.size || 0;
-        if (passengerMatchCount >= 1) {
-          continue; // Skip if already matched
-        }
-        
-        for (const driver of allDrivers) {
-          const driverUserId = driver.userId || driver.driverId;
-          
-          if (!UNLIMITED_CAPACITY) {
-            const driverMatchCount = userMatches.get(driverUserId)?.size || 0;
-            if (driverMatchCount >= (driver.capacity || 4)) {
-              continue;
-            }
-          }
-
-          if (!driver.routePoints || driver.routePoints.length === 0) continue;
-          if (!passenger.routePoints || passenger.routePoints.length === 0) continue;
-
-          // Use routeMatching.js intelligent matching (same function)
-          const match = await routeMatching.performIntelligentMatching(
-            db, 
-            driver, 
-            passenger
-          );
-          
-          if (match) {
-            const matchKey = generateMatchKey(driverUserId, passenger.userId, Date.now());
-            
-            if (!processedMatches.has(matchKey)) {
-              const matchData = {
-                matchId: match.matchId,
-                driverId: driverUserId,
-                driverName: driver.driverName || 'Unknown Driver',
-                driverPhone: driver.driverPhone,
-                driverPhotoUrl: driver.driverPhotoUrl,
-                driverRating: driver.driverRating,
-                totalRides: driver.totalRides,
-                isVerified: driver.isVerified,
-                vehicleInfo: driver.vehicleInfo,
-                passengerId: passenger.userId,
-                passengerName: passenger.passengerName || 'Unknown Passenger',
-                similarityScore: match.similarityScore,
-                pickupName: passenger.pickupName || driver.pickupName || 'Unknown Location',
-                destinationName: passenger.destinationName || driver.destinationName || 'Unknown Destination',
-                pickupLocation: passenger.pickupLocation || driver.pickupLocation,
-                destinationLocation: passenger.destinationLocation || driver.destinationLocation,
-                passengerCount: passenger.passengerCount || 1,
-                capacity: driver.capacity || 4,
-                vehicleType: driver.vehicleType || 'car',
-                rideType: driver.rideType || passenger.rideType || 'immediate',
-                scheduledTime: driver.scheduledTime || passenger.scheduledTime,
-                timestamp: new Date().toISOString(),
-                matchType: 'bidirectional_firestore_match',
-                unlimitedMode: UNLIMITED_CAPACITY,
-                source: 'Firestore'
-              };
-
-              const matchCreated = await createActiveMatchForOverlay(matchData);
-              
-              if (matchCreated) {
-                matchesCreated++;
-                processedMatches.set(matchKey, Date.now());
-                console.log(`🎉 BIDIRECTIONAL MATCH CREATED: ${driver.driverName} ↔ ${passenger.passengerName}`);
-                console.log(`   - Initiated by: Passenger`);
-                console.log(`   - Similarity Score: ${match.similarityScore}`);
+                console.log(`🎉 MATCH PROPOSAL CREATED: ${driver.driverName} ↔ ${passenger.passengerName}`);
+                console.log(`   - Driver Available Seats: ${driver.availableSeats || driver.capacity || 4}`);
+                console.log(`   - Passenger Count: ${passenger.passengerCount || 1}`);
               }
             }
           }
@@ -1611,7 +2109,7 @@ const startOptimizedMatching = () => {
       }
 
       if (matchesCreated > 0) {
-        console.log(`📱 Created ${matchesCreated} matches (including bidirectional)`);
+        console.log(`📱 Created ${matchesCreated} match proposals`);
       }
       
       console.log(`📊 ===== SYMMETRICAL MATCHING CYCLE END =====\n`);
@@ -1730,7 +2228,9 @@ app.get("/api/match/search-status/:userId", async (req, res) => {
         rideType: memorySearch.rideType,
         status: memorySearch.status,
         searchId: memorySearch.searchId,
-        createdAt: memorySearch.createdAt
+        createdAt: memorySearch.createdAt,
+        availableSeats: memorySearch.availableSeats,
+        matchStatus: memorySearch.matchStatus
       } : { exists: false },
       driverSchedule: driverSchedule ? {
         exists: true,
@@ -1738,7 +2238,8 @@ app.get("/api/match/search-status/:userId", async (req, res) => {
         driverName: driverSchedule.driverName,
         scheduledTime: driverSchedule.scheduledTime.toISOString(),
         status: driverSchedule.status,
-        activateImmediately: driverSchedule.activateImmediately
+        activateImmediately: driverSchedule.activateImmediately,
+        availableSeats: driverSchedule.availableSeats
       } : { exists: false },
       matches: {
         count: userMatchCount,
@@ -1792,16 +2293,18 @@ app.get("/api/debug/status", async (req, res) => {
         status: data.status,
         scheduledTime: data.scheduledTime.toDate().toISOString(),
         vehicleInfo: data.vehicleInfo,
-        driverRating: data.driverRating
+        driverRating: data.driverRating,
+        availableSeats: data.availableSeats,
+        matchStatus: data.matchStatus
       });
     });
     
-    // Get routeMatching.js stats
-    const routeMatchingStats = {
-      activeDrivers: 'Check routeMatching.js',
-      activePassengers: 'Check routeMatching.js',
-      totalSearches: 'Check routeMatching.js'
-    };
+    // Get active matches count
+    const activeMatchesSnapshot = await db.collection(ACTIVE_MATCHES_COLLECTION)
+      .where('matchStatus', '==', 'proposed')
+      .get();
+    
+    const activeRidesSnapshot = await db.collection(ACTIVE_RIDES_COLLECTION).get();
     
     const debugInfo = {
       server: {
@@ -1821,19 +2324,21 @@ app.get("/api/debug/status", async (req, res) => {
       },
       firestore: {
         driverSchedules: driverSchedules.length,
+        activeMatches: activeMatchesSnapshot.size,
+        activeRides: activeRidesSnapshot.size,
         collection: DRIVER_SCHEDULES_COLLECTION
       },
-      routeMatching: routeMatchingStats,
       memoryDrivers: memoryDrivers.map(d => ({
         driverName: d.driverName,
         vehicleInfo: d.vehicleInfo,
         rating: d.driverRating,
         rideType: d.rideType,
-        matches: userMatches.get(d.userId)?.size || 0
+        availableSeats: d.availableSeats,
+        matchStatus: d.matchStatus
       })),
       memoryPassengers: memoryPassengers.map(p => ({
         passengerName: p.passengerName,
-        matches: userMatches.get(p.userId)?.size || 0
+        matchStatus: p.matchStatus
       })),
       driverSchedules: driverSchedules
     };
@@ -1856,18 +2361,19 @@ app.get("/api/health", (req, res) => {
     success: true,
     message: "ShareWay Symmetrical Matching Server is running",
     timestamp: new Date().toISOString(),
-    version: "3.0.0",
+    version: "4.0.0",
     features: {
       symmetricalMatching: true,
       driverSchedules: true,
       firestoreStorage: true,
       websocketNotifications: true,
+      matchAcceptance: true,
+      tripStatusUpdates: true,
       testMode: TEST_MODE,
       unlimitedCapacity: UNLIMITED_CAPACITY,
       routeMatchingIntegration: true,
       realTimeLocationUpdates: true,
-      symmetricalEndpoints: true,
-      tripStatusUpdates: true
+      symmetricalEndpoints: true
     },
     endpoints: {
       symmetrical: {
@@ -1876,6 +2382,11 @@ app.get("/api/health", (req, res) => {
           driver: "POST /api/driver/update-location",
           passenger: "POST /api/passenger/update-location"
         }
+      },
+      matchAcceptance: {
+        accept: "POST /api/match/accept (driver accepts passenger)",
+        reject: "POST /api/match/reject (reject match)",
+        status: "GET /api/match/status/:userId (get match status)"
       },
       driverSpecific: {
         schedule: "POST /api/match/driver-schedule",
@@ -1894,7 +2405,8 @@ app.get("/api/health", (req, res) => {
     stats: {
       activeSearches: activeSearches.size,
       driverSchedules: "Check /api/debug/status",
-      websocketConnections: websocketServer ? websocketServer.getConnectedCount() : 0
+      websocketConnections: websocketServer ? websocketServer.getConnectedCount() : 0,
+      matchProposals: "Check /api/debug/status"
     }
   });
 });
@@ -1913,12 +2425,12 @@ if (require.main === module) {
 💾 Storage: All searches → Firestore via routeMatching.js
 🔌 WebSocket: Real-time notifications
 
-🎯 SYMMETRICAL ARCHITECTURE:
+🎯 SYMMETRICAL ARCHITECTURE WITH MATCH ACCEPTANCE:
    - One search endpoint for BOTH drivers AND passengers
-   - Separate but symmetrical location update endpoints
-   - All data stored in Firestore via routeMatching.js
-   - Bidirectional matching (Driver→Passenger & Passenger→Driver)
-   - Real-time trip status updates for progression
+   - Driver can accept/reject passenger matches
+   - Real-time match proposals and acceptance flow
+   - Embedded passenger/driver data in documents
+   - Capacity tracking with available seats
 
 🧪 TEST MODE: ${TEST_MODE ? 'ACTIVE' : 'INACTIVE'}
 🎯 UNLIMITED CAPACITY: ${UNLIMITED_CAPACITY ? 'ACTIVE 🚀' : 'INACTIVE'}
@@ -1933,18 +2445,22 @@ if (require.main === module) {
 💾 FIRESTORE COLLECTIONS:
 - ${DRIVER_SCHEDULES_COLLECTION}: Driver schedules with complete data
 - ${ACTIVE_SEARCHES_COLLECTION}: All active searches (via routeMatching.js)
-- ${ACTIVE_MATCHES_COLLECTION}: Active matches with profiles
+- ${ACTIVE_MATCHES_COLLECTION}: Active match proposals
+- ${ACTIVE_RIDES_COLLECTION}: Active rides after acceptance
 - ${NOTIFICATIONS_COLLECTION}: User notifications
 
-✅ FULLY SYMMETRICAL SYSTEM 🎉
-   - Single search endpoint: /api/match/search
-   - Symmetrical location updates: /api/driver/update-location & /api/passenger/update-location
-   - Trip status updates: /api/trip/update-status
-   - Both use routeMatching.js functions
-   - Bidirectional matching algorithm
+✅ FULLY SYMMETRICAL SYSTEM WITH ACCEPTANCE FLOW 🎉
+   - Match proposals with 2-minute timeout
+   - Driver can accept/reject passengers
+   - Real-time WebSocket notifications
+   - Capacity tracking and seat management
+   - Embedded user data for quick access
 
 📱 SYMMETRICAL ENDPOINTS:
 - POST /api/match/search - Start search (works for both drivers & passengers)
+- POST /api/match/accept - Driver accepts passenger match
+- POST /api/match/reject - Reject match proposal
+- GET /api/match/status/:userId - Get match acceptance status
 - POST /api/driver/update-location - Update driver location (triggers matching)
 - POST /api/passenger/update-location - Update passenger location (triggers matching)
 - POST /api/trip/update-status - Update trip progression status

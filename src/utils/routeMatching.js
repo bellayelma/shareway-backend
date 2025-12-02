@@ -18,7 +18,8 @@ const COLLECTIONS = {
   DRIVER_SCHEDULES: 'driver_schedules',
   ACTIVE_MATCHES: 'active_matches',
   LOCATION_HISTORY: 'location_history',
-  NOTIFICATIONS: 'notifications'
+  NOTIFICATIONS: 'notifications',
+  RIDES: 'rides' // ✅ NEW: For ride tracking
 };
 
 // ========== HELPER FUNCTIONS ==========
@@ -221,6 +222,10 @@ const saveActiveSearch = async (db, searchData) => {
     // Create document ID based on userType + userId
     const docId = `active_search_${userType}_${userId}_${Date.now()}`;
     
+    // 🎯 NEW: Default capacity tracking
+    const capacity = userType === 'driver' ? (searchData.capacity || 4) : 1;
+    const currentPassengers = userType === 'driver' ? (searchData.currentPassengers || 0) : 0;
+    
     const searchDoc = {
       userId: userId,
       userType: userType,
@@ -237,8 +242,20 @@ const saveActiveSearch = async (db, searchData) => {
       
       // ✅ VEHICLE INFO (only for drivers)
       vehicleInfo: userType === 'driver' ? (searchData.vehicleInfo || {}) : null,
-      capacity: userType === 'driver' ? (searchData.capacity || 4) : 1,
+      capacity: capacity,
+      currentPassengers: currentPassengers, // 🎯 NEW: Track current passengers
+      availableSeats: capacity - currentPassengers, // 🎯 NEW: Calculate available seats
       vehicleType: userType === 'driver' ? (searchData.vehicleType || 'car') : null,
+      
+      // ✅ MATCH FIELDS (initialize as null) - 🎯 NEW
+      matchId: null,
+      matchedWith: null,
+      matchStatus: null,
+      tripStatus: null,
+      rideId: null,
+      passenger: null, // For drivers: will contain passenger object
+      driver: null,    // For passengers: will contain driver object
+      acceptedAt: null,
       
       // ✅ ROUTE INFO (same for both)
       pickupLocation: searchData.pickupLocation,
@@ -279,7 +296,7 @@ const saveActiveSearch = async (db, searchData) => {
     
     console.log(`💾 Saved ${userType} active search to Firestore: ${searchDoc.name}`);
     console.log(`   - ${userType}: ${searchDoc.name}`);
-    console.log(`   - Collection: ${COLLECTIONS.ACTIVE_SEARCHES}`);
+    console.log(`   - Available seats: ${searchDoc.availableSeats}`);
     console.log(`   - Document ID: ${docId}`);
     
     return searchDoc;
@@ -464,13 +481,385 @@ const getActiveSearchesByType = async (db, userType, limit = 50) => {
       const locationText = search.currentLocation ? 
         `📍 (${search.currentLocation.latitude.toFixed(4)}, ${search.currentLocation.longitude.toFixed(4)})` : 
         '📍 No location';
-      console.log(`   - ${search.name} ${locationText} - Rating: ${search.rating || 5.0}`);
+      console.log(`   - ${search.name} ${locationText} - Rating: ${search.rating || 5.0} - Seats: ${search.availableSeats || 0}`);
     });
     
     return activeSearches;
   } catch (error) {
     console.error(`❌ Error getting active ${userType} searches:`, error);
     return [];
+  }
+};
+
+// 🎯 NEW: Get active search document by userId
+const getActiveSearchDoc = async (db, userId, userType) => {
+  try {
+    const snapshot = await db.collection(COLLECTIONS.ACTIVE_SEARCHES)
+      .where('userId', '==', userId)
+      .where('userType', '==', userType)
+      .where('isSearching', '==', true)
+      .orderBy('createdAt', 'desc')
+      .limit(1)
+      .get();
+    
+    if (snapshot.empty) {
+      return null;
+    }
+    
+    return {
+      docRef: snapshot.docs[0].ref,
+      data: snapshot.docs[0].data(),
+      docId: snapshot.docs[0].id
+    };
+  } catch (error) {
+    console.error(`❌ Error getting active search doc:`, error);
+    return null;
+  }
+};
+
+// 🎯 NEW: Handle driver accepting passenger
+const acceptPassenger = async (db, driverId, passengerId, matchId, websocketServer = null) => {
+  try {
+    console.log(`🎯 Driver ${driverId} accepting passenger ${passengerId} for match ${matchId}`);
+    
+    const timestamp = admin.firestore.FieldValue.serverTimestamp();
+    const rideId = `ride_${driverId}_${passengerId}_${Date.now()}`;
+    
+    // 1. Get driver's active search document
+    const driverSearch = await getActiveSearchDoc(db, driverId, 'driver');
+    if (!driverSearch) {
+      throw new Error('Driver not actively searching');
+    }
+    
+    // 2. Get passenger's active search document
+    const passengerSearch = await getActiveSearchDoc(db, passengerId, 'passenger');
+    if (!passengerSearch) {
+      throw new Error('Passenger not actively searching');
+    }
+    
+    // 3. Check if driver has capacity
+    const driverData = driverSearch.data;
+    const passengerData = passengerSearch.data;
+    const passengerCount = passengerData.passengerCount || 1;
+    
+    if (driverData.availableSeats < passengerCount) {
+      throw new Error(`Driver only has ${driverData.availableSeats} available seats, but passenger needs ${passengerCount}`);
+    }
+    
+    // 4. Update DRIVER'S document
+    await driverSearch.docRef.update({
+      matchId: matchId,
+      matchedWith: passengerId,
+      matchStatus: 'accepted',
+      tripStatus: 'en_route_to_pickup',
+      rideId: rideId,
+      
+      // 🎯 Update passenger object with acceptance info
+      passenger: {
+        ...(driverData.passenger || {}),
+        userId: passengerId,
+        name: passengerData.name || 'Unknown Passenger',
+        phone: passengerData.phone || '',
+        photoUrl: passengerData.photoUrl || '',
+        rating: passengerData.rating || 5.0,
+        pickupLocation: passengerData.pickupLocation,
+        destinationLocation: passengerData.destinationLocation,
+        pickupName: passengerData.pickupName || 'Unknown Pickup',
+        destinationName: passengerData.destinationName || 'Unknown Destination',
+        passengerCount: passengerCount,
+        acceptedAt: timestamp,
+        status: 'accepted'
+      },
+      
+      // 🎯 Update capacity
+      currentPassengers: (driverData.currentPassengers || 0) + passengerCount,
+      availableSeats: Math.max(0, (driverData.capacity || 4) - ((driverData.currentPassengers || 0) + passengerCount)),
+      
+      acceptedAt: timestamp,
+      lastUpdated: timestamp
+    });
+    
+    // 5. Update PASSENGER'S document
+    await passengerSearch.docRef.update({
+      matchId: matchId,
+      matchedWith: driverId,
+      matchStatus: 'accepted',
+      tripStatus: 'waiting_for_pickup',
+      rideId: rideId,
+      
+      // 🎯 Update driver object with acceptance info
+      driver: {
+        ...(passengerData.driver || {}),
+        userId: driverId,
+        name: driverData.name || 'Unknown Driver',
+        phone: driverData.phone || '',
+        photoUrl: driverData.photoUrl || '',
+        rating: driverData.rating || 5.0,
+        vehicleInfo: driverData.vehicleInfo || {},
+        currentLocation: driverData.currentLocation,
+        estimatedArrivalTime: calculateETA(
+          calculateHaversineDistance(
+            driverData.currentLocation?.latitude || 0,
+            driverData.currentLocation?.longitude || 0,
+            passengerData.pickupLocation?.latitude || passengerData.pickupLocation?.lat || 0,
+            passengerData.pickupLocation?.longitude || passengerData.pickupLocation?.lng || 0
+          ),
+          30
+        ),
+        acceptedAt: timestamp,
+        status: 'accepted'
+      },
+      
+      acceptedAt: timestamp,
+      lastUpdated: timestamp
+    });
+    
+    // 6. Create ride document
+    const rideData = {
+      rideId: rideId,
+      driverId: driverId,
+      passengerId: passengerId,
+      matchId: matchId,
+      
+      // Driver info
+      driverName: driverData.name || 'Unknown Driver',
+      driverPhotoUrl: driverData.photoUrl || '',
+      driverPhone: driverData.phone || '',
+      driverRating: driverData.rating || 5.0,
+      vehicleInfo: driverData.vehicleInfo || {},
+      vehicleType: driverData.vehicleType || 'car',
+      
+      // Passenger info
+      passengerName: passengerData.name || 'Unknown Passenger',
+      passengerPhotoUrl: passengerData.photoUrl || '',
+      passengerPhone: passengerData.phone || '',
+      passengerRating: passengerData.rating || 5.0,
+      passengerCount: passengerCount,
+      
+      // Route info
+      pickupLocation: passengerData.pickupLocation,
+      destinationLocation: passengerData.destinationLocation,
+      pickupName: passengerData.pickupName || 'Unknown Pickup',
+      destinationName: passengerData.destinationName || 'Unknown Destination',
+      routePoints: driverData.routePoints || [],
+      
+      // Ride status
+      status: 'en_route_to_pickup',
+      tripPhase: 'pickup',
+      
+      // Timing
+      driverAcceptedAt: timestamp,
+      pickupEta: calculateETA(
+        calculateHaversineDistance(
+          driverData.currentLocation?.latitude || 0,
+          driverData.currentLocation?.longitude || 0,
+          passengerData.pickupLocation?.latitude || passengerData.pickupLocation?.lat || 0,
+          passengerData.pickupLocation?.longitude || passengerData.pickupLocation?.lng || 0
+        ),
+        30
+      ),
+      
+      // Pricing
+      baseFare: 5.00,
+      distanceFare: 0.50,
+      estimatedFare: 15.00, // Will be calculated properly
+      
+      // System
+      createdAt: timestamp,
+      updatedAt: timestamp
+    };
+    
+    await db.collection(COLLECTIONS.RIDES).doc(rideId).set(rideData);
+    
+    console.log(`✅ Ride ${rideId} created and accepted`);
+    console.log(`   - Driver: ${driverData.name}`);
+    console.log(`   - Passenger: ${passengerData.name}`);
+    console.log(`   - Status: en_route_to_pickup`);
+    console.log(`   - Available seats after: ${driverData.capacity - ((driverData.currentPassengers || 0) + passengerCount)}`);
+    
+    // 7. Send WebSocket notifications
+    if (websocketServer) {
+      const notificationData = {
+        type: 'ride_accepted',
+        rideId: rideId,
+        driverId: driverId,
+        passengerId: passengerId,
+        driverName: driverData.name,
+        passengerName: passengerData.name,
+        pickupName: passengerData.pickupName,
+        eta: rideData.pickupEta,
+        timestamp: new Date().toISOString()
+      };
+      
+      websocketServer.sendToUser(driverId, notificationData);
+      websocketServer.sendToUser(passengerId, notificationData);
+      console.log(`📤 WebSocket acceptance notifications sent`);
+    }
+    
+    return {
+      success: true,
+      rideId: rideId,
+      rideData: rideData
+    };
+    
+  } catch (error) {
+    console.error('❌ Error accepting passenger:', error);
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+};
+
+// 🎯 NEW: Update ride status (pickup, dropoff, etc.)
+const updateRideStatus = async (db, rideId, newStatus, additionalData = {}, websocketServer = null) => {
+  try {
+    console.log(`🔄 Updating ride ${rideId} status to: ${newStatus}`);
+    
+    const timestamp = admin.firestore.FieldValue.serverTimestamp();
+    const updates = {
+      status: newStatus,
+      updatedAt: timestamp,
+      ...additionalData
+    };
+    
+    // Add timestamp for specific status changes
+    if (newStatus === 'arrived_at_pickup') {
+      updates.driverArrivedAt = timestamp;
+    } else if (newStatus === 'on_trip') {
+      updates.pickupCompletedAt = timestamp;
+      updates.tripPhase = 'in_transit';
+    } else if (newStatus === 'completed') {
+      updates.dropoffCompletedAt = timestamp;
+      updates.tripPhase = 'completed';
+    } else if (newStatus === 'cancelled') {
+      updates.cancelledAt = timestamp;
+    }
+    
+    // Update ride document
+    const rideRef = db.collection(COLLECTIONS.RIDES).doc(rideId);
+    await rideRef.update(updates);
+    
+    // Get ride data
+    const rideDoc = await rideRef.get();
+    if (!rideDoc.exists) {
+      throw new Error('Ride not found');
+    }
+    
+    const rideData = rideDoc.data();
+    
+    // Also update active_searches documents if needed
+    if (newStatus === 'on_trip' || newStatus === 'completed' || newStatus === 'cancelled') {
+      // Update driver's active search
+      const driverSearch = await getActiveSearchDoc(db, rideData.driverId, 'driver');
+      if (driverSearch) {
+        const driverUpdates = {
+          tripStatus: newStatus,
+          lastUpdated: timestamp
+        };
+        
+        if (newStatus === 'on_trip') {
+          driverUpdates.tripPhase = 'in_transit';
+        } else if (newStatus === 'completed') {
+          // Reset match data when ride is completed
+          driverUpdates.matchId = null;
+          driverUpdates.matchedWith = null;
+          driverUpdates.matchStatus = null;
+          driverUpdates.tripStatus = null;
+          driverUpdates.passenger = null;
+          driverUpdates.rideId = null;
+          // Keep capacity as is (passengers are still in vehicle)
+        } else if (newStatus === 'cancelled') {
+          // Reset match data when ride is cancelled
+          driverUpdates.matchId = null;
+          driverUpdates.matchedWith = null;
+          driverUpdates.matchStatus = null;
+          driverUpdates.tripStatus = null;
+          driverUpdates.passenger = null;
+          driverUpdates.rideId = null;
+          // Reset capacity if passenger wasn't picked up
+          driverUpdates.currentPassengers = 0;
+          driverUpdates.availableSeats = driverSearch.data.capacity || 4;
+        }
+        
+        await driverSearch.docRef.update(driverUpdates);
+      }
+      
+      // Update passenger's active search
+      const passengerSearch = await getActiveSearchDoc(db, rideData.passengerId, 'passenger');
+      if (passengerSearch) {
+        const passengerUpdates = {
+          tripStatus: newStatus,
+          lastUpdated: timestamp
+        };
+        
+        if (newStatus === 'completed' || newStatus === 'cancelled') {
+          // Reset match data
+          passengerUpdates.matchId = null;
+          passengerUpdates.matchedWith = null;
+          passengerUpdates.matchStatus = null;
+          passengerUpdates.tripStatus = null;
+          passengerUpdates.driver = null;
+          passengerUpdates.rideId = null;
+          
+          if (newStatus === 'completed') {
+            // Mark passenger as completed searching
+            passengerUpdates.isSearching = false;
+            passengerUpdates.status = 'completed';
+          }
+        }
+        
+        await passengerSearch.docRef.update(passengerUpdates);
+      }
+    }
+    
+    // Send WebSocket notification
+    if (websocketServer) {
+      const notificationData = {
+        type: 'ride_status_update',
+        rideId: rideId,
+        status: newStatus,
+        ...additionalData,
+        timestamp: new Date().toISOString()
+      };
+      
+      websocketServer.sendToUser(rideData.driverId, notificationData);
+      websocketServer.sendToUser(rideData.passengerId, notificationData);
+      console.log(`📤 WebSocket status update sent`);
+    }
+    
+    console.log(`✅ Ride ${rideId} status updated to: ${newStatus}`);
+    return {
+      success: true,
+      rideId: rideId,
+      status: newStatus
+    };
+    
+  } catch (error) {
+    console.error('❌ Error updating ride status:', error);
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+};
+
+// 🎯 NEW: Get ride information
+const getRideInfo = async (db, rideId) => {
+  try {
+    const rideDoc = await db.collection(COLLECTIONS.RIDES).doc(rideId).get();
+    
+    if (!rideDoc.exists) {
+      return null;
+    }
+    
+    return {
+      id: rideDoc.id,
+      ...rideDoc.data()
+    };
+  } catch (error) {
+    console.error('❌ Error getting ride info:', error);
+    return null;
   }
 };
 
@@ -486,6 +875,12 @@ const processUserLocationUpdateAndMatch = async (db, userId, userType, locationD
     
     if (!updatedSearch) {
       console.log(`⚠️ No active search found for ${userType}: ${userId}`);
+      return null;
+    }
+    
+    // 🎯 NEW: Check if user is already on a ride
+    if (updatedSearch.tripStatus && updatedSearch.tripStatus !== 'match_proposed') {
+      console.log(`🚗 ${userType} is already on a ride (status: ${updatedSearch.tripStatus}), skipping matching`);
       return null;
     }
     
@@ -516,6 +911,19 @@ const processUserLocationUpdateAndMatch = async (db, userId, userType, locationD
     let highestScore = 0;
     
     for (const oppositeSearch of oppositeSearches) {
+      // 🎯 NEW: Skip if opposite user is already on a ride
+      if (oppositeSearch.tripStatus && oppositeSearch.tripStatus !== 'match_proposed') {
+        continue;
+      }
+      
+      // 🎯 NEW: Check capacity for drivers
+      if (userType === 'passenger' && oppositeSearch.userType === 'driver') {
+        if (oppositeSearch.availableSeats < (searchToUse.passengerCount || 1)) {
+          console.log(`🚫 Driver ${oppositeSearch.name} has insufficient seats: ${oppositeSearch.availableSeats} available, need ${searchToUse.passengerCount || 1}`);
+          continue;
+        }
+      }
+      
       if (!searchToUse.routePoints || searchToUse.routePoints.length === 0) continue;
       if (!oppositeSearch.routePoints || oppositeSearch.routePoints.length === 0) continue;
       
@@ -1216,7 +1624,7 @@ const performIntelligentMatching = async (db, driver, passenger, options = {}) =
       similarityThreshold = TEST_MODE ? 0.001 : 0.01,
       maxDetourDistance = TEST_MODE ? 100.0 : 50.0,
       maxProximityDistance = 2000, // meters
-      checkCapacity = false
+      checkCapacity = true // 🎯 NEW: Check capacity by default
     } = options;
 
     console.log(`🎯 Matching thresholds - Similarity: ${similarityThreshold}, Detour: ${maxDetourDistance}km, Proximity: ${maxProximityDistance}m`);
@@ -1234,9 +1642,10 @@ const performIntelligentMatching = async (db, driver, passenger, options = {}) =
 
     console.log(`📊 Route points - Driver: ${driver.routePoints.length}, Passenger: ${passenger.routePoints.length}`);
 
-    // Skip capacity check for testing
-    if (checkCapacity && !hasCapacity(driver, passenger.passengerCount || 1)) {
-      console.log(`❌ No capacity: ${driver.driverId}`);
+    // 🎯 UPDATED: Check capacity with proper field names
+    const passengerCount = passenger.passengerCount || 1;
+    if (checkCapacity && !hasCapacity(driver, passengerCount)) {
+      console.log(`❌ No capacity: Driver ${driver.driverId || driver.userId} has ${driver.availableSeats || 0} seats, need ${passengerCount}`);
       return null;
     }
 
@@ -1695,8 +2104,9 @@ const hasCapacity = (driverData, passengerCount) => {
     
     const capacity = driverData.passengerCapacity || driverData.capacity || 4;
     const currentPassengers = driverData.currentPassengers || 0;
-    const availableSeats = capacity - currentPassengers;
+    const availableSeats = driverData.availableSeats || (capacity - currentPassengers);
     
+    console.log(`🎯 Capacity check: Driver has ${availableSeats} seats available, passenger needs ${passengerCount}`);
     return availableSeats >= passengerCount;
     
   } catch (error) {
@@ -1720,6 +2130,7 @@ const updateDriverCapacity = async (db, driverId, passengerCount, operation = 'a
       const searchData = searchDoc.data();
       
       let currentPassengers = searchData.currentPassengers || 0;
+      const capacity = searchData.capacity || 4;
       
       if (operation === 'add') {
         currentPassengers += passengerCount;
@@ -1727,12 +2138,15 @@ const updateDriverCapacity = async (db, driverId, passengerCount, operation = 'a
         currentPassengers = Math.max(0, currentPassengers - passengerCount);
       }
       
+      const availableSeats = Math.max(0, capacity - currentPassengers);
+      
       await searchDoc.ref.update({ 
         currentPassengers,
+        availableSeats,
         updatedAt: admin.firestore.FieldValue.serverTimestamp()
       });
       
-      console.log(`✅ Updated driver ${driverId} capacity: ${currentPassengers}`);
+      console.log(`✅ Updated driver ${driverId} capacity: ${currentPassengers} passengers, ${availableSeats} seats available`);
     }
 
     // Also update drivers collection for backward compatibility
@@ -2287,6 +2701,12 @@ module.exports = {
   getActiveSearchesByType,             // ✅ For BOTH drivers AND passengers
   processUserLocationUpdateAndMatch,   // ✅ SYMMETRICAL location matching
   cleanupExpiredSearches,
+  getActiveSearchDoc,                  // 🎯 NEW: Get active search document
+  
+  // 🎯 NEW: Ride management functions
+  acceptPassenger,                     // 🎯 NEW: Handle driver accepting passenger
+  updateRideStatus,                    // 🎯 NEW: Update ride status
+  getRideInfo,                         // 🎯 NEW: Get ride information
   
   // 🎯 NEW: Dynamic route updating
   updateUserRouteWithCurrentLocation,  // 🎯 DYNAMIC ROUTE UPDATING (IMPROVED)
@@ -2332,6 +2752,9 @@ module.exports = {
   
   // Maintenance
   cleanupOldMatches,
+  
+  // Collections constant
+  COLLECTIONS,
   
   // Test mode flag
   TEST_MODE
