@@ -1,4 +1,4 @@
-// src/app.js - UPDATED SCRIPT WITH DRIVER_SCHEDULES COLLECTION
+// src/app.js - COMPLETE UPDATED SCRIPT WITH ROUTEMATCHING INTEGRATION
 const express = require("express");
 const admin = require("firebase-admin");
 const cors = require("cors");
@@ -978,7 +978,7 @@ app.get("/api/match/driver-schedule/:driverId", async (req, res) => {
   }
 });
 
-// ========== IMMEDIATE MATCH SEARCH ENDPOINT ==========
+// ========== IMMEDIATE MATCH SEARCH ENDPOINT (UPDATED WITH ROUTEMATCHING) ==========
 
 app.post("/api/match/search", async (req, res) => {
   try {
@@ -1079,6 +1079,12 @@ app.post("/api/match/search", async (req, res) => {
       searchId: searchId || `search_${actualUserId}_${Date.now()}`
     };
 
+    // 🎯 Save to Firestore via routeMatching.js
+    if (userType === 'driver' || driverId) {
+      await routeMatching.saveActiveDriverSearch(db, searchData);
+    }
+    
+    // Also store in memory for immediate access
     await storeSearchInMemory(searchData);
 
     res.json({
@@ -1093,7 +1099,7 @@ app.post("/api/match/search", async (req, res) => {
       timeout: '5 minutes (or until match found)',
       matches: [],
       matchCount: 0,
-      storage: 'Memory only',
+      storage: 'Memory + Firestore',
       websocketConnected: websocketServer ? websocketServer.isUserConnected(actualUserId) : false,
       testMode: TEST_MODE,
       unlimitedCapacity: UNLIMITED_CAPACITY,
@@ -1110,6 +1116,66 @@ app.post("/api/match/search", async (req, res) => {
     
   } catch (error) {
     console.error('❌ Error in immediate match search:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message 
+    });
+  }
+});
+
+// ========== DRIVER REAL-TIME LOCATION UPDATE ENDPOINT (UPDATED WITH ROUTEMATCHING) ==========
+
+app.post("/api/driver/update-location", async (req, res) => {
+  try {
+    const { 
+      userId, 
+      driverId, 
+      location, 
+      address 
+    } = req.body;
+    
+    const actualDriverId = driverId || userId;
+    
+    if (!actualDriverId) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'driverId or userId is required' 
+      });
+    }
+    
+    if (!location || !location.latitude || !location.longitude) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Valid location with latitude and longitude is required' 
+      });
+    }
+    
+    console.log(`📍 === REAL-TIME LOCATION UPDATE WITH MATCHING ===`);
+    console.log(`   Driver: ${actualDriverId}`);
+    console.log(`   Location: ${location.latitude}, ${location.longitude}`);
+    
+    // 🎯 Call routeMatching function to process location and trigger matching
+    const matchResult = await routeMatching.processLocationUpdateAndMatch(
+      db, 
+      actualDriverId, 
+      location,
+      websocketServer
+    );
+    
+    res.json({
+      success: true,
+      message: 'Location updated and matching triggered',
+      driverId: actualDriverId,
+      location: location,
+      address: address,
+      timestamp: new Date().toISOString(),
+      matchFound: matchResult !== null,
+      matchId: matchResult?.matchId || null,
+      similarityScore: matchResult?.similarityScore || null
+    });
+    
+  } catch (error) {
+    console.error('❌ Error updating driver location:', error);
     res.status(500).json({ 
       success: false, 
       error: error.message 
@@ -1135,17 +1201,14 @@ const startOptimizedMatching = () => {
       // 🎯 Check and activate driver schedules from Firestore
       await checkDriverSchedulesActivation();
 
-      // Get drivers from both memory and active driver schedules
-      const memoryDrivers = Array.from(activeSearches.values())
-        .filter(search => search.userType === 'driver' && search.status === 'searching');
+      // 🎯 Get drivers from routeMatching.js (which reads from Firestore)
+      const allDrivers = await routeMatching.getActiveDriverSearches(db);
       
-      const scheduledDrivers = await getActiveDriverSchedulesFromFirestore();
-      
-      const allDrivers = [...memoryDrivers, ...scheduledDrivers];
+      // Get passengers from memory (or also from Firestore)
       const passengers = Array.from(activeSearches.values())
         .filter(search => search.userType === 'passenger' && search.status === 'searching');
 
-      console.log(`📊 Matching: ${allDrivers.length} drivers (Memory: ${memoryDrivers.length}, Scheduled: ${scheduledDrivers.length}) vs ${passengers.length} passengers`);
+      console.log(`📊 Matching: ${allDrivers.length} drivers (from Firestore) vs ${passengers.length} passengers (from Memory)`);
       
       if (allDrivers.length === 0 || passengers.length === 0) {
         console.log(`💤 No matches possible`);
@@ -1171,7 +1234,7 @@ const startOptimizedMatching = () => {
       
       let matchesCreated = 0;
       
-      // Perform matching
+      // Perform matching using routeMatching.js functions
       for (const driver of allDrivers) {
         const driverUserId = driver.userId || driver.driverId;
         
@@ -1199,23 +1262,19 @@ const startOptimizedMatching = () => {
             if (!hasSeats) continue;
           }
 
-          const similarity = routeMatching.calculateRouteSimilarity(
-            passenger.routePoints,
-            driver.routePoints,
-            { 
-              similarityThreshold: 0.001, 
-              maxDistanceThreshold: 50.0
-            }
+          // Use routeMatching.js intelligent matching
+          const match = await routeMatching.performIntelligentMatching(
+            db, 
+            driver, 
+            passenger
           );
-
-          console.log(`🔍 ${driver.driverName} ↔ ${passenger.passengerName}: Score=${similarity.toFixed(3)}`);
-
-          if (similarity > 0.01) {
+          
+          if (match) {
             const matchKey = generateMatchKey(driverUserId, passenger.userId, Date.now());
             
             if (!processedMatches.has(matchKey)) {
               const matchData = {
-                matchId: `match_${driverUserId}_${passenger.userId}_${Date.now()}`,
+                matchId: match.matchId,
                 driverId: driverUserId,
                 driverName: driver.driverName || 'Unknown Driver',
                 driverPhone: driver.driverPhone,
@@ -1226,7 +1285,7 @@ const startOptimizedMatching = () => {
                 vehicleInfo: driver.vehicleInfo,
                 passengerId: passenger.userId,
                 passengerName: passenger.passengerName || 'Unknown Passenger',
-                similarityScore: similarity,
+                similarityScore: match.similarityScore,
                 pickupName: passenger.pickupName || driver.pickupName || 'Unknown Location',
                 destinationName: passenger.destinationName || driver.destinationName || 'Unknown Destination',
                 pickupLocation: passenger.pickupLocation || driver.pickupLocation,
@@ -1250,6 +1309,7 @@ const startOptimizedMatching = () => {
                 console.log(`🎉 MATCH CREATED: ${driver.driverName} ↔ ${passenger.passengerName}`);
                 console.log(`   - Driver Rating: ${driver.driverRating}`);
                 console.log(`   - Vehicle: ${driver.vehicleInfo?.model || 'Unknown'}`);
+                console.log(`   - Similarity Score: ${match.similarityScore}`);
                 
                 if (driver.documentId) {
                   console.log(`   📅 DRIVER SCHEDULE MATCH from Firestore!`);
@@ -1273,6 +1333,11 @@ const startOptimizedMatching = () => {
 
   // Check driver schedules every 10 seconds
   setInterval(checkDriverSchedulesActivation, SCHEDULED_SEARCH_CHECK_INTERVAL);
+  
+  // 🎯 Add cleanup for expired searches
+  setInterval(async () => {
+    await routeMatching.cleanupExpiredSearches(db);
+  }, 5 * 60 * 1000); // Every 5 minutes
 };
 
 // ========== STOP SEARCH ENDPOINT ==========
@@ -1311,6 +1376,14 @@ app.post("/api/match/stop-search", async (req, res) => {
         stoppedFromFirestore = true;
         console.log(`✅ Cancelled driver schedule in Firestore: ${schedule.scheduleId}`);
       }
+    }
+    
+    // Also stop from routeMatching.js Firestore searches
+    try {
+      await routeMatching.stopDriverSearch(db, actualUserId);
+      console.log(`✅ Stopped driver search in routeMatching.js`);
+    } catch (error) {
+      console.log(`ℹ️ No active search in routeMatching.js: ${error.message}`);
     }
     
     // Notify via WebSocket
@@ -1486,7 +1559,9 @@ app.get("/api/health", (req, res) => {
       firestoreStorage: true,
       websocketNotifications: true,
       testMode: TEST_MODE,
-      unlimitedCapacity: UNLIMITED_CAPACITY
+      unlimitedCapacity: UNLIMITED_CAPACITY,
+      routeMatchingIntegration: true,
+      realTimeLocationUpdates: true
     },
     stats: {
       activeSearches: activeSearches.size,
@@ -1512,7 +1587,7 @@ if (require.main === module) {
 🔌 WebSocket: CONNECTION TIMING FIXED
 
 🎯 STORAGE STRATEGY:
-   - Immediate searches: Memory only (fast)
+   - Immediate searches: Memory + Firestore (via routeMatching.js)
    - Driver schedules: Firestore collection (persistent)
    - Complete driver data: ALL profile, vehicle, and rating info
 
@@ -1531,15 +1606,16 @@ if (require.main === module) {
 - ${ACTIVE_MATCHES_COLLECTION}: Active matches with driver profiles
 - ${NOTIFICATIONS_COLLECTION}: User notifications
 
-✅ COMPLETE DRIVER DATA NOW SAVED TO FIRESTORE! 🎉
-   - Driver profiles (name, phone, photo, rating, rides, verification)
-   - Vehicle information (model, plate, color, type, year)
-   - Route data (distance, duration, fare, preferences)
-   - Scheduling information
+✅ INTEGRATED WITH ROUTEMATCHING.JS 🎉
+   - Real-time location updates trigger immediate matching
+   - Intelligent matching algorithms
+   - Firestore persistence for driver searches
+   - Automated cleanup of expired searches
 
 📱 ENDPOINTS:
 - POST /api/match/driver-schedule - Save complete driver schedule
-- POST /api/match/search - Start immediate search with full data
+- POST /api/match/search - Start immediate search with full data (uses routeMatching.js)
+- POST /api/driver/update-location - Update driver's real-time location (triggers matching)
 - GET /api/match/driver-schedule/:driverId - Get driver schedule
 - POST /api/match/stop-search - Stop search
 - GET /api/debug/status - Debug information
