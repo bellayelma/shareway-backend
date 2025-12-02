@@ -1,4 +1,4 @@
-// utils/routeMatching.js - COMPLETE SYMMETRICAL SCRIPT FOR BOTH DRIVERS AND PASSENGERS
+// utils/routeMatching.js - COMPLETE SCRIPT WITH DYNAMIC ROUTE UPDATING
 const admin = require('firebase-admin');
 
 // TEST MODE - Set to true for immediate testing
@@ -19,6 +19,159 @@ const COLLECTIONS = {
   ACTIVE_MATCHES: 'active_matches',
   LOCATION_HISTORY: 'location_history',
   NOTIFICATIONS: 'notifications'
+};
+
+// ========== DYNAMIC ROUTE UPDATING FUNCTIONS ==========
+
+// 🎯 NEW: Update user's route dynamically based on current location
+const updateUserRouteWithCurrentLocation = async (db, userId, userType, currentLocation) => {
+  try {
+    console.log(`🔄 Updating ${userType} route with current location: ${userId}`);
+    
+    // 1. Get the current search document
+    const activeSearchQuery = await db.collection(COLLECTIONS.ACTIVE_SEARCHES)
+      .where('userId', '==', userId)
+      .where('userType', '==', userType)
+      .where('isSearching', '==', true)
+      .orderBy('createdAt', 'desc')
+      .limit(1)
+      .get();
+    
+    if (activeSearchQuery.empty) {
+      console.log(`⚠️ No active search found for ${userType}: ${userId}`);
+      return null;
+    }
+    
+    const searchDoc = activeSearchQuery.docs[0];
+    const searchData = searchDoc.data();
+    
+    // 2. Extract the remaining route points (points ahead of current location)
+    const originalRoutePoints = searchData.routePoints || [];
+    
+    if (originalRoutePoints.length === 0) {
+      console.log(`⚠️ No route points found for ${userType}: ${userId}`);
+      return null;
+    }
+    
+    // 3. Find the closest point in the route to current location
+    let closestIndex = 0;
+    let minDistance = Infinity;
+    
+    for (let i = 0; i < originalRoutePoints.length; i++) {
+      const point = originalRoutePoints[i];
+      const distance = calculateHaversineDistance(
+        currentLocation.latitude,
+        currentLocation.longitude,
+        point.lat,
+        point.lng
+      );
+      
+      if (distance < minDistance) {
+        minDistance = distance;
+        closestIndex = i;
+      }
+    }
+    
+    console.log(`📍 Current position closest to route point ${closestIndex}`);
+    console.log(`   Distance to closest point: ${minDistance.toFixed(2)}km`);
+    
+    // 4. Create NEW route starting from current position
+    const updatedRoutePoints = originalRoutePoints.slice(closestIndex);
+    
+    // Add current location as the FIRST point if we're not exactly on a route point
+    if (minDistance > 0.001) { // More than 100 meters away from route point
+      updatedRoutePoints.unshift({
+        lat: currentLocation.latitude,
+        lng: currentLocation.longitude
+      });
+      console.log(`   Added current location as new route point 0`);
+    }
+    
+    // 5. Calculate updated distance and duration (simplified)
+    const originalDistance = searchData.distance || 0;
+    const originalDuration = searchData.duration || 0;
+    
+    // Reduce distance/duration proportionally based on progress
+    const progress = closestIndex / originalRoutePoints.length;
+    const updatedDistance = originalDistance * (1 - progress);
+    const updatedDuration = originalDuration * (1 - progress);
+    
+    // 6. Update Firestore document with DYNAMIC route
+    const timestamp = admin.firestore.FieldValue.serverTimestamp();
+    
+    await searchDoc.ref.update({
+      // 🎯 UPDATED ROUTE DATA
+      routePoints: updatedRoutePoints,
+      
+      // 🎯 UPDATED PICKUP LOCATION (current position becomes new pickup)
+      pickupLocation: {
+        lat: currentLocation.latitude,
+        lng: currentLocation.longitude
+      },
+      
+      // 🎯 UPDATED PICKUP NAME (adds "Current Location")
+      pickupName: `Current Location (${searchData.pickupName})`,
+      
+      // 🎯 UPDATED DISTANCE AND DURATION
+      distance: Math.round(updatedDistance * 10) / 10,
+      duration: Math.round(updatedDuration * 10) / 10,
+      
+      // 🎯 CURRENT LOCATION (already updated by updateUserLocation)
+      currentLocation: {
+        latitude: currentLocation.latitude,
+        longitude: currentLocation.longitude,
+        accuracy: currentLocation.accuracy || 0,
+        heading: currentLocation.heading || 0,
+        speed: currentLocation.speed || 0,
+        timestamp: timestamp
+      },
+      
+      // 🎯 ROUTE PROGRESS TRACKING
+      routeProgress: {
+        originalPoints: originalRoutePoints.length,
+        currentIndex: closestIndex,
+        remainingPoints: updatedRoutePoints.length,
+        progressPercentage: Math.round(progress * 100),
+        distanceTraveled: originalDistance * progress,
+        distanceRemaining: updatedDistance
+      },
+      
+      // 🎯 TIMESTAMPS
+      locationUpdatedAt: timestamp,
+      routeUpdatedAt: timestamp,
+      lastUpdated: timestamp
+    });
+    
+    console.log(`✅ DYNAMIC ROUTE UPDATED for ${userType}: ${userId}`);
+    console.log(`   - Original route points: ${originalRoutePoints.length}`);
+    console.log(`   - Updated route points: ${updatedRoutePoints.length}`);
+    console.log(`   - Progress: ${Math.round(progress * 100)}% complete`);
+    console.log(`   - Distance remaining: ${updatedDistance.toFixed(1)}km`);
+    console.log(`   - Pickup location updated to current position`);
+    
+    // Return updated search data
+    const updatedSearch = {
+      ...searchData,
+      routePoints: updatedRoutePoints,
+      pickupLocation: {
+        lat: currentLocation.latitude,
+        lng: currentLocation.longitude
+      },
+      distance: updatedDistance,
+      duration: updatedDuration,
+      currentLocation: {
+        latitude: currentLocation.latitude,
+        longitude: currentLocation.longitude,
+        accuracy: currentLocation.accuracy || 0
+      }
+    };
+    
+    return updatedSearch;
+    
+  } catch (error) {
+    console.error('❌ Error updating user route with current location:', error);
+    return null;
+  }
 };
 
 // ========== SYMMETRICAL FIRESTORE INTEGRATION FUNCTIONS ==========
@@ -62,6 +215,8 @@ const saveActiveSearch = async (db, searchData) => {
       pickupName: searchData.pickupName || 'Unknown Pickup',
       destinationName: searchData.destinationName || 'Unknown Destination',
       routePoints: searchData.routePoints || [],
+      distance: searchData.distance || 0,
+      duration: searchData.duration || 0,
       
       // ✅ REAL-TIME LOCATION TRACKING (same for both)
       currentLocation: searchData.currentLocation || null,
@@ -197,7 +352,7 @@ const getActiveSearchesByType = async (db, userType, limit = 50) => {
   }
 };
 
-// 🎯 SYMMETRICAL: Process location update for ANY user
+// 🎯 SYMMETRICAL: Process location update for ANY user WITH DYNAMIC ROUTE UPDATING
 const processUserLocationUpdateAndMatch = async (db, userId, userType, locationData, websocketServer = null) => {
   try {
     console.log(`🎯 === PROCESSING ${userType.toUpperCase()} LOCATION UPDATE ===`);
@@ -211,6 +366,17 @@ const processUserLocationUpdateAndMatch = async (db, userId, userType, locationD
       console.log(`⚠️ No active search found for ${userType}: ${userId}`);
       return null;
     }
+    
+    // 🎯 NEW: Update the route dynamically based on current location
+    const updatedSearchWithDynamicRoute = await updateUserRouteWithCurrentLocation(
+      db, 
+      userId, 
+      userType, 
+      locationData
+    );
+    
+    // Use the dynamically updated route for matching
+    const searchToUse = updatedSearchWithDynamicRoute || updatedSearch;
     
     // 2. Get OPPOSITE user type searches
     const oppositeUserType = userType === 'driver' ? 'passenger' : 'driver';
@@ -228,14 +394,14 @@ const processUserLocationUpdateAndMatch = async (db, userId, userType, locationD
     let highestScore = 0;
     
     for (const oppositeSearch of oppositeSearches) {
-      if (!updatedSearch.routePoints || updatedSearch.routePoints.length === 0) continue;
+      if (!searchToUse.routePoints || searchToUse.routePoints.length === 0) continue;
       if (!oppositeSearch.routePoints || oppositeSearch.routePoints.length === 0) continue;
       
       // 🎯 SYMMETRICAL MATCHING: Always compare both routes
       const similarity = calculateRouteSimilarity(
         oppositeSearch.routePoints,
-        updatedSearch.routePoints,
-        updatedSearch.currentLocation, // Using REAL-TIME location
+        searchToUse.routePoints, // Using DYNAMICALLY UPDATED route
+        searchToUse.currentLocation, // Using REAL-TIME location
         { 
           similarityThreshold: 0.001,
           maxDistanceThreshold: 50.0,
@@ -243,7 +409,7 @@ const processUserLocationUpdateAndMatch = async (db, userId, userType, locationD
         }
       );
       
-      console.log(`🔍 ${updatedSearch.name} ↔ ${oppositeSearch.name}: Score=${similarity.toFixed(3)}`);
+      console.log(`🔍 ${searchToUse.name} ↔ ${oppositeSearch.name}: Score=${similarity.toFixed(3)}`);
       
       if (similarity > highestScore && similarity > 0.01) {
         highestScore = similarity;
@@ -256,7 +422,7 @@ const processUserLocationUpdateAndMatch = async (db, userId, userType, locationD
     
     // 4. Create match if found
     if (bestMatch) {
-      console.log(`🎉 BEST MATCH FOUND: ${updatedSearch.name} ↔ ${bestMatch.user.name} (Score: ${highestScore.toFixed(3)})`);
+      console.log(`🎉 BEST MATCH FOUND: ${searchToUse.name} ↔ ${bestMatch.user.name} (Score: ${highestScore.toFixed(3)})`);
       
       // 🎯 SYMMETRICAL: Prepare match data based on user types
       const matchData = {
@@ -265,31 +431,32 @@ const processUserLocationUpdateAndMatch = async (db, userId, userType, locationD
         similarityScore: highestScore,
         
         // Always store as driver/passenger (even if passenger initiated)
-        driverData: userType === 'driver' ? updatedSearch : bestMatch.user,
-        passengerData: userType === 'passenger' ? updatedSearch : bestMatch.user,
+        driverData: userType === 'driver' ? searchToUse : bestMatch.user,
+        passengerData: userType === 'passenger' ? searchToUse : bestMatch.user,
         
         // Extract specific fields for clarity
         driverId: userType === 'driver' ? userId : bestMatch.user.userId,
-        driverName: userType === 'driver' ? updatedSearch.name : bestMatch.user.name,
+        driverName: userType === 'driver' ? searchToUse.name : bestMatch.user.name,
         passengerId: userType === 'passenger' ? userId : bestMatch.user.userId,
-        passengerName: userType === 'passenger' ? updatedSearch.name : bestMatch.user.name,
+        passengerName: userType === 'passenger' ? searchToUse.name : bestMatch.user.name,
         
-        // Route info
-        pickupName: bestMatch.user.pickupName || updatedSearch.pickupName || 'Unknown',
-        destinationName: bestMatch.user.destinationName || updatedSearch.destinationName || 'Unknown',
-        pickupLocation: bestMatch.user.pickupLocation || updatedSearch.pickupLocation,
-        destinationLocation: bestMatch.user.destinationLocation || updatedSearch.destinationLocation,
+        // Route info - using DYNAMICALLY UPDATED pickup location
+        pickupName: searchToUse.pickupName || bestMatch.user.pickupName || 'Unknown',
+        destinationName: bestMatch.user.destinationName || searchToUse.destinationName || 'Unknown',
+        pickupLocation: searchToUse.pickupLocation || bestMatch.user.pickupLocation,
+        destinationLocation: bestMatch.user.destinationLocation || searchToUse.destinationLocation,
         
         rideType: 'immediate',
         matchType: 'realtime_location_based',
         initiatedBy: userType,
-        locationTriggered: true
+        locationTriggered: true,
+        dynamicRoute: !!updatedSearchWithDynamicRoute // Flag for dynamic route update
       };
       
       // If driver has vehicle info, include it
       if (userType === 'driver') {
-        matchData.vehicleInfo = updatedSearch.vehicleInfo;
-        matchData.driverRating = updatedSearch.rating;
+        matchData.vehicleInfo = searchToUse.vehicleInfo;
+        matchData.driverRating = searchToUse.rating;
       } else if (bestMatch.user.userType === 'driver') {
         matchData.vehicleInfo = bestMatch.user.vehicleInfo;
         matchData.driverRating = bestMatch.user.rating;
@@ -306,7 +473,7 @@ const processUserLocationUpdateAndMatch = async (db, userId, userType, locationD
       
       return matchData;
     } else {
-      console.log(`🔍 No suitable match found for ${userType} ${updatedSearch.name}`);
+      console.log(`🔍 No suitable match found for ${userType} ${searchToUse.name}`);
     }
     
     return null;
@@ -1951,6 +2118,9 @@ module.exports = {
   getActiveSearchesByType,             // ✅ For BOTH drivers AND passengers
   processUserLocationUpdateAndMatch,   // ✅ SYMMETRICAL location matching
   cleanupExpiredSearches,
+  
+  // 🎯 NEW: Dynamic route updating
+  updateUserRouteWithCurrentLocation,  // 🎯 DYNAMIC ROUTE UPDATING
   
   // Backward compatibility aliases
   saveActiveDriverSearch: saveActiveSearch,
