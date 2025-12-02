@@ -21,9 +21,40 @@ const COLLECTIONS = {
   NOTIFICATIONS: 'notifications'
 };
 
+// ========== HELPER FUNCTIONS ==========
+
+// 🎯 NEW: Check if user has moved significantly
+const hasUserMovedSignificantly = (originalLocation, currentLocation, thresholdMeters = 1000) => {
+  try {
+    if (!originalLocation || !currentLocation) return false;
+    
+    // Extract coordinates
+    const origLat = originalLocation.latitude || originalLocation.lat;
+    const origLng = originalLocation.longitude || originalLocation.lng;
+    
+    if (!origLat || !origLng || !currentLocation.latitude || !currentLocation.longitude) {
+      return false;
+    }
+    
+    const distance = calculateHaversineDistance(
+      origLat,
+      origLng,
+      currentLocation.latitude,
+      currentLocation.longitude
+    ) * 1000; // Convert to meters
+    
+    console.log(`   Distance from original pickup: ${distance.toFixed(0)} meters`);
+    
+    return distance > thresholdMeters;
+  } catch (error) {
+    console.error('Error checking movement:', error);
+    return false;
+  }
+};
+
 // ========== DYNAMIC ROUTE UPDATING FUNCTIONS ==========
 
-// 🎯 NEW: Update user's route dynamically based on current location
+// 🎯 IMPROVED: Update user's route dynamically based on current location
 const updateUserRouteWithCurrentLocation = async (db, userId, userType, currentLocation) => {
   try {
     console.log(`🔄 Updating ${userType} route with current location: ${userId}`);
@@ -45,7 +76,7 @@ const updateUserRouteWithCurrentLocation = async (db, userId, userType, currentL
     const searchDoc = activeSearchQuery.docs[0];
     const searchData = searchDoc.data();
     
-    // 2. Extract the remaining route points (points ahead of current location)
+    // 2. Extract the remaining route points
     const originalRoutePoints = searchData.routePoints || [];
     
     if (originalRoutePoints.length === 0) {
@@ -53,7 +84,14 @@ const updateUserRouteWithCurrentLocation = async (db, userId, userType, currentL
       return null;
     }
     
-    // 3. Find the closest point in the route to current location
+    // 3. 🎯 CRITICAL: ALWAYS update pickup location to current position
+    const newPickupLocation = {
+      lat: currentLocation.latitude,
+      lng: currentLocation.longitude
+    };
+    
+    // 4. Create NEW route starting from current position
+    // Find closest point in original route
     let closestIndex = 0;
     let minDistance = Infinity;
     
@@ -75,48 +113,37 @@ const updateUserRouteWithCurrentLocation = async (db, userId, userType, currentL
     console.log(`📍 Current position closest to route point ${closestIndex}`);
     console.log(`   Distance to closest point: ${minDistance.toFixed(2)}km`);
     
-    // 4. Create NEW route starting from current position
+    // 5. Create updated route points
     const updatedRoutePoints = originalRoutePoints.slice(closestIndex);
     
-    // Add current location as the FIRST point if we're not exactly on a route point
-    if (minDistance > 0.001) { // More than 100 meters away from route point
-      updatedRoutePoints.unshift({
-        lat: currentLocation.latitude,
-        lng: currentLocation.longitude
-      });
-      console.log(`   Added current location as new route point 0`);
-    }
+    // Add current location as the FIRST point
+    updatedRoutePoints.unshift(newPickupLocation);
+    console.log(`   ✅ Added current location as new route point 0`);
+    console.log(`   ✅ Updated pickup location to current position`);
     
-    // 5. Calculate updated distance and duration (simplified)
+    // 6. Calculate updated distance and duration
     const originalDistance = searchData.distance || 0;
     const originalDuration = searchData.duration || 0;
-    
-    // Reduce distance/duration proportionally based on progress
     const progress = closestIndex / originalRoutePoints.length;
     const updatedDistance = originalDistance * (1 - progress);
     const updatedDuration = originalDuration * (1 - progress);
     
-    // 6. Update Firestore document with DYNAMIC route
+    // 7. Update Firestore document
     const timestamp = admin.firestore.FieldValue.serverTimestamp();
     
     await searchDoc.ref.update({
-      // 🎯 UPDATED ROUTE DATA
+      // 🎯 UPDATED PICKUP LOCATION (MOST IMPORTANT!)
+      pickupLocation: newPickupLocation,
+      pickupName: `Current Location (${searchData.pickupName || 'Moving'})`,
+      
+      // 🎯 UPDATED ROUTE
       routePoints: updatedRoutePoints,
-      
-      // 🎯 UPDATED PICKUP LOCATION (current position becomes new pickup)
-      pickupLocation: {
-        lat: currentLocation.latitude,
-        lng: currentLocation.longitude
-      },
-      
-      // 🎯 UPDATED PICKUP NAME (adds "Current Location")
-      pickupName: `Current Location (${searchData.pickupName})`,
       
       // 🎯 UPDATED DISTANCE AND DURATION
       distance: Math.round(updatedDistance * 10) / 10,
       duration: Math.round(updatedDuration * 10) / 10,
       
-      // 🎯 CURRENT LOCATION (already updated by updateUserLocation)
+      // 🎯 CURRENT LOCATION
       currentLocation: {
         latitude: currentLocation.latitude,
         longitude: currentLocation.longitude,
@@ -133,37 +160,41 @@ const updateUserRouteWithCurrentLocation = async (db, userId, userType, currentL
         remainingPoints: updatedRoutePoints.length,
         progressPercentage: Math.round(progress * 100),
         distanceTraveled: originalDistance * progress,
-        distanceRemaining: updatedDistance
+        distanceRemaining: updatedDistance,
+        pickupUpdated: true,
+        previousPickup: searchData.pickupLocation
       },
       
       // 🎯 TIMESTAMPS
       locationUpdatedAt: timestamp,
       routeUpdatedAt: timestamp,
-      lastUpdated: timestamp
+      lastUpdated: timestamp,
+      
+      // 🎯 NEW FLAG: Indicate this is a moving user
+      isMoving: true,
+      locationUpdateCount: (searchData.locationUpdateCount || 0) + 1
     });
     
     console.log(`✅ DYNAMIC ROUTE UPDATED for ${userType}: ${userId}`);
-    console.log(`   - Original route points: ${originalRoutePoints.length}`);
-    console.log(`   - Updated route points: ${updatedRoutePoints.length}`);
-    console.log(`   - Progress: ${Math.round(progress * 100)}% complete`);
+    console.log(`   - Original pickup: (${searchData.pickupLocation?.lat || 'N/A'}, ${searchData.pickupLocation?.lng || 'N/A'})`);
+    console.log(`   - New pickup: (${newPickupLocation.lat}, ${newPickupLocation.lng})`);
+    console.log(`   - Route points: ${originalRoutePoints.length} → ${updatedRoutePoints.length}`);
     console.log(`   - Distance remaining: ${updatedDistance.toFixed(1)}km`);
-    console.log(`   - Pickup location updated to current position`);
     
     // Return updated search data
     const updatedSearch = {
       ...searchData,
+      pickupLocation: newPickupLocation,
+      pickupName: `Current Location (${searchData.pickupName || 'Moving'})`,
       routePoints: updatedRoutePoints,
-      pickupLocation: {
-        lat: currentLocation.latitude,
-        lng: currentLocation.longitude
-      },
       distance: updatedDistance,
       duration: updatedDuration,
       currentLocation: {
         latitude: currentLocation.latitude,
         longitude: currentLocation.longitude,
         accuracy: currentLocation.accuracy || 0
-      }
+      },
+      isMoving: true
     };
     
     return updatedSearch;
@@ -259,14 +290,22 @@ const saveActiveSearch = async (db, searchData) => {
   }
 };
 
-// 🎯 SYMMETRICAL: Update ANY user's location (driver OR passenger)
+// 🎯 UPDATED: Update ANY user's location (driver OR passenger) with pickup location updates
 const updateUserLocation = async (db, userId, userType, locationData) => {
   try {
     console.log(`📍 Updating ${userType} location in Firestore: ${userId}`);
     
     const timestamp = admin.firestore.FieldValue.serverTimestamp();
+    const currentLocation = {
+      latitude: locationData.latitude,
+      longitude: locationData.longitude,
+      accuracy: locationData.accuracy || 0,
+      heading: locationData.heading || 0,
+      speed: locationData.speed || 0,
+      timestamp: timestamp
+    };
     
-    // 1. Update active_searches with current location
+    // 1. Find the active search document
     const activeSearchesQuery = await db.collection(COLLECTIONS.ACTIVE_SEARCHES)
       .where('userId', '==', userId)
       .where('userType', '==', userType)
@@ -275,35 +314,118 @@ const updateUserLocation = async (db, userId, userType, locationData) => {
       .limit(1)
       .get();
     
-    if (!activeSearchesQuery.empty) {
-      const searchDoc = activeSearchesQuery.docs[0];
-      await searchDoc.ref.update({
-        currentLocation: {
-          latitude: locationData.latitude,
-          longitude: locationData.longitude,
-          accuracy: locationData.accuracy || 0,
-          heading: locationData.heading || 0,
-          speed: locationData.speed || 0,
-          timestamp: timestamp
-        },
-        locationUpdatedAt: timestamp,
-        lastUpdated: timestamp
-      });
-      
-      console.log(`✅ Updated location in active search for ${userType}: ${userId}`);
-      
-      // Return updated search data for immediate matching
-      const updatedSearch = searchDoc.data();
-      updatedSearch.currentLocation = {
-        latitude: locationData.latitude,
-        longitude: locationData.longitude,
-        accuracy: locationData.accuracy || 0
-      };
-      
-      return updatedSearch;
+    if (activeSearchesQuery.empty) {
+      console.log(`⚠️ No active search found for ${userType}: ${userId}`);
+      return null;
     }
     
-    return null;
+    const searchDoc = activeSearchesQuery.docs[0];
+    const searchData = searchDoc.data();
+    
+    // 🎯 CRITICAL: Check if user has moved significantly from original pickup
+    const originalPickup = searchData.pickupLocation;
+    const hasMovedSignificantly = hasUserMovedSignificantly(
+      originalPickup,
+      currentLocation,
+      1000 // 1km threshold
+    );
+    
+    const updates = {
+      currentLocation: currentLocation,
+      locationUpdatedAt: timestamp,
+      lastUpdated: timestamp
+    };
+    
+    // 🎯 NEW: Update pickup location if user has moved significantly
+    if (hasMovedSignificantly) {
+      console.log(`🔄 User has moved significantly, updating pickup location`);
+      
+      updates.pickupLocation = {
+        lat: currentLocation.latitude,
+        lng: currentLocation.longitude
+      };
+      
+      updates.pickupName = `Current Location (${searchData.pickupName || 'Moving'})`;
+      
+      // Also update route progress
+      updates.routeProgress = {
+        originalPickup: originalPickup,
+        currentLocation: currentLocation,
+        distanceMoved: calculateHaversineDistance(
+          originalPickup.latitude || originalPickup.lat,
+          originalPickup.longitude || originalPickup.lng,
+          currentLocation.latitude,
+          currentLocation.longitude
+        ),
+        updatedAt: timestamp
+      };
+      
+      // Update route points to start from current location
+      const originalRoutePoints = searchData.routePoints || [];
+      if (originalRoutePoints.length > 0) {
+        // Find closest point in route
+        let closestIndex = 0;
+        let minDistance = Infinity;
+        
+        for (let i = 0; i < originalRoutePoints.length; i++) {
+          const point = originalRoutePoints[i];
+          const distance = calculateHaversineDistance(
+            currentLocation.latitude,
+            currentLocation.longitude,
+            point.lat,
+            point.lng
+          );
+          
+          if (distance < minDistance) {
+            minDistance = distance;
+            closestIndex = i;
+          }
+        }
+        
+        // Create new route starting from current position
+        const updatedRoutePoints = originalRoutePoints.slice(closestIndex);
+        updatedRoutePoints.unshift({
+          lat: currentLocation.latitude,
+          lng: currentLocation.longitude
+        });
+        
+        updates.routePoints = updatedRoutePoints;
+        
+        // Update distance and duration
+        const originalDistance = searchData.distance || 0;
+        const originalDuration = searchData.duration || 0;
+        const progress = closestIndex / originalRoutePoints.length;
+        const updatedDistance = originalDistance * (1 - progress);
+        const updatedDuration = originalDuration * (1 - progress);
+        
+        updates.distance = Math.round(updatedDistance * 10) / 10;
+        updates.duration = Math.round(updatedDuration * 10) / 10;
+      }
+    }
+    
+    // Apply updates to Firestore
+    await searchDoc.ref.update(updates);
+    
+    console.log(`✅ Updated location in active search for ${userType}: ${userId}`);
+    if (hasMovedSignificantly) {
+      console.log(`   ✅ Also updated pickup location to current position`);
+    }
+    
+    // Return updated search data
+    const updatedSearch = {
+      ...searchData,
+      currentLocation: currentLocation
+    };
+    
+    if (hasMovedSignificantly) {
+      updatedSearch.pickupLocation = { 
+        lat: currentLocation.latitude, 
+        lng: currentLocation.longitude 
+      };
+      updatedSearch.pickupName = `Current Location (${searchData.pickupName || 'Moving'})`;
+    }
+    
+    return updatedSearch;
     
   } catch (error) {
     console.error('❌ Error updating user location:', error);
@@ -359,7 +481,7 @@ const processUserLocationUpdateAndMatch = async (db, userId, userType, locationD
     console.log(`📍 ${userType}: ${userId}`);
     console.log(`📌 Location: ${locationData.latitude}, ${locationData.longitude}`);
     
-    // 1. Update user location in Firestore
+    // 1. Update user location in Firestore with pickup location updates
     const updatedSearch = await updateUserLocation(db, userId, userType, locationData);
     
     if (!updatedSearch) {
@@ -2114,13 +2236,16 @@ module.exports = {
   
   // 🎯 SYMMETRICAL Firestore functions (for BOTH drivers AND passengers)
   saveActiveSearch,                    // ✅ For BOTH drivers AND passengers
-  updateUserLocation,                  // ✅ For BOTH drivers AND passengers
+  updateUserLocation,                  // ✅ For BOTH drivers AND passengers (UPDATED)
   getActiveSearchesByType,             // ✅ For BOTH drivers AND passengers
   processUserLocationUpdateAndMatch,   // ✅ SYMMETRICAL location matching
   cleanupExpiredSearches,
   
   // 🎯 NEW: Dynamic route updating
-  updateUserRouteWithCurrentLocation,  // 🎯 DYNAMIC ROUTE UPDATING
+  updateUserRouteWithCurrentLocation,  // 🎯 DYNAMIC ROUTE UPDATING (IMPROVED)
+  
+  // 🎯 NEW: Helper functions
+  hasUserMovedSignificantly,           // 🎯 NEW: Movement detection
   
   // Backward compatibility aliases
   saveActiveDriverSearch: saveActiveSearch,
