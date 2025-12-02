@@ -1,4 +1,4 @@
-// src/app.js - COMPLETE UPDATED SCRIPT WITH ROUTEMATCHING INTEGRATION
+// src/app.js - COMPLETE SYMMETRICAL SCRIPT WITH ROUTEMATCHING INTEGRATION
 const express = require("express");
 const admin = require("firebase-admin");
 const cors = require("cors");
@@ -42,7 +42,7 @@ const TEST_MATCHING_INTERVAL = 5000;
 const UNLIMITED_CAPACITY = true;
 
 // ========== FIRESTORE COLLECTION NAMES ==========
-const DRIVER_SCHEDULES_COLLECTION = 'driver_schedules'; // UPDATED COLLECTION NAME
+const DRIVER_SCHEDULES_COLLECTION = 'driver_schedules';
 const ACTIVE_MATCHES_COLLECTION = 'active_matches';
 const NOTIFICATIONS_COLLECTION = 'notifications';
 
@@ -978,15 +978,15 @@ app.get("/api/match/driver-schedule/:driverId", async (req, res) => {
   }
 });
 
-// ========== IMMEDIATE MATCH SEARCH ENDPOINT (UPDATED WITH ROUTEMATCHING) ==========
+// ========== SYMMETRICAL MATCH SEARCH ENDPOINT (UPDATED WITH ROUTEMATCHING) ==========
 
 app.post("/api/match/search", async (req, res) => {
   try {
-    console.log('🎯 === IMMEDIATE MATCH SEARCH ENDPOINT CALLED ===');
+    console.log('🎯 === SYMMETRICAL MATCH SEARCH ENDPOINT ===');
     
     const { 
       userId, 
-      userType, 
+      userType, // 'driver' or 'passenger' - REQUIRED
       driverId,
       driverName,
       driverPhone,
@@ -1029,6 +1029,13 @@ app.post("/api/match/search", async (req, res) => {
       });
     }
 
+    if (!userType) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'userType is required (driver or passenger)' 
+      });
+    }
+
     // Clear any existing search
     if (activeSearches.has(actualUserId)) {
       console.log(`🔄 Clearing existing search for user: ${actualUserId}`);
@@ -1040,7 +1047,7 @@ app.post("/api/match/search", async (req, res) => {
       userId: actualUserId,
       userType: userType,
       
-      // ✅ COMPLETE DRIVER DATA
+      // ✅ COMPLETE DRIVER DATA (if driver)
       driverName: driverName,
       driverPhone: driverPhone,
       driverPhotoUrl: driverPhotoUrl,
@@ -1052,15 +1059,20 @@ app.post("/api/match/search", async (req, res) => {
       isOnline: isOnline,
       isSearching: isSearching,
       
-      // ✅ VEHICLE DATA
+      // ✅ VEHICLE DATA (if driver)
       vehicleInfo: vehicleInfo,
       
+      // ✅ PASSENGER DATA (if passenger)
       passengerName: passengerName,
+      
+      // ✅ LOCATION DATA (both driver and passenger)
       pickupLocation: pickupLocation,
       destinationLocation: destinationLocation,
       pickupName: pickupName,
       destinationName: destinationName,
       routePoints: routePoints,
+      
+      // ✅ CAPACITY DATA
       capacity: capacity,
       passengerCount: passengerCount,
       
@@ -1074,38 +1086,40 @@ app.post("/api/match/search", async (req, res) => {
       specialRequests: specialRequests,
       maxWalkDistance: maxWalkDistance,
       
+      // ✅ SEARCH METADATA
       rideType: rideType,
       scheduledTime: scheduledTime,
       searchId: searchId || `search_${actualUserId}_${Date.now()}`
     };
 
-    // 🎯 Save to Firestore via routeMatching.js
-    if (userType === 'driver' || driverId) {
-      await routeMatching.saveActiveDriverSearch(db, searchData);
-    }
+    // 🎯 SYMMETRICAL: Use routeMatching.js for BOTH drivers AND passengers
+    await routeMatching.saveActiveSearch(db, searchData);
     
     // Also store in memory for immediate access
     await storeSearchInMemory(searchData);
 
     res.json({
       success: true,
-      message: 'Immediate search started successfully',
+      message: `${userType} search started successfully`,
       searchId: searchData.searchId,
       userId: actualUserId,
+      userType: userType,
       driverName: driverName,
       driverRating: driverRating,
+      passengerName: passengerName,
       vehicleInfo: vehicleInfo,
       rideType: rideType,
       timeout: '5 minutes (or until match found)',
       matches: [],
       matchCount: 0,
-      storage: 'Memory + Firestore',
+      storage: 'Memory + Firestore (via routeMatching.js)',
       websocketConnected: websocketServer ? websocketServer.isUserConnected(actualUserId) : false,
       testMode: TEST_MODE,
       unlimitedCapacity: UNLIMITED_CAPACITY,
       dataIncluded: {
-        driverProfile: true,
-        vehicleInfo: true,
+        driverProfile: userType === 'driver',
+        passengerProfile: userType === 'passenger',
+        vehicleInfo: userType === 'driver',
         routeData: true,
         preferences: true
       },
@@ -1115,7 +1129,7 @@ app.post("/api/match/search", async (req, res) => {
     });
     
   } catch (error) {
-    console.error('❌ Error in immediate match search:', error);
+    console.error('❌ Error in symmetrical match search:', error);
     res.status(500).json({ 
       success: false, 
       error: error.message 
@@ -1123,7 +1137,7 @@ app.post("/api/match/search", async (req, res) => {
   }
 });
 
-// ========== DRIVER REAL-TIME LOCATION UPDATE ENDPOINT (UPDATED WITH ROUTEMATCHING) ==========
+// ========== DRIVER REAL-TIME LOCATION UPDATE ENDPOINT ==========
 
 app.post("/api/driver/update-location", async (req, res) => {
   try {
@@ -1183,36 +1197,94 @@ app.post("/api/driver/update-location", async (req, res) => {
   }
 });
 
+// ========== PASSENGER REAL-TIME LOCATION UPDATE ENDPOINT ==========
+
+app.post("/api/passenger/update-location", async (req, res) => {
+  try {
+    const { 
+      userId, 
+      passengerId, 
+      location, 
+      address 
+    } = req.body;
+    
+    const actualUserId = passengerId || userId;
+    
+    if (!actualUserId) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'passengerId or userId is required' 
+      });
+    }
+    
+    if (!location || !location.latitude || !location.longitude) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Valid location with latitude and longitude is required' 
+      });
+    }
+    
+    console.log(`📍 === PASSENGER REAL-TIME LOCATION UPDATE ===`);
+    console.log(`   Passenger: ${actualUserId}`);
+    console.log(`   Location: ${location.latitude}, ${location.longitude}`);
+    
+    // 🎯 SYMMETRICAL: Use the SAME function as drivers
+    const matchResult = await routeMatching.processUserLocationUpdateAndMatch(
+      db, 
+      actualUserId, 
+      'passenger', // Specify user type
+      location,
+      websocketServer
+    );
+    
+    res.json({
+      success: true,
+      message: 'Passenger location updated and matching triggered',
+      passengerId: actualUserId,
+      location: location,
+      address: address,
+      timestamp: new Date().toISOString(),
+      matchFound: matchResult !== null,
+      matchId: matchResult?.matchId || null,
+      similarityScore: matchResult?.similarityScore || null
+    });
+    
+  } catch (error) {
+    console.error('❌ Error updating passenger location:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message 
+    });
+  }
+});
+
 // ========== OPTIMIZED MATCHING SERVICE WITH FIRESTORE INTEGRATION ==========
 
 const startOptimizedMatching = () => {
   console.log('🔄 Starting Optimized Matching Service...');
   console.log(`🧪 TEST MODE: ${TEST_MODE ? 'ACTIVE' : 'INACTIVE'}`);
   console.log(`🎯 UNLIMITED CAPACITY: ${UNLIMITED_CAPACITY ? 'ACTIVE' : 'INACTIVE'}`);
-  console.log(`💾 STORAGE: Immediate searches → Memory | Driver schedules → Firestore collection: ${DRIVER_SCHEDULES_COLLECTION}`);
+  console.log(`💾 STORAGE: All searches → Firestore via routeMatching.js`);
   
   const matchingInterval = TEST_MODE ? TEST_MATCHING_INTERVAL : 30000;
   
   setInterval(async () => {
     try {
-      console.log(`\n📊 ===== MATCHING CYCLE START =====`);
+      console.log(`\n📊 ===== SYMMETRICAL MATCHING CYCLE START =====`);
       console.log(`🧪 TEST MODE: ${TEST_MODE ? 'ACTIVE' : 'INACTIVE'}`);
       
       // 🎯 Check and activate driver schedules from Firestore
       await checkDriverSchedulesActivation();
 
-      // 🎯 Get drivers from routeMatching.js (which reads from Firestore)
-      const allDrivers = await routeMatching.getActiveDriverSearches(db);
+      // 🎯 SYMMETRICAL: Get BOTH drivers AND passengers from Firestore
+      const allDrivers = await routeMatching.getActiveSearchesByType(db, 'driver');
+      const allPassengers = await routeMatching.getActiveSearchesByType(db, 'passenger');
       
-      // Get passengers from memory (or also from Firestore)
-      const passengers = Array.from(activeSearches.values())
-        .filter(search => search.userType === 'passenger' && search.status === 'searching');
-
-      console.log(`📊 Matching: ${allDrivers.length} drivers (from Firestore) vs ${passengers.length} passengers (from Memory)`);
+      console.log(`📊 Matching: ${allDrivers.length} drivers vs ${allPassengers.length} passengers (both from Firestore)`);
       
-      if (allDrivers.length === 0 || passengers.length === 0) {
+      if (allDrivers.length === 0 || allPassengers.length === 0) {
         console.log(`💤 No matches possible`);
-        console.log(`📊 ===== MATCHING CYCLE END =====\n`);
+        console.log(`📊 ===== SYMMETRICAL MATCHING CYCLE END =====\n`);
         return;
       }
 
@@ -1220,21 +1292,21 @@ const startOptimizedMatching = () => {
       console.log('🚗 Active Drivers:');
       allDrivers.forEach(driver => {
         const matchCount = userMatches.get(driver.userId || driver.driverId)?.size || 0;
-        const source = driver.documentId ? 'Firestore' : 'Memory';
-        console.log(`   - ${driver.driverName} (${source})`);
+        console.log(`   - ${driver.driverName}`);
         console.log(`     Vehicle: ${driver.vehicleInfo?.model || 'Unknown'}`);
         console.log(`     Rating: ${driver.driverRating} | Matches: ${matchCount}/${UNLIMITED_CAPACITY ? '∞' : driver.capacity || 4}`);
       });
 
       console.log('👤 Active Passengers:');
-      passengers.forEach(passenger => {
+      allPassengers.forEach(passenger => {
         const matchCount = userMatches.get(passenger.userId)?.size || 0;
         console.log(`   - ${passenger.passengerName} - Matches: ${matchCount}/1`);
       });
       
       let matchesCreated = 0;
       
-      // Perform matching using routeMatching.js functions
+      // 🎯 SYMMETRICAL: Perform matching in BOTH directions
+      // Driver → Passenger matching
       for (const driver of allDrivers) {
         const driverUserId = driver.userId || driver.driverId;
         
@@ -1246,7 +1318,7 @@ const startOptimizedMatching = () => {
           }
         }
         
-        for (const passenger of passengers) {
+        for (const passenger of allPassengers) {
           const passengerMatchCount = userMatches.get(passenger.userId)?.size || 0;
           if (passengerMatchCount >= 1) {
             console.log(`⏭️ Skipping passenger ${passenger.passengerName} - already has match`);
@@ -1296,9 +1368,9 @@ const startOptimizedMatching = () => {
                 rideType: driver.rideType || passenger.rideType || 'immediate',
                 scheduledTime: driver.scheduledTime || passenger.scheduledTime,
                 timestamp: new Date().toISOString(),
-                matchType: driver.documentId ? 'driver_schedule_match' : 'immediate_match',
+                matchType: 'firestore_match',
                 unlimitedMode: UNLIMITED_CAPACITY,
-                source: driver.documentId ? 'Firestore' : 'Memory'
+                source: 'Firestore'
               };
 
               const matchCreated = await createActiveMatchForOverlay(matchData);
@@ -1310,10 +1382,80 @@ const startOptimizedMatching = () => {
                 console.log(`   - Driver Rating: ${driver.driverRating}`);
                 console.log(`   - Vehicle: ${driver.vehicleInfo?.model || 'Unknown'}`);
                 console.log(`   - Similarity Score: ${match.similarityScore}`);
-                
-                if (driver.documentId) {
-                  console.log(`   📅 DRIVER SCHEDULE MATCH from Firestore!`);
-                }
+              }
+            }
+          }
+        }
+      }
+      
+      // 🎯 BONUS: Also try Passenger → Driver (bidirectional initiation)
+      console.log(`🔄 Checking Passenger → Driver matching...`);
+      for (const passenger of allPassengers) {
+        const passengerMatchCount = userMatches.get(passenger.userId)?.size || 0;
+        if (passengerMatchCount >= 1) {
+          continue; // Skip if already matched
+        }
+        
+        for (const driver of allDrivers) {
+          const driverUserId = driver.userId || driver.driverId;
+          
+          if (!UNLIMITED_CAPACITY) {
+            const driverMatchCount = userMatches.get(driverUserId)?.size || 0;
+            if (driverMatchCount >= (driver.capacity || 4)) {
+              continue;
+            }
+          }
+
+          if (!driver.routePoints || driver.routePoints.length === 0) continue;
+          if (!passenger.routePoints || passenger.routePoints.length === 0) continue;
+
+          // Use routeMatching.js intelligent matching (same function)
+          const match = await routeMatching.performIntelligentMatching(
+            db, 
+            driver, 
+            passenger
+          );
+          
+          if (match) {
+            const matchKey = generateMatchKey(driverUserId, passenger.userId, Date.now());
+            
+            if (!processedMatches.has(matchKey)) {
+              const matchData = {
+                matchId: match.matchId,
+                driverId: driverUserId,
+                driverName: driver.driverName || 'Unknown Driver',
+                driverPhone: driver.driverPhone,
+                driverPhotoUrl: driver.driverPhotoUrl,
+                driverRating: driver.driverRating,
+                totalRides: driver.totalRides,
+                isVerified: driver.isVerified,
+                vehicleInfo: driver.vehicleInfo,
+                passengerId: passenger.userId,
+                passengerName: passenger.passengerName || 'Unknown Passenger',
+                similarityScore: match.similarityScore,
+                pickupName: passenger.pickupName || driver.pickupName || 'Unknown Location',
+                destinationName: passenger.destinationName || driver.destinationName || 'Unknown Destination',
+                pickupLocation: passenger.pickupLocation || driver.pickupLocation,
+                destinationLocation: passenger.destinationLocation || driver.destinationLocation,
+                passengerCount: passenger.passengerCount || 1,
+                capacity: driver.capacity || 4,
+                vehicleType: driver.vehicleType || 'car',
+                rideType: driver.rideType || passenger.rideType || 'immediate',
+                scheduledTime: driver.scheduledTime || passenger.scheduledTime,
+                timestamp: new Date().toISOString(),
+                matchType: 'bidirectional_firestore_match',
+                unlimitedMode: UNLIMITED_CAPACITY,
+                source: 'Firestore'
+              };
+
+              const matchCreated = await createActiveMatchForOverlay(matchData);
+              
+              if (matchCreated) {
+                matchesCreated++;
+                processedMatches.set(matchKey, Date.now());
+                console.log(`🎉 BIDIRECTIONAL MATCH CREATED: ${driver.driverName} ↔ ${passenger.passengerName}`);
+                console.log(`   - Initiated by: Passenger`);
+                console.log(`   - Similarity Score: ${match.similarityScore}`);
               }
             }
           }
@@ -1321,10 +1463,10 @@ const startOptimizedMatching = () => {
       }
 
       if (matchesCreated > 0) {
-        console.log(`📱 Created ${matchesCreated} matches`);
+        console.log(`📱 Created ${matchesCreated} matches (including bidirectional)`);
       }
       
-      console.log(`📊 ===== MATCHING CYCLE END =====\n`);
+      console.log(`📊 ===== SYMMETRICAL MATCHING CYCLE END =====\n`);
       
     } catch (error) {
       console.error('❌ Matching error:', error);
@@ -1344,13 +1486,13 @@ const startOptimizedMatching = () => {
 
 app.post("/api/match/stop-search", async (req, res) => {
   try {
-    const { userId, userType, rideType = 'immediate', driverId } = req.body;
-    const actualUserId = userId || driverId;
+    const { userId, userType, rideType = 'immediate', driverId, passengerId } = req.body;
+    const actualUserId = userId || driverId || passengerId;
     
     if (!actualUserId) {
       return res.status(400).json({ 
         success: false, 
-        error: 'userId or driverId is required' 
+        error: 'userId, driverId, or passengerId is required' 
       });
     }
 
@@ -1378,10 +1520,10 @@ app.post("/api/match/stop-search", async (req, res) => {
       }
     }
     
-    // Also stop from routeMatching.js Firestore searches
+    // Stop from routeMatching.js Firestore searches
     try {
-      await routeMatching.stopDriverSearch(db, actualUserId);
-      console.log(`✅ Stopped driver search in routeMatching.js`);
+      await routeMatching.stopSearch(db, actualUserId);
+      console.log(`✅ Stopped search in routeMatching.js`);
     } catch (error) {
       console.log(`ℹ️ No active search in routeMatching.js: ${error.message}`);
     }
@@ -1436,6 +1578,7 @@ app.get("/api/match/search-status/:userId", async (req, res) => {
         exists: true,
         driverName: memorySearch.driverName,
         passengerName: memorySearch.passengerName,
+        userType: memorySearch.userType,
         rideType: memorySearch.rideType,
         status: memorySearch.status,
         searchId: memorySearch.searchId,
@@ -1505,12 +1648,20 @@ app.get("/api/debug/status", async (req, res) => {
       });
     });
     
+    // Get routeMatching.js stats
+    const routeMatchingStats = {
+      activeDrivers: 'Check routeMatching.js',
+      activePassengers: 'Check routeMatching.js',
+      totalSearches: 'Check routeMatching.js'
+    };
+    
     const debugInfo = {
       server: {
         timestamp: new Date().toISOString(),
         testMode: TEST_MODE,
         unlimitedCapacity: UNLIMITED_CAPACITY,
-        websocketConnections: websocketServer ? websocketServer.getConnectedCount() : 0
+        websocketConnections: websocketServer ? websocketServer.getConnectedCount() : 0,
+        symmetricalMatching: true
       },
       memory: {
         totalSearches: activeSearches.size,
@@ -1524,12 +1675,17 @@ app.get("/api/debug/status", async (req, res) => {
         driverSchedules: driverSchedules.length,
         collection: DRIVER_SCHEDULES_COLLECTION
       },
+      routeMatching: routeMatchingStats,
       memoryDrivers: memoryDrivers.map(d => ({
         driverName: d.driverName,
         vehicleInfo: d.vehicleInfo,
         rating: d.driverRating,
         rideType: d.rideType,
         matches: userMatches.get(d.userId)?.size || 0
+      })),
+      memoryPassengers: memoryPassengers.map(p => ({
+        passengerName: p.passengerName,
+        matches: userMatches.get(p.userId)?.size || 0
       })),
       driverSchedules: driverSchedules
     };
@@ -1550,18 +1706,38 @@ app.get("/api/debug/status", async (req, res) => {
 app.get("/api/health", (req, res) => {
   res.json({
     success: true,
-    message: "ShareWay Matching Server is running",
+    message: "ShareWay Symmetrical Matching Server is running",
     timestamp: new Date().toISOString(),
-    version: "2.0.0",
+    version: "3.0.0",
     features: {
-      immediateMatching: true,
+      symmetricalMatching: true,
       driverSchedules: true,
       firestoreStorage: true,
       websocketNotifications: true,
       testMode: TEST_MODE,
       unlimitedCapacity: UNLIMITED_CAPACITY,
       routeMatchingIntegration: true,
-      realTimeLocationUpdates: true
+      realTimeLocationUpdates: true,
+      symmetricalEndpoints: true
+    },
+    endpoints: {
+      symmetrical: {
+        search: "POST /api/match/search (works for both drivers & passengers)",
+        updateLocation: {
+          driver: "POST /api/driver/update-location",
+          passenger: "POST /api/passenger/update-location"
+        }
+      },
+      driverSpecific: {
+        schedule: "POST /api/match/driver-schedule",
+        getSchedule: "GET /api/match/driver-schedule/:driverId"
+      },
+      utility: {
+        stopSearch: "POST /api/match/stop-search",
+        searchStatus: "GET /api/match/search-status/:userId",
+        debug: "GET /api/debug/status",
+        health: "GET /api/health"
+      }
     },
     stats: {
       activeSearches: activeSearches.size,
@@ -1578,48 +1754,50 @@ const PORT = process.env.PORT || 3000;
 if (require.main === module) {
   const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`
-🚀 ShareWay COMPLETE DRIVER DATA Server Started!
+🚀 ShareWay SYMMETRICAL MATCHING Server Started!
 📍 Port: ${PORT}
 🌍 Environment: ${process.env.NODE_ENV || 'development'}
-🔥 Firebase: Hybrid Storage Mode
-💾 Memory Cache: Immediate searches only
-💾 Firestore: Driver schedules with COMPLETE driver data
-🔌 WebSocket: CONNECTION TIMING FIXED
+🔥 Firebase: Complete Firestore Integration
+💾 Storage: All searches → Firestore via routeMatching.js
+🔌 WebSocket: Real-time notifications
 
-🎯 STORAGE STRATEGY:
-   - Immediate searches: Memory + Firestore (via routeMatching.js)
-   - Driver schedules: Firestore collection (persistent)
-   - Complete driver data: ALL profile, vehicle, and rating info
+🎯 SYMMETRICAL ARCHITECTURE:
+   - One search endpoint for BOTH drivers AND passengers
+   - Separate but symmetrical location update endpoints
+   - All data stored in Firestore via routeMatching.js
+   - Bidirectional matching (Driver→Passenger & Passenger→Driver)
 
 🧪 TEST MODE: ${TEST_MODE ? 'ACTIVE' : 'INACTIVE'}
 🎯 UNLIMITED CAPACITY: ${UNLIMITED_CAPACITY ? 'ACTIVE 🚀' : 'INACTIVE'}
 
 📊 Current Stats:
-- Active Searches: ${activeSearches.size} (in memory)
+- Active Searches in Memory: ${activeSearches.size}
 - Processed Matches: ${processedMatches.size} (in memory)
 - Active Timeouts: ${searchTimeouts.size} (in memory)
 - Users with Matches: ${userMatches.size} (in memory)
 - WebSocket Connections: ${websocketServer ? websocketServer.getConnectedCount() : 0}
 
 💾 FIRESTORE COLLECTIONS:
-- ${DRIVER_SCHEDULES_COLLECTION}: Driver schedules WITH COMPLETE DATA
-- ${ACTIVE_MATCHES_COLLECTION}: Active matches with driver profiles
+- ${DRIVER_SCHEDULES_COLLECTION}: Driver schedules with complete data
+- ACTIVE_SEARCHES: All active searches (via routeMatching.js)
+- ${ACTIVE_MATCHES_COLLECTION}: Active matches with profiles
 - ${NOTIFICATIONS_COLLECTION}: User notifications
 
-✅ INTEGRATED WITH ROUTEMATCHING.JS 🎉
-   - Real-time location updates trigger immediate matching
-   - Intelligent matching algorithms
-   - Firestore persistence for driver searches
-   - Automated cleanup of expired searches
+✅ FULLY SYMMETRICAL SYSTEM 🎉
+   - Single search endpoint: /api/match/search
+   - Symmetrical location updates: /api/driver/update-location & /api/passenger/update-location
+   - Both use routeMatching.js functions
+   - Bidirectional matching algorithm
 
-📱 ENDPOINTS:
-- POST /api/match/driver-schedule - Save complete driver schedule
-- POST /api/match/search - Start immediate search with full data (uses routeMatching.js)
-- POST /api/driver/update-location - Update driver's real-time location (triggers matching)
+📱 SYMMETRICAL ENDPOINTS:
+- POST /api/match/search - Start search (works for both drivers & passengers)
+- POST /api/driver/update-location - Update driver location (triggers matching)
+- POST /api/passenger/update-location - Update passenger location (triggers matching)
+- POST /api/match/driver-schedule - Create driver schedule (driver-specific)
 - GET /api/match/driver-schedule/:driverId - Get driver schedule
 - POST /api/match/stop-search - Stop search
 - GET /api/debug/status - Debug information
-- GET /api/health - Health check
+- GET /api/health - Health check with symmetrical architecture info
     `);
   });
 

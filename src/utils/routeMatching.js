@@ -1,4 +1,4 @@
-// utils/routeMatching.js - COMPLETE SCRIPT WITH REAL-TIME LOCATION & FIRESTORE INTEGRATION
+// utils/routeMatching.js - COMPLETE SYMMETRICAL SCRIPT FOR BOTH DRIVERS AND PASSENGERS
 const admin = require('firebase-admin');
 
 // TEST MODE - Set to true for immediate testing
@@ -12,66 +12,73 @@ const MATCHING_DURATION = 5 * 60 * 1000; // 5 minutes
 const matchCooldown = new Map();
 const COOLDOWN_PERIOD = 2 * 60 * 1000; // 2 minutes cooldown
 
-// Firestore Collection Names
+// Firestore Collection Names - SYMMETRICAL for both drivers AND passengers
 const COLLECTIONS = {
-  ACTIVE_DRIVER_SEARCHES: 'active_driver_searches',
+  ACTIVE_SEARCHES: 'active_searches', // ✅ GENERIC for both drivers AND passengers
   DRIVER_SCHEDULES: 'driver_schedules',
-  ACTIVE_DRIVER_LOCATIONS: 'active_driver_locations',
   ACTIVE_MATCHES: 'active_matches',
-  LOCATION_HISTORY: 'location_history'
+  LOCATION_HISTORY: 'location_history',
+  NOTIFICATIONS: 'notifications'
 };
 
-// ========== REAL-TIME FIRESTORE INTEGRATION FUNCTIONS ==========
+// ========== SYMMETRICAL FIRESTORE INTEGRATION FUNCTIONS ==========
 
-// 🎯 Save/Update active driver search in Firestore
-const saveActiveDriverSearch = async (db, driverData) => {
+// 🎯 SYMMETRICAL: Save active search for ANY user (driver OR passenger)
+const saveActiveSearch = async (db, searchData) => {
   try {
-    const driverId = driverData.driverId || driverData.userId;
-    if (!driverId) {
-      console.error('❌ No driverId provided for saving active search');
+    const userId = searchData.userId || searchData.driverId || searchData.passengerId;
+    const userType = searchData.userType || (searchData.driverId ? 'driver' : 'passenger');
+    
+    if (!userId) {
+      console.error('❌ No userId provided for saving active search');
       return null;
     }
 
-    // Create document ID based on driverId
-    const docId = `active_search_${driverId}_${Date.now()}`;
+    // Create document ID based on userType + userId
+    const docId = `active_search_${userType}_${userId}_${Date.now()}`;
     
     const searchDoc = {
-      driverId: driverId,
-      driverName: driverData.driverName || 'Unknown Driver',
-      driverPhone: driverData.driverPhone || '',
-      driverPhotoUrl: driverData.driverPhotoUrl || '',
-      driverRating: driverData.driverRating || 5.0,
-      totalRides: driverData.totalRides || 0,
-      isVerified: driverData.isVerified || false,
+      userId: userId,
+      userType: userType,
       
-      // Vehicle info
-      vehicleInfo: driverData.vehicleInfo || {},
-      capacity: driverData.capacity || 4,
-      vehicleType: driverData.vehicleType || 'car',
+      // ✅ USER PROFILE DATA (same for both)
+      name: userType === 'driver' ? 
+        (searchData.driverName || 'Unknown Driver') : 
+        (searchData.passengerName || 'Unknown Passenger'),
+      phone: searchData.phone || searchData.driverPhone || '',
+      photoUrl: searchData.photoUrl || searchData.driverPhotoUrl || '',
+      rating: searchData.rating || searchData.driverRating || 5.0,
+      totalRides: searchData.totalRides || 0,
+      isVerified: searchData.isVerified || false,
       
-      // Route info
-      pickupLocation: driverData.pickupLocation,
-      destinationLocation: driverData.destinationLocation,
-      pickupName: driverData.pickupName || 'Unknown Pickup',
-      destinationName: driverData.destinationName || 'Unknown Destination',
-      routePoints: driverData.routePoints || [],
+      // ✅ VEHICLE INFO (only for drivers)
+      vehicleInfo: userType === 'driver' ? (searchData.vehicleInfo || {}) : null,
+      capacity: userType === 'driver' ? (searchData.capacity || 4) : 1,
+      vehicleType: userType === 'driver' ? (searchData.vehicleType || 'car') : null,
       
-      // Real-time location tracking
-      currentLocation: driverData.currentLocation || null,
+      // ✅ ROUTE INFO (same for both)
+      pickupLocation: searchData.pickupLocation,
+      destinationLocation: searchData.destinationLocation,
+      pickupName: searchData.pickupName || 'Unknown Pickup',
+      destinationName: searchData.destinationName || 'Unknown Destination',
+      routePoints: searchData.routePoints || [],
+      
+      // ✅ REAL-TIME LOCATION TRACKING (same for both)
+      currentLocation: searchData.currentLocation || null,
       locationUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
       
-      // Search metadata
-      searchId: driverData.searchId || docId,
-      rideType: driverData.rideType || 'immediate',
-      scheduledTime: driverData.scheduledTime ? 
-        admin.firestore.Timestamp.fromDate(new Date(driverData.scheduledTime)) : null,
+      // ✅ SEARCH METADATA (same for both)
+      searchId: searchData.searchId || docId,
+      rideType: searchData.rideType || 'immediate',
+      scheduledTime: searchData.scheduledTime ? 
+        admin.firestore.Timestamp.fromDate(new Date(searchData.scheduledTime)) : null,
       status: 'active',
       isSearching: true,
       isOnline: true,
-      passengerCount: driverData.passengerCount || 0,
-      matchesFound: driverData.matchesFound || 0,
+      passengerCount: searchData.passengerCount || 1,
+      matchesFound: searchData.matchesFound || 0,
       
-      // System data
+      // ✅ SYSTEM DATA (same for both)
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
       expiresAt: admin.firestore.Timestamp.fromDate(
@@ -79,35 +86,35 @@ const saveActiveDriverSearch = async (db, driverData) => {
       )
     };
 
-    // Save to active_driver_searches collection
-    await db.collection(COLLECTIONS.ACTIVE_DRIVER_SEARCHES)
+    // 🎯 SAVE TO GENERIC COLLECTION
+    await db.collection(COLLECTIONS.ACTIVE_SEARCHES)
       .doc(docId)
       .set(searchDoc, { merge: true });
     
-    console.log(`💾 Saved active driver search to Firestore: ${driverData.driverName}`);
-    console.log(`   - Driver: ${driverData.driverName} (Rating: ${driverData.driverRating || 5.0})`);
-    console.log(`   - Vehicle: ${driverData.vehicleInfo?.model || 'Unknown'}`);
-    console.log(`   - Collection: ${COLLECTIONS.ACTIVE_DRIVER_SEARCHES}`);
+    console.log(`💾 Saved ${userType} active search to Firestore: ${searchDoc.name}`);
+    console.log(`   - ${userType}: ${searchDoc.name}`);
+    console.log(`   - Collection: ${COLLECTIONS.ACTIVE_SEARCHES}`);
     console.log(`   - Document ID: ${docId}`);
     
     return searchDoc;
     
   } catch (error) {
-    console.error('❌ Error saving active driver search:', error);
+    console.error('❌ Error saving active search:', error);
     throw error;
   }
 };
 
-// 🎯 Update driver's real-time location in Firestore
-const updateDriverLocation = async (db, driverId, locationData) => {
+// 🎯 SYMMETRICAL: Update ANY user's location (driver OR passenger)
+const updateUserLocation = async (db, userId, userType, locationData) => {
   try {
-    console.log(`📍 Updating driver location in Firestore: ${driverId}`);
+    console.log(`📍 Updating ${userType} location in Firestore: ${userId}`);
     
     const timestamp = admin.firestore.FieldValue.serverTimestamp();
     
-    // 1. Update active_driver_searches with current location
-    const activeSearchesQuery = await db.collection(COLLECTIONS.ACTIVE_DRIVER_SEARCHES)
-      .where('driverId', '==', driverId)
+    // 1. Update active_searches with current location
+    const activeSearchesQuery = await db.collection(COLLECTIONS.ACTIVE_SEARCHES)
+      .where('userId', '==', userId)
+      .where('userType', '==', userType)
       .where('isSearching', '==', true)
       .orderBy('createdAt', 'desc')
       .limit(1)
@@ -128,7 +135,7 @@ const updateDriverLocation = async (db, driverId, locationData) => {
         lastUpdated: timestamp
       });
       
-      console.log(`✅ Updated location in active search for driver: ${driverId}`);
+      console.log(`✅ Updated location in active search for ${userType}: ${userId}`);
       
       // Return updated search data for immediate matching
       const updatedSearch = searchDoc.data();
@@ -141,34 +148,21 @@ const updateDriverLocation = async (db, driverId, locationData) => {
       return updatedSearch;
     }
     
-    // 2. Also save to location_history collection
-    await db.collection(COLLECTIONS.LOCATION_HISTORY).add({
-      driverId: driverId,
-      userType: 'driver',
-      latitude: locationData.latitude,
-      longitude: locationData.longitude,
-      accuracy: locationData.accuracy || 0,
-      address: locationData.address || '',
-      timestamp: timestamp,
-      source: 'mobile_app'
-    });
-    
-    console.log(`📍 Saved location history for driver: ${driverId}`);
-    
     return null;
     
   } catch (error) {
-    console.error('❌ Error updating driver location:', error);
+    console.error('❌ Error updating user location:', error);
     return null;
   }
 };
 
-// 🎯 Get active driver searches from Firestore (for matching)
-const getActiveDriverSearches = async (db, limit = 50) => {
+// 🎯 SYMMETRICAL: Get active searches by user type
+const getActiveSearchesByType = async (db, userType, limit = 50) => {
   try {
-    console.log(`🔍 Fetching active driver searches from Firestore...`);
+    console.log(`🔍 Fetching active ${userType} searches from Firestore...`);
     
-    const snapshot = await db.collection(COLLECTIONS.ACTIVE_DRIVER_SEARCHES)
+    const snapshot = await db.collection(COLLECTIONS.ACTIVE_SEARCHES)
+      .where('userType', '==', userType)
       .where('isSearching', '==', true)
       .where('expiresAt', '>', admin.firestore.Timestamp.now())
       .orderBy('lastUpdated', 'desc')
@@ -186,61 +180,62 @@ const getActiveDriverSearches = async (db, limit = 50) => {
       });
     });
 
-    console.log(`📊 Found ${activeSearches.length} active driver searches in Firestore`);
+    console.log(`📊 Found ${activeSearches.length} active ${userType} searches in Firestore`);
     
-    // Log active drivers
+    // Log active users
     activeSearches.forEach(search => {
       const locationText = search.currentLocation ? 
         `📍 (${search.currentLocation.latitude.toFixed(4)}, ${search.currentLocation.longitude.toFixed(4)})` : 
         '📍 No location';
-      console.log(`   - ${search.driverName} ${locationText} - Rating: ${search.driverRating || 5.0}`);
+      console.log(`   - ${search.name} ${locationText} - Rating: ${search.rating || 5.0}`);
     });
     
     return activeSearches;
-    
   } catch (error) {
-    console.error('❌ Error getting active driver searches:', error);
+    console.error(`❌ Error getting active ${userType} searches:`, error);
     return [];
   }
 };
 
-// 🎯 Process location update and trigger immediate matching
-const processLocationUpdateAndMatch = async (db, driverId, locationData, websocketServer = null) => {
+// 🎯 SYMMETRICAL: Process location update for ANY user
+const processUserLocationUpdateAndMatch = async (db, userId, userType, locationData, websocketServer = null) => {
   try {
-    console.log(`🎯 === PROCESSING LOCATION UPDATE & IMMEDIATE MATCHING ===`);
-    console.log(`📍 Driver: ${driverId}`);
+    console.log(`🎯 === PROCESSING ${userType.toUpperCase()} LOCATION UPDATE ===`);
+    console.log(`📍 ${userType}: ${userId}`);
     console.log(`📌 Location: ${locationData.latitude}, ${locationData.longitude}`);
     
-    // 1. Update driver location in Firestore
-    const updatedSearch = await updateDriverLocation(db, driverId, locationData);
+    // 1. Update user location in Firestore
+    const updatedSearch = await updateUserLocation(db, userId, userType, locationData);
     
     if (!updatedSearch) {
-      console.log(`⚠️ No active search found for driver: ${driverId}`);
+      console.log(`⚠️ No active search found for ${userType}: ${userId}`);
       return null;
     }
     
-    // 2. Get active passenger searches from Firestore
-    const activePassengers = await getActivePassengerSearches(db);
+    // 2. Get OPPOSITE user type searches
+    const oppositeUserType = userType === 'driver' ? 'passenger' : 'driver';
+    const oppositeSearches = await getActiveSearchesByType(db, oppositeUserType);
     
-    if (activePassengers.length === 0) {
-      console.log(`💤 No active passengers to match with`);
+    if (oppositeSearches.length === 0) {
+      console.log(`💤 No active ${oppositeUserType}s to match with`);
       return null;
     }
     
-    console.log(`👤 Found ${activePassengers.length} active passengers to match with`);
+    console.log(`👥 Found ${oppositeSearches.length} active ${oppositeUserType}s to match with`);
     
     // 3. Perform immediate matching with current location
     let bestMatch = null;
     let highestScore = 0;
     
-    for (const passenger of activePassengers) {
-      if (!passenger.routePoints || passenger.routePoints.length === 0) continue;
+    for (const oppositeSearch of oppositeSearches) {
+      if (!updatedSearch.routePoints || updatedSearch.routePoints.length === 0) continue;
+      if (!oppositeSearch.routePoints || oppositeSearch.routePoints.length === 0) continue;
       
-      // Calculate similarity with current driver location
+      // 🎯 SYMMETRICAL MATCHING: Always compare both routes
       const similarity = calculateRouteSimilarity(
-        passenger.routePoints,
-        updatedSearch.routePoints || [],
-        updatedSearch.currentLocation, // 🎯 Using REAL-TIME location
+        oppositeSearch.routePoints,
+        updatedSearch.routePoints,
+        updatedSearch.currentLocation, // Using REAL-TIME location
         { 
           similarityThreshold: 0.001,
           maxDistanceThreshold: 50.0,
@@ -248,12 +243,12 @@ const processLocationUpdateAndMatch = async (db, driverId, locationData, websock
         }
       );
       
-      console.log(`🔍 ${updatedSearch.driverName} ↔ ${passenger.passengerName}: Score=${similarity.toFixed(3)}`);
+      console.log(`🔍 ${updatedSearch.name} ↔ ${oppositeSearch.name}: Score=${similarity.toFixed(3)}`);
       
       if (similarity > highestScore && similarity > 0.01) {
         highestScore = similarity;
         bestMatch = {
-          passenger: passenger,
+          user: oppositeSearch,
           similarity: similarity
         };
       }
@@ -261,36 +256,44 @@ const processLocationUpdateAndMatch = async (db, driverId, locationData, websock
     
     // 4. Create match if found
     if (bestMatch) {
-      console.log(`🎉 BEST MATCH FOUND: ${updatedSearch.driverName} ↔ ${bestMatch.passenger.passengerName} (Score: ${highestScore.toFixed(3)})`);
+      console.log(`🎉 BEST MATCH FOUND: ${updatedSearch.name} ↔ ${bestMatch.user.name} (Score: ${highestScore.toFixed(3)})`);
       
+      // 🎯 SYMMETRICAL: Prepare match data based on user types
       const matchData = {
-        matchId: `realtime_match_${driverId}_${bestMatch.passenger.userId}_${Date.now()}`,
-        driverId: driverId,
-        driverName: updatedSearch.driverName,
-        driverPhone: updatedSearch.driverPhone,
-        driverPhotoUrl: updatedSearch.driverPhotoUrl,
-        driverRating: updatedSearch.driverRating,
-        totalRides: updatedSearch.totalRides,
-        isVerified: updatedSearch.isVerified,
-        vehicleInfo: updatedSearch.vehicleInfo,
-        passengerId: bestMatch.passenger.userId,
-        passengerName: bestMatch.passenger.passengerName,
+        matchId: `realtime_match_${userId}_${bestMatch.user.userId}_${Date.now()}`,
+        timestamp: new Date().toISOString(),
         similarityScore: highestScore,
-        pickupName: bestMatch.passenger.pickupName || updatedSearch.pickupName || 'Unknown',
-        destinationName: bestMatch.passenger.destinationName || updatedSearch.destinationName || 'Unknown',
-        pickupLocation: bestMatch.passenger.pickupLocation || updatedSearch.pickupLocation,
-        destinationLocation: bestMatch.passenger.destinationLocation || updatedSearch.destinationLocation,
+        
+        // Always store as driver/passenger (even if passenger initiated)
+        driverData: userType === 'driver' ? updatedSearch : bestMatch.user,
+        passengerData: userType === 'passenger' ? updatedSearch : bestMatch.user,
+        
+        // Extract specific fields for clarity
+        driverId: userType === 'driver' ? userId : bestMatch.user.userId,
+        driverName: userType === 'driver' ? updatedSearch.name : bestMatch.user.name,
+        passengerId: userType === 'passenger' ? userId : bestMatch.user.userId,
+        passengerName: userType === 'passenger' ? updatedSearch.name : bestMatch.user.name,
+        
+        // Route info
+        pickupName: bestMatch.user.pickupName || updatedSearch.pickupName || 'Unknown',
+        destinationName: bestMatch.user.destinationName || updatedSearch.destinationName || 'Unknown',
+        pickupLocation: bestMatch.user.pickupLocation || updatedSearch.pickupLocation,
+        destinationLocation: bestMatch.user.destinationLocation || updatedSearch.destinationLocation,
+        
         rideType: 'immediate',
-        scheduledTime: new Date().toISOString(),
-        driverCurrentLocation: updatedSearch.currentLocation,
-        proximityScore: calculateProximityScore(
-          updatedSearch.currentLocation,
-          bestMatch.passenger.pickupLocation,
-          2000
-        ),
         matchType: 'realtime_location_based',
-        timestamp: new Date().toISOString()
+        initiatedBy: userType,
+        locationTriggered: true
       };
+      
+      // If driver has vehicle info, include it
+      if (userType === 'driver') {
+        matchData.vehicleInfo = updatedSearch.vehicleInfo;
+        matchData.driverRating = updatedSearch.rating;
+      } else if (bestMatch.user.userType === 'driver') {
+        matchData.vehicleInfo = bestMatch.user.vehicleInfo;
+        matchData.driverRating = bestMatch.user.rating;
+      }
       
       // Save match to Firestore
       await createActiveMatchForOverlay(db, matchData);
@@ -303,55 +306,29 @@ const processLocationUpdateAndMatch = async (db, driverId, locationData, websock
       
       return matchData;
     } else {
-      console.log(`🔍 No suitable match found for driver ${updatedSearch.driverName}`);
+      console.log(`🔍 No suitable match found for ${userType} ${updatedSearch.name}`);
     }
     
     return null;
     
   } catch (error) {
-    console.error('❌ Error in processLocationUpdateAndMatch:', error);
+    console.error(`❌ Error in processUserLocationUpdateAndMatch:`, error);
     return null;
   }
 };
 
-// 🎯 Get active passenger searches from Firestore
-const getActivePassengerSearches = async (db, limit = 50) => {
-  try {
-    const snapshot = await db.collection('active_searches')
-      .where('userType', '==', 'passenger')
-      .where('isSearching', '==', true)
-      .where('status', '==', 'searching')
-      .limit(limit)
-      .get();
-
-    const passengers = [];
-    snapshot.forEach(doc => {
-      const data = doc.data();
-      passengers.push({
-        ...data,
-        id: doc.id
-      });
-    });
-
-    return passengers;
-    
-  } catch (error) {
-    console.error('❌ Error getting passenger searches:', error);
-    return [];
-  }
-};
-
-// 🎯 Cleanup expired searches
+// 🎯 SYMMETRICAL: Cleanup expired searches for BOTH types
 const cleanupExpiredSearches = async (db) => {
   try {
     const now = admin.firestore.Timestamp.now();
     
-    // Clean expired driver searches
-    const expiredDrivers = await db.collection(COLLECTIONS.ACTIVE_DRIVER_SEARCHES)
+    // Clean expired searches for both drivers AND passengers
+    const expiredSearches = await db.collection(COLLECTIONS.ACTIVE_SEARCHES)
       .where('expiresAt', '<', now)
+      .where('isSearching', '==', true)
       .get();
     
-    expiredDrivers.forEach(async (doc) => {
+    expiredSearches.forEach(async (doc) => {
       await doc.ref.update({
         isSearching: false,
         status: 'expired',
@@ -359,7 +336,7 @@ const cleanupExpiredSearches = async (db) => {
       });
     });
     
-    console.log(`🧹 Cleaned up ${expiredDrivers.size} expired driver searches`);
+    console.log(`🧹 Cleaned up ${expiredSearches.size} expired searches (drivers + passengers)`);
     
   } catch (error) {
     console.error('❌ Error cleaning up expired searches:', error);
@@ -427,12 +404,13 @@ const calculateProximityScore = (driverLocation, pickupLocation, maxDistance = 2
   }
 };
 
-// 🎯 Enhanced location tracking for drivers
-const getDriverCurrentLocation = async (db, driverId) => {
+// 🎯 Enhanced location tracking for users
+const getUserCurrentLocation = async (db, userId, userType) => {
   try {
-    // Try to get from active_driver_searches first (most current)
-    const activeSearchQuery = await db.collection(COLLECTIONS.ACTIVE_DRIVER_SEARCHES)
-      .where('driverId', '==', driverId)
+    // Try to get from active_searches first (most current)
+    const activeSearchQuery = await db.collection(COLLECTIONS.ACTIVE_SEARCHES)
+      .where('userId', '==', userId)
+      .where('userType', '==', userType)
       .where('isSearching', '==', true)
       .orderBy('lastUpdated', 'desc')
       .limit(1)
@@ -445,22 +423,24 @@ const getDriverCurrentLocation = async (db, driverId) => {
       }
     }
 
-    // Fall back to drivers collection
-    const driverQuery = await db.collection('drivers')
-      .where('driverId', '==', driverId)
+    // Fall back to specific collections for backward compatibility
+    const collectionName = userType === 'driver' ? 'drivers' : 'passengers';
+    const userQuery = await db.collection(collectionName)
+      .where('userId', '==', userId)
       .limit(1)
       .get();
 
-    if (!driverQuery.empty) {
-      const driverData = driverQuery.docs[0].data();
-      if (driverData.currentLocation) {
-        return driverData.currentLocation;
+    if (!userQuery.empty) {
+      const userData = userQuery.docs[0].data();
+      if (userData.currentLocation) {
+        return userData.currentLocation;
       }
     }
 
     // Fall back to last known location from location_history
     const locationQuery = await db.collection(COLLECTIONS.LOCATION_HISTORY)
-      .where('driverId', '==', driverId)
+      .where('userId', '==', userId)
+      .where('userType', '==', userType)
       .orderBy('timestamp', 'desc')
       .limit(1)
       .get();
@@ -477,7 +457,7 @@ const getDriverCurrentLocation = async (db, driverId) => {
 
     return null;
   } catch (error) {
-    console.error('❌ Error getting driver current location:', error);
+    console.error('❌ Error getting user current location:', error);
     return null;
   }
 };
@@ -669,7 +649,7 @@ const createMatchNotifications = async (db, matchData) => {
     };
 
     // Driver notification
-    const driverNotificationRef = db.collection('notifications').doc();
+    const driverNotificationRef = db.collection(COLLECTIONS.NOTIFICATIONS).doc();
     batch.set(driverNotificationRef, {
       ...notificationData,
       userId: matchData.driverId,
@@ -678,7 +658,7 @@ const createMatchNotifications = async (db, matchData) => {
     });
 
     // Passenger notification
-    const passengerNotificationRef = db.collection('notifications').doc();
+    const passengerNotificationRef = db.collection(COLLECTIONS.NOTIFICATIONS).doc();
     batch.set(passengerNotificationRef, {
       ...notificationData,
       userId: matchData.passengerId,
@@ -700,8 +680,8 @@ const createMatchNotifications = async (db, matchData) => {
 
 const createMatchIfNotExists = async (db, driverData, passengerData, similarityScore, matchQuality, sessionData = {}) => {
   try {
-    const driverId = driverData.driverId || driverData.id;
-    const passengerId = passengerData.passengerId || passengerData.id;
+    const driverId = driverData.driverId || driverData.userId;
+    const passengerId = passengerData.passengerId || passengerData.userId;
     
     if (!driverId || !passengerId) {
       console.error('❌ Missing driverId or passengerId');
@@ -728,7 +708,7 @@ const createMatchIfNotExists = async (db, driverData, passengerData, similarityS
     if (driverData.currentLocation) {
       driverCurrentLocation = driverData.currentLocation;
     } else {
-      driverCurrentLocation = await getDriverCurrentLocation(db, driverId);
+      driverCurrentLocation = await getUserCurrentLocation(db, driverId, 'driver');
     }
 
     // Create new match
@@ -770,9 +750,9 @@ const createMatchIfNotExists = async (db, driverData, passengerData, similarityS
     const matchData = {
       matchId,
       driverId,
-      driverName: driverData.driverName || driverData.name || 'Unknown Driver',
+      driverName: driverData.name || driverData.driverName || 'Unknown Driver',
       passengerId,
-      passengerName: passengerData.passengerName || passengerData.name || 'Unknown Passenger',
+      passengerName: passengerData.name || passengerData.passengerName || 'Unknown Passenger',
       similarityScore: Math.round(finalSimilarityScore * 100) / 100,
       originalSimilarityScore: Math.round(similarityScore * 100) / 100,
       proximityScore: Math.round(proximityScore * 100) / 100,
@@ -882,12 +862,12 @@ const performIntelligentMatching = async (db, driver, passenger, options = {}) =
     // TEST MODE: Skip session validation
     let driverSession, passengerSession;
     if (TEST_MODE) {
-      driverSession = getActiveSession(driver.driverId, 'driver');
-      passengerSession = getActiveSession(passenger.passengerId, 'passenger');
+      driverSession = getActiveSession(driver.driverId || driver.userId, 'driver');
+      passengerSession = getActiveSession(passenger.passengerId || passenger.userId, 'passenger');
       console.log('🧪 TEST MODE: Using dummy sessions for testing');
     } else {
-      driverSession = getActiveSession(driver.driverId, 'driver');
-      passengerSession = getActiveSession(passenger.passengerId, 'passenger');
+      driverSession = getActiveSession(driver.driverId || driver.userId, 'driver');
+      passengerSession = getActiveSession(passenger.passengerId || passenger.userId, 'passenger');
       
       if (!driverSession || !passengerSession) {
         console.log('❌ Matching session expired or not active');
@@ -929,7 +909,7 @@ const performIntelligentMatching = async (db, driver, passenger, options = {}) =
     if (driver.currentLocation) {
       driverCurrentLocation = driver.currentLocation;
     } else {
-      driverCurrentLocation = await getDriverCurrentLocation(db, driver.driverId);
+      driverCurrentLocation = await getUserCurrentLocation(db, driver.driverId || driver.userId, 'driver');
     }
 
     // Calculate similarity with location-based proximity
@@ -1392,9 +1372,10 @@ const hasCapacity = (driverData, passengerCount) => {
 const updateDriverCapacity = async (db, driverId, passengerCount, operation = 'add') => {
   try {
     // Update active_searches collection
-    const activeSearchQuery = await db.collection('active_searches')
-      .where('driverId', '==', driverId)
-      .where('isActive', '==', true)
+    const activeSearchQuery = await db.collection(COLLECTIONS.ACTIVE_SEARCHES)
+      .where('userId', '==', driverId)
+      .where('userType', '==', 'driver')
+      .where('isSearching', '==', true)
       .limit(1)
       .get();
 
@@ -1418,7 +1399,7 @@ const updateDriverCapacity = async (db, driverId, passengerCount, operation = 'a
       console.log(`✅ Updated driver ${driverId} capacity: ${currentPassengers}`);
     }
 
-    // Also update drivers collection
+    // Also update drivers collection for backward compatibility
     const driverQuery = await db.collection('drivers')
       .where('driverId', '==', driverId)
       .limit(1)
@@ -1598,59 +1579,41 @@ const processLocationUpdate = async (db, userId, userType, location) => {
       source: 'mobile_app'
     });
     
-    // Update active_driver_searches collection for drivers
-    if (userType === 'driver') {
-      const activeSearchQuery = await db.collection(COLLECTIONS.ACTIVE_DRIVER_SEARCHES)
-        .where('driverId', '==', userId)
-        .where('isSearching', '==', true)
-        .orderBy('createdAt', 'desc')
-        .limit(1)
-        .get();
+    // Update active_searches collection for active searches
+    const activeSearchQuery = await db.collection(COLLECTIONS.ACTIVE_SEARCHES)
+      .where('userId', '==', userId)
+      .where('userType', '==', userType)
+      .where('isSearching', '==', true)
+      .orderBy('createdAt', 'desc')
+      .limit(1)
+      .get();
 
-      if (!activeSearchQuery.empty) {
-        const searchDoc = activeSearchQuery.docs[0];
-        await searchDoc.ref.update({
-          currentLocation: {
-            latitude: location.latitude,
-            longitude: location.longitude,
-            accuracy: location.accuracy || 0,
-            heading: location.heading || 0,
-            speed: location.speed || 0,
-            timestamp: timestamp
-          },
-          locationUpdatedAt: timestamp,
-          lastUpdated: timestamp
-        });
-        
-        console.log(`✅ Updated location in active search for driver: ${userId}`);
-        
-        // Return updated search data for immediate matching
-        const updatedSearch = searchDoc.data();
-        updatedSearch.currentLocation = {
+    if (!activeSearchQuery.empty) {
+      const searchDoc = activeSearchQuery.docs[0];
+      await searchDoc.ref.update({
+        currentLocation: {
           latitude: location.latitude,
           longitude: location.longitude,
-          accuracy: location.accuracy || 0
-        };
-        
-        return updatedSearch;
-      }
+          accuracy: location.accuracy || 0,
+          heading: location.heading || 0,
+          speed: location.speed || 0,
+          timestamp: timestamp
+        },
+        locationUpdatedAt: timestamp,
+        lastUpdated: timestamp
+      });
       
-      // Also update drivers collection
-      const driverQuery = await db.collection('drivers')
-        .where('driverId', '==', userId)
-        .limit(1)
-        .get();
-
-      if (!driverQuery.empty) {
-        await driverQuery.docs[0].ref.update({
-          currentLocation: {
-            latitude: location.latitude,
-            longitude: location.longitude,
-            accuracy: location.accuracy || 0,
-            updatedAt: timestamp
-          }
-        });
-      }
+      console.log(`✅ Updated location in active search for ${userType}: ${userId}`);
+      
+      // Return updated search data for immediate matching
+      const updatedSearch = searchDoc.data();
+      updatedSearch.currentLocation = {
+        latitude: location.latitude,
+        longitude: location.longitude,
+        accuracy: location.accuracy || 0
+      };
+      
+      return updatedSearch;
     }
     
     console.log(`✅ Location updated for ${userType}: ${userId}`);
@@ -1667,7 +1630,7 @@ const findNearbyDrivers = async (db, passengerLocation, maxDistance = 2000, limi
     console.log(`📍 Finding nearby drivers within ${maxDistance}m`);
     
     // Get active drivers from Firestore
-    const activeDrivers = await getActiveDriverSearches(db, 50);
+    const activeDrivers = await getActiveSearchesByType(db, 'driver', 50);
     
     const nearbyDrivers = [];
     
@@ -1682,7 +1645,7 @@ const findNearbyDrivers = async (db, passengerLocation, maxDistance = 2000, limi
         
         if (distance <= maxDistance) {
           nearbyDrivers.push({
-            driverId: driver.driverId,
+            driverId: driver.userId,
             distance: Math.round(distance),
             location: driver.currentLocation,
             ...driver
@@ -1709,7 +1672,7 @@ const createMatchWithRealTimeLocation = async (db, driverData, passengerData, dr
     
     // Get driver's current location if not provided
     if (!driverCurrentLocation) {
-      driverCurrentLocation = await getDriverCurrentLocation(db, driverData.driverId);
+      driverCurrentLocation = await getUserCurrentLocation(db, driverData.driverId || driverData.userId, 'driver');
     }
     
     // Calculate proximity score
@@ -1746,8 +1709,8 @@ const forceCreateTestMatch = async (db, driverData, passengerData) => {
   try {
     console.log('🎯 FORCE CREATING TEST MATCH...');
     
-    const driverId = driverData.driverId || driverData.id;
-    const passengerId = passengerData.passengerId || passengerData.id;
+    const driverId = driverData.driverId || driverData.userId;
+    const passengerId = passengerData.passengerId || passengerData.userId;
     
     const timestamp = Date.now();
     const matchId = `test_match_${driverId}_${passengerId}_${timestamp}`;
@@ -1755,9 +1718,9 @@ const forceCreateTestMatch = async (db, driverData, passengerData) => {
     const matchData = {
       matchId,
       driverId,
-      driverName: driverData.driverName || driverData.name || 'Test Driver',
+      driverName: driverData.name || driverData.driverName || 'Test Driver',
       passengerId,
-      passengerName: passengerData.passengerName || passengerData.name || 'Test Passenger',
+      passengerName: passengerData.name || passengerData.passengerName || 'Test Passenger',
       similarityScore: 0.85,
       matchQuality: 'excellent',
       status: 'proposed',
@@ -1795,16 +1758,16 @@ const forceImmediateMatching = async (db, driverData, passengerData) => {
   try {
     // Create a test match immediately without any checks
     const timestamp = Date.now();
-    const driverId = driverData.driverId || driverData.id;
-    const passengerId = passengerData.passengerId || passengerData.id;
+    const driverId = driverData.driverId || driverData.userId;
+    const passengerId = passengerData.passengerId || passengerData.userId;
     const matchId = `force_match_${driverId}_${passengerId}_${timestamp}`;
     
     const matchData = {
       matchId,
       driverId,
-      driverName: driverData.driverName || driverData.name || 'Test Driver',
+      driverName: driverData.name || driverData.driverName || 'Test Driver',
       passengerId,
-      passengerName: passengerData.passengerName || passengerData.name || 'Test Passenger',
+      passengerName: passengerData.name || passengerData.passengerName || 'Test Passenger',
       similarityScore: 0.95,
       matchQuality: 'excellent',
       
@@ -1859,8 +1822,8 @@ const forceImmediateMatchingWithLocation = async (db, driverData, passengerData)
     
     // Create a test match immediately with location data
     const timestamp = Date.now();
-    const driverId = driverData.driverId || driverData.id;
-    const passengerId = passengerData.passengerId || passengerData.id;
+    const driverId = driverData.driverId || driverData.userId;
+    const passengerId = passengerData.passengerId || passengerData.userId;
     const matchId = `force_loc_match_${driverId}_${passengerId}_${timestamp}`;
     
     // Calculate proximity
@@ -1872,9 +1835,9 @@ const forceImmediateMatchingWithLocation = async (db, driverData, passengerData)
     const matchData = {
       matchId,
       driverId,
-      driverName: driverData.driverName || driverData.name || 'Test Driver',
+      driverName: driverData.name || driverData.driverName || 'Test Driver',
       passengerId,
-      passengerName: passengerData.passengerName || passengerData.name || 'Test Passenger',
+      passengerName: passengerData.name || passengerData.passengerName || 'Test Passenger',
       similarityScore: 0.85 + (proximityScore * 0.15), // Base score + proximity bonus
       originalSimilarityScore: 0.85,
       proximityScore: proximityScore,
@@ -1974,7 +1937,7 @@ module.exports = {
   
   // 🎯 Location-based functions
   calculateProximityScore,
-  getDriverCurrentLocation,
+  getUserCurrentLocation,
   processLocationUpdate,
   findNearbyDrivers,
   createMatchWithRealTimeLocation,
@@ -1982,13 +1945,17 @@ module.exports = {
   calculateHaversineDistance,
   calculateETA,
   
-  // 🎯 NEW: Real-time Firestore functions
-  saveActiveDriverSearch,
-  updateDriverLocation,
-  getActiveDriverSearches,
-  getActivePassengerSearches,
-  processLocationUpdateAndMatch,
+  // 🎯 SYMMETRICAL Firestore functions (for BOTH drivers AND passengers)
+  saveActiveSearch,                    // ✅ For BOTH drivers AND passengers
+  updateUserLocation,                  // ✅ For BOTH drivers AND passengers
+  getActiveSearchesByType,             // ✅ For BOTH drivers AND passengers
+  processUserLocationUpdateAndMatch,   // ✅ SYMMETRICAL location matching
   cleanupExpiredSearches,
+  
+  // Backward compatibility aliases
+  saveActiveDriverSearch: saveActiveSearch,
+  getActiveDriverSearches: async (db, limit) => getActiveSearchesByType(db, 'driver', limit),
+  getActivePassengerSearches: async (db, limit) => getActiveSearchesByType(db, 'passenger', limit),
   
   // Core matching functions
   performIntelligentMatching,
