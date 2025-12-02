@@ -1,4 +1,4 @@
-// utils/routeMatching.js - COMPLETE SCRIPT WITH DYNAMIC ROUTE UPDATING
+// utils/routeMatching.js - COMPLETE SCRIPT WITH SEPARATE DRIVER/PASSENGER COLLECTIONS
 const admin = require('firebase-admin');
 
 // TEST MODE - Set to true for immediate testing
@@ -12,17 +12,25 @@ const MATCHING_DURATION = 5 * 60 * 1000; // 5 minutes
 const matchCooldown = new Map();
 const COOLDOWN_PERIOD = 2 * 60 * 1000; // 2 minutes cooldown
 
-// Firestore Collection Names - SYMMETRICAL for both drivers AND passengers
+// Firestore Collection Names - SEPARATED for drivers AND passengers
 const COLLECTIONS = {
-  ACTIVE_SEARCHES: 'active_searches', // ✅ GENERIC for both drivers AND passengers
+  ACTIVE_SEARCHES_DRIVER: 'active_searches_driver',    // ✅ SEPARATE: Driver searches
+  ACTIVE_SEARCHES_PASSENGER: 'active_searches_passenger', // ✅ SEPARATE: Passenger searches
   DRIVER_SCHEDULES: 'driver_schedules',
   ACTIVE_MATCHES: 'active_matches',
   LOCATION_HISTORY: 'location_history',
   NOTIFICATIONS: 'notifications',
-  RIDES: 'rides' // ✅ NEW: For ride tracking
+  RIDES: 'rides' // ✅ For ride tracking
 };
 
 // ========== HELPER FUNCTIONS ==========
+
+// 🎯 Get collection name based on user type
+const getUserCollection = (userType) => {
+  return userType === 'driver' 
+    ? COLLECTIONS.ACTIVE_SEARCHES_DRIVER 
+    : COLLECTIONS.ACTIVE_SEARCHES_PASSENGER;
+};
 
 // 🎯 NEW: Check if user has moved significantly
 const hasUserMovedSignificantly = (originalLocation, currentLocation, thresholdMeters = 1000) => {
@@ -60,22 +68,25 @@ const updateUserRouteWithCurrentLocation = async (db, userId, userType, currentL
   try {
     console.log(`🔄 Updating ${userType} route with current location: ${userId}`);
     
+    const collectionName = getUserCollection(userType);
+    
     // 1. Get the current search document
-    const activeSearchQuery = await db.collection(COLLECTIONS.ACTIVE_SEARCHES)
-      .where('userId', '==', userId)
-      .where('userType', '==', userType)
-      .where('isSearching', '==', true)
-      .orderBy('createdAt', 'desc')
-      .limit(1)
+    const activeSearchQuery = await db.collection(collectionName)
+      .doc(userId)
       .get();
     
-    if (activeSearchQuery.empty) {
+    if (!activeSearchQuery.exists) {
       console.log(`⚠️ No active search found for ${userType}: ${userId}`);
       return null;
     }
     
-    const searchDoc = activeSearchQuery.docs[0];
-    const searchData = searchDoc.data();
+    const searchData = activeSearchQuery.data();
+    
+    // Check if still searching
+    if (!searchData.isSearching) {
+      console.log(`⚠️ User ${userId} is not actively searching`);
+      return null;
+    }
     
     // 2. Extract the remaining route points
     const originalRoutePoints = searchData.routePoints || [];
@@ -132,7 +143,7 @@ const updateUserRouteWithCurrentLocation = async (db, userId, userType, currentL
     // 7. Update Firestore document
     const timestamp = admin.firestore.FieldValue.serverTimestamp();
     
-    await searchDoc.ref.update({
+    await activeSearchQuery.ref.update({
       // 🎯 UPDATED PICKUP LOCATION (MOST IMPORTANT!)
       pickupLocation: newPickupLocation,
       pickupName: `Current Location (${searchData.pickupName || 'Moving'})`,
@@ -206,9 +217,9 @@ const updateUserRouteWithCurrentLocation = async (db, userId, userType, currentL
   }
 };
 
-// ========== SYMMETRICAL FIRESTORE INTEGRATION FUNCTIONS ==========
+// ========== SEPARATED FIRESTORE INTEGRATION FUNCTIONS ==========
 
-// 🎯 SYMMETRICAL: Save active search for ANY user (driver OR passenger)
+// 🎯 SEPARATED: Save active search for ANY user (driver OR passenger) in separate collections
 const saveActiveSearch = async (db, searchData) => {
   try {
     const userId = searchData.userId || searchData.driverId || searchData.passengerId;
@@ -219,8 +230,8 @@ const saveActiveSearch = async (db, searchData) => {
       return null;
     }
 
-    // Create document ID based on userType + userId
-    const docId = `active_search_${userType}_${userId}_${Date.now()}`;
+    // 🎯 Get the correct collection name
+    const collectionName = getUserCollection(userType);
     
     // 🎯 NEW: Default capacity tracking
     const capacity = userType === 'driver' ? (searchData.capacity || 4) : 1;
@@ -230,13 +241,13 @@ const saveActiveSearch = async (db, searchData) => {
       userId: userId,
       userType: userType,
       
-      // ✅ USER PROFILE DATA (same for both)
+      // ✅ USER PROFILE DATA
       name: userType === 'driver' ? 
         (searchData.driverName || 'Unknown Driver') : 
         (searchData.passengerName || 'Unknown Passenger'),
-      phone: searchData.phone || searchData.driverPhone || '',
-      photoUrl: searchData.photoUrl || searchData.driverPhotoUrl || '',
-      rating: searchData.rating || searchData.driverRating || 5.0,
+      phone: searchData.phone || searchData.driverPhone || searchData.passengerPhone || '',
+      photoUrl: searchData.photoUrl || searchData.driverPhotoUrl || searchData.passengerPhotoUrl || '',
+      rating: searchData.rating || searchData.driverRating || searchData.passengerRating || 5.0,
       totalRides: searchData.totalRides || 0,
       isVerified: searchData.isVerified || false,
       
@@ -257,7 +268,7 @@ const saveActiveSearch = async (db, searchData) => {
       driver: null,    // For passengers: will contain driver object
       acceptedAt: null,
       
-      // ✅ ROUTE INFO (same for both)
+      // ✅ ROUTE INFO
       pickupLocation: searchData.pickupLocation,
       destinationLocation: searchData.destinationLocation,
       pickupName: searchData.pickupName || 'Unknown Pickup',
@@ -266,12 +277,12 @@ const saveActiveSearch = async (db, searchData) => {
       distance: searchData.distance || 0,
       duration: searchData.duration || 0,
       
-      // ✅ REAL-TIME LOCATION TRACKING (same for both)
+      // ✅ REAL-TIME LOCATION TRACKING
       currentLocation: searchData.currentLocation || null,
       locationUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
       
-      // ✅ SEARCH METADATA (same for both)
-      searchId: searchData.searchId || docId,
+      // ✅ SEARCH METADATA
+      searchId: searchData.searchId || `search_${userId}_${Date.now()}`,
       rideType: searchData.rideType || 'immediate',
       scheduledTime: searchData.scheduledTime ? 
         admin.firestore.Timestamp.fromDate(new Date(searchData.scheduledTime)) : null,
@@ -281,7 +292,7 @@ const saveActiveSearch = async (db, searchData) => {
       passengerCount: searchData.passengerCount || 1,
       matchesFound: searchData.matchesFound || 0,
       
-      // ✅ SYSTEM DATA (same for both)
+      // ✅ SYSTEM DATA
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
       expiresAt: admin.firestore.Timestamp.fromDate(
@@ -289,15 +300,15 @@ const saveActiveSearch = async (db, searchData) => {
       )
     };
 
-    // 🎯 SAVE TO GENERIC COLLECTION
-    await db.collection(COLLECTIONS.ACTIVE_SEARCHES)
-      .doc(docId)
+    // 🎯 SAVE TO SEPARATE COLLECTION
+    await db.collection(collectionName)
+      .doc(userId)
       .set(searchDoc, { merge: true });
     
     console.log(`💾 Saved ${userType} active search to Firestore: ${searchDoc.name}`);
-    console.log(`   - ${userType}: ${searchDoc.name}`);
+    console.log(`   - Collection: ${collectionName}`);
+    console.log(`   - Document ID: ${userId}`);
     console.log(`   - Available seats: ${searchDoc.availableSeats}`);
-    console.log(`   - Document ID: ${docId}`);
     
     return searchDoc;
     
@@ -322,22 +333,23 @@ const updateUserLocation = async (db, userId, userType, locationData) => {
       timestamp: timestamp
     };
     
-    // 1. Find the active search document
-    const activeSearchesQuery = await db.collection(COLLECTIONS.ACTIVE_SEARCHES)
-      .where('userId', '==', userId)
-      .where('userType', '==', userType)
-      .where('isSearching', '==', true)
-      .orderBy('createdAt', 'desc')
-      .limit(1)
-      .get();
+    // 1. Find the active search document in the correct collection
+    const collectionName = getUserCollection(userType);
+    const searchDocRef = db.collection(collectionName).doc(userId);
+    const searchDoc = await searchDocRef.get();
     
-    if (activeSearchesQuery.empty) {
+    if (!searchDoc.exists) {
       console.log(`⚠️ No active search found for ${userType}: ${userId}`);
       return null;
     }
     
-    const searchDoc = activeSearchesQuery.docs[0];
     const searchData = searchDoc.data();
+    
+    // Check if still searching
+    if (!searchData.isSearching) {
+      console.log(`⚠️ User ${userId} is not actively searching`);
+      return null;
+    }
     
     // 🎯 CRITICAL: Check if user has moved significantly from original pickup
     const originalPickup = searchData.pickupLocation;
@@ -421,7 +433,7 @@ const updateUserLocation = async (db, userId, userType, locationData) => {
     }
     
     // Apply updates to Firestore
-    await searchDoc.ref.update(updates);
+    await searchDocRef.update(updates);
     
     console.log(`✅ Updated location in active search for ${userType}: ${userId}`);
     if (hasMovedSignificantly) {
@@ -450,13 +462,14 @@ const updateUserLocation = async (db, userId, userType, locationData) => {
   }
 };
 
-// 🎯 SYMMETRICAL: Get active searches by user type
+// 🎯 SEPARATED: Get active searches by user type
 const getActiveSearchesByType = async (db, userType, limit = 50) => {
   try {
     console.log(`🔍 Fetching active ${userType} searches from Firestore...`);
     
-    const snapshot = await db.collection(COLLECTIONS.ACTIVE_SEARCHES)
-      .where('userType', '==', userType)
+    const collectionName = getUserCollection(userType);
+    
+    const snapshot = await db.collection(collectionName)
       .where('isSearching', '==', true)
       .where('expiresAt', '>', admin.firestore.Timestamp.now())
       .orderBy('lastUpdated', 'desc')
@@ -470,7 +483,7 @@ const getActiveSearchesByType = async (db, userType, limit = 50) => {
         ...searchData,
         id: doc.id,
         firestoreDocId: doc.id,
-        source: 'firestore_active'
+        source: `firestore_${userType}`
       });
     });
 
@@ -494,22 +507,26 @@ const getActiveSearchesByType = async (db, userType, limit = 50) => {
 // 🎯 NEW: Get active search document by userId
 const getActiveSearchDoc = async (db, userId, userType) => {
   try {
-    const snapshot = await db.collection(COLLECTIONS.ACTIVE_SEARCHES)
-      .where('userId', '==', userId)
-      .where('userType', '==', userType)
-      .where('isSearching', '==', true)
-      .orderBy('createdAt', 'desc')
-      .limit(1)
-      .get();
+    const collectionName = getUserCollection(userType);
+    const docRef = db.collection(collectionName).doc(userId);
+    const docSnap = await docRef.get();
     
-    if (snapshot.empty) {
+    if (!docSnap.exists) {
+      return null;
+    }
+    
+    const data = docSnap.data();
+    
+    // Check if still searching
+    if (!data.isSearching) {
       return null;
     }
     
     return {
-      docRef: snapshot.docs[0].ref,
-      data: snapshot.docs[0].data(),
-      docId: snapshot.docs[0].id
+      docRef: docRef,
+      data: data,
+      docId: docSnap.id,
+      collection: collectionName
     };
   } catch (error) {
     console.error(`❌ Error getting active search doc:`, error);
@@ -556,7 +573,6 @@ const acceptPassenger = async (db, driverId, passengerId, matchId, websocketServ
       
       // 🎯 Update passenger object with acceptance info
       passenger: {
-        ...(driverData.passenger || {}),
         userId: passengerId,
         name: passengerData.name || 'Unknown Passenger',
         phone: passengerData.phone || '',
@@ -589,7 +605,6 @@ const acceptPassenger = async (db, driverId, passengerId, matchId, websocketServ
       
       // 🎯 Update driver object with acceptance info
       driver: {
-        ...(passengerData.driver || {}),
         userId: driverId,
         name: driverData.name || 'Unknown Driver',
         phone: driverData.phone || '',
@@ -778,7 +793,7 @@ const updateRideStatus = async (db, rideId, newStatus, additionalData = {}, webs
           driverUpdates.passenger = null;
           driverUpdates.rideId = null;
           // Reset capacity if passenger wasn't picked up
-          driverUpdates.currentPassengers = 0;
+          driverUpdates.currentPassengers = Math.max(0, (driverSearch.data.currentPassengers || 0) - (rideData.passengerCount || 1));
           driverUpdates.availableSeats = driverSearch.data.capacity || 4;
         }
         
@@ -863,7 +878,7 @@ const getRideInfo = async (db, rideId) => {
   }
 };
 
-// 🎯 SYMMETRICAL: Process location update for ANY user WITH DYNAMIC ROUTE UPDATING
+// 🎯 SEPARATED: Process location update for ANY user WITH DYNAMIC ROUTE UPDATING
 const processUserLocationUpdateAndMatch = async (db, userId, userType, locationData, websocketServer = null) => {
   try {
     console.log(`🎯 === PROCESSING ${userType.toUpperCase()} LOCATION UPDATE ===`);
@@ -1008,18 +1023,18 @@ const processUserLocationUpdateAndMatch = async (db, userId, userType, locationD
   }
 };
 
-// 🎯 SYMMETRICAL: Cleanup expired searches for BOTH types
+// 🎯 SEPARATED: Cleanup expired searches for BOTH types
 const cleanupExpiredSearches = async (db) => {
   try {
     const now = admin.firestore.Timestamp.now();
     
-    // Clean expired searches for both drivers AND passengers
-    const expiredSearches = await db.collection(COLLECTIONS.ACTIVE_SEARCHES)
+    // Clean expired searches for drivers
+    const expiredDriverSearches = await db.collection(COLLECTIONS.ACTIVE_SEARCHES_DRIVER)
       .where('expiresAt', '<', now)
       .where('isSearching', '==', true)
       .get();
     
-    expiredSearches.forEach(async (doc) => {
+    expiredDriverSearches.forEach(async (doc) => {
       await doc.ref.update({
         isSearching: false,
         status: 'expired',
@@ -1027,7 +1042,21 @@ const cleanupExpiredSearches = async (db) => {
       });
     });
     
-    console.log(`🧹 Cleaned up ${expiredSearches.size} expired searches (drivers + passengers)`);
+    // Clean expired searches for passengers
+    const expiredPassengerSearches = await db.collection(COLLECTIONS.ACTIVE_SEARCHES_PASSENGER)
+      .where('expiresAt', '<', now)
+      .where('isSearching', '==', true)
+      .get();
+    
+    expiredPassengerSearches.forEach(async (doc) => {
+      await doc.ref.update({
+        isSearching: false,
+        status: 'expired',
+        lastUpdated: admin.firestore.FieldValue.serverTimestamp()
+      });
+    });
+    
+    console.log(`🧹 Cleaned up ${expiredDriverSearches.size} expired driver searches and ${expiredPassengerSearches.size} expired passenger searches`);
     
   } catch (error) {
     console.error('❌ Error cleaning up expired searches:', error);
@@ -1098,25 +1127,20 @@ const calculateProximityScore = (driverLocation, pickupLocation, maxDistance = 2
 // 🎯 Enhanced location tracking for users
 const getUserCurrentLocation = async (db, userId, userType) => {
   try {
-    // Try to get from active_searches first (most current)
-    const activeSearchQuery = await db.collection(COLLECTIONS.ACTIVE_SEARCHES)
-      .where('userId', '==', userId)
-      .where('userType', '==', userType)
-      .where('isSearching', '==', true)
-      .orderBy('lastUpdated', 'desc')
-      .limit(1)
-      .get();
+    // Try to get from separate collections first
+    const collectionName = getUserCollection(userType);
+    const searchDoc = await db.collection(collectionName).doc(userId).get();
 
-    if (!activeSearchQuery.empty) {
-      const searchData = activeSearchQuery.docs[0].data();
-      if (searchData.currentLocation) {
+    if (searchDoc.exists) {
+      const searchData = searchDoc.data();
+      if (searchData.currentLocation && searchData.isSearching) {
         return searchData.currentLocation;
       }
     }
 
     // Fall back to specific collections for backward compatibility
-    const collectionName = userType === 'driver' ? 'drivers' : 'passengers';
-    const userQuery = await db.collection(collectionName)
+    const legacyCollectionName = userType === 'driver' ? 'drivers' : 'passengers';
+    const userQuery = await db.collection(legacyCollectionName)
       .where('userId', '==', userId)
       .limit(1)
       .get();
@@ -1494,92 +1518,96 @@ const createMatchIfNotExists = async (db, driverData, passengerData, similarityS
   }
 };
 
-// 🎯 UPDATED: Create embedded match directly in users' active_searches documents
+// 🎯 UPDATED: Create embedded match directly in users' separate collections
 const createActiveMatchForOverlay = async (db, matchData, websocketServer = null) => {
   try {
-    console.log(`🎯 Creating embedded match in active_searches: ${matchData.matchId}`);
+    console.log(`🎯 Creating embedded match in separate collections: ${matchData.matchId}`);
     
     const driverId = matchData.driverId;
     const passengerId = matchData.passengerId;
     const matchId = matchData.matchId;
     const timestamp = admin.firestore.FieldValue.serverTimestamp();
     
-    // 🎯 CRITICAL: UPDATE DRIVER'S active_searches DOCUMENT
-    const driverDocRef = db.collection('active_searches')
-      .where('userId', '==', driverId)
-      .where('isSearching', '==', true)
-      .limit(1);
+    // 🎯 CRITICAL: UPDATE DRIVER'S DOCUMENT in active_searches_driver
+    const driverDocRef = db.collection(COLLECTIONS.ACTIVE_SEARCHES_DRIVER).doc(driverId);
+    const driverDoc = await driverDocRef.get();
     
-    const driverSnapshot = await driverDocRef.get();
-    
-    if (!driverSnapshot.empty) {
-      const driverDoc = driverSnapshot.docs[0];
+    if (driverDoc.exists) {
+      const driverData = driverDoc.data();
       
-      await driverDoc.ref.update({
-        // 🎯 EMBED MATCH DATA INTO DRIVER'S DOCUMENT
-        matchId: matchId,
-        matchedWith: passengerId,
-        matchStatus: 'proposed', // proposed → accepted → completed
-        matchProposedAt: timestamp,
+      if (driverData.isSearching) {
+        await driverDocRef.update({
+          // 🎯 EMBED MATCH DATA INTO DRIVER'S DOCUMENT
+          matchId: matchId,
+          matchedWith: passengerId,
+          matchStatus: 'proposed', // proposed → accepted → completed
+          matchProposedAt: timestamp,
+          
+          // 🎯 EMBED PASSENGER INFO
+          passenger: {
+            userId: passengerId,
+            name: matchData.passengerName,
+            phone: matchData.passengerPhone || '',
+            photoUrl: matchData.passengerPhotoUrl || '',
+            rating: matchData.passengerRating || 5.0,
+            pickupLocation: matchData.pickupLocation,
+            destinationLocation: matchData.destinationLocation,
+            pickupName: matchData.pickupName,
+            destinationName: matchData.destinationName,
+            passengerCount: matchData.passengerCount || 1
+          },
+          
+          // Trip will start when accepted
+          tripStatus: 'match_proposed',
+          lastUpdated: timestamp
+        });
         
-        // 🎯 EMBED PASSENGER INFO
-        passenger: {
-          userId: passengerId,
-          name: matchData.passengerName,
-          phone: matchData.passengerPhone || '',
-          photoUrl: matchData.passengerPhotoUrl || '',
-          rating: matchData.passengerRating || 5.0,
-          pickupLocation: matchData.pickupLocation,
-          destinationLocation: matchData.destinationLocation,
-          pickupName: matchData.pickupName,
-          destinationName: matchData.destinationName,
-          passengerCount: matchData.passengerCount || 1
-        },
-        
-        // Trip will start when accepted
-        tripStatus: 'match_proposed',
-        lastUpdated: timestamp
-      });
-      
-      console.log(`✅ Updated driver's active_searches with embedded passenger data`);
+        console.log(`✅ Updated driver's document in active_searches_driver with embedded passenger data`);
+      } else {
+        console.log(`⚠️ Driver ${driverId} is not actively searching`);
+      }
+    } else {
+      console.log(`⚠️ Driver ${driverId} not found in active_searches_driver`);
     }
     
-    // 🎯 CRITICAL: UPDATE PASSENGER'S active_searches DOCUMENT
-    const passengerDocRef = db.collection('active_searches')
-      .where('userId', '==', passengerId)
-      .where('isSearching', '==', true)
-      .limit(1);
+    // 🎯 CRITICAL: UPDATE PASSENGER'S DOCUMENT in active_searches_passenger
+    const passengerDocRef = db.collection(COLLECTIONS.ACTIVE_SEARCHES_PASSENGER).doc(passengerId);
+    const passengerDoc = await passengerDocRef.get();
     
-    const passengerSnapshot = await passengerDocRef.get();
-    
-    if (!passengerSnapshot.empty) {
-      const passengerDoc = passengerSnapshot.docs[0];
+    if (passengerDoc.exists) {
+      const passengerData = passengerDoc.data();
       
-      await passengerDoc.ref.update({
-        // 🎯 EMBED MATCH DATA INTO PASSENGER'S DOCUMENT
-        matchId: matchId,
-        matchedWith: driverId,
-        matchStatus: 'proposed',
-        matchProposedAt: timestamp,
+      if (passengerData.isSearching) {
+        await passengerDocRef.update({
+          // 🎯 EMBED MATCH DATA INTO PASSENGER'S DOCUMENT
+          matchId: matchId,
+          matchedWith: driverId,
+          matchStatus: 'proposed',
+          matchProposedAt: timestamp,
+          
+          // 🎯 EMBED DRIVER INFO
+          driver: {
+            userId: driverId,
+            name: matchData.driverName,
+            phone: matchData.driverPhone || '',
+            photoUrl: matchData.driverPhotoUrl || '',
+            rating: matchData.driverRating || 5.0,
+            vehicleInfo: matchData.vehicleInfo || {},
+            currentLocation: matchData.driverCurrentLocation,
+            similarityScore: matchData.similarityScore
+          },
+          
+          // Trip info
+          tripStatus: 'match_proposed',
+          lastUpdated: timestamp
+        });
         
-        // 🎯 EMBED DRIVER INFO
-        driver: {
-          userId: driverId,
-          name: matchData.driverName,
-          phone: matchData.driverPhone || '',
-          photoUrl: matchData.driverPhotoUrl || '',
-          rating: matchData.driverRating || 5.0,
-          vehicleInfo: matchData.vehicleInfo || {},
-          currentLocation: matchData.driverCurrentLocation,
-          similarityScore: matchData.similarityScore
-        },
-        
-        // Trip info
-        tripStatus: 'match_proposed',
-        lastUpdated: timestamp
-      });
-      
-      console.log(`✅ Updated passenger's active_searches with embedded driver data`);
+        console.log(`✅ Updated passenger's document in active_searches_passenger with embedded driver data`);
+      } else {
+        console.log(`⚠️ Passenger ${passengerId} is not actively searching`);
+      }
+    } else {
+      console.log(`⚠️ Passenger ${passengerId} not found in active_searches_passenger`);
     }
     
     // Send WebSocket notifications
@@ -2117,20 +2145,15 @@ const hasCapacity = (driverData, passengerCount) => {
 
 const updateDriverCapacity = async (db, driverId, passengerCount, operation = 'add') => {
   try {
-    // Update active_searches collection
-    const activeSearchQuery = await db.collection(COLLECTIONS.ACTIVE_SEARCHES)
-      .where('userId', '==', driverId)
-      .where('userType', '==', 'driver')
-      .where('isSearching', '==', true)
-      .limit(1)
-      .get();
-
-    if (!activeSearchQuery.empty) {
-      const searchDoc = activeSearchQuery.docs[0];
-      const searchData = searchDoc.data();
+    // Update active_searches_driver collection
+    const driverDocRef = db.collection(COLLECTIONS.ACTIVE_SEARCHES_DRIVER).doc(driverId);
+    const driverDoc = await driverDocRef.get();
+    
+    if (driverDoc.exists) {
+      const driverData = driverDoc.data();
       
-      let currentPassengers = searchData.currentPassengers || 0;
-      const capacity = searchData.capacity || 4;
+      let currentPassengers = driverData.currentPassengers || 0;
+      const capacity = driverData.capacity || 4;
       
       if (operation === 'add') {
         currentPassengers += passengerCount;
@@ -2140,7 +2163,7 @@ const updateDriverCapacity = async (db, driverId, passengerCount, operation = 'a
       
       const availableSeats = Math.max(0, capacity - currentPassengers);
       
-      await searchDoc.ref.update({ 
+      await driverDocRef.update({ 
         currentPassengers,
         availableSeats,
         updatedAt: admin.firestore.FieldValue.serverTimestamp()
@@ -2329,41 +2352,40 @@ const processLocationUpdate = async (db, userId, userType, location) => {
       source: 'mobile_app'
     });
     
-    // Update active_searches collection for active searches
-    const activeSearchQuery = await db.collection(COLLECTIONS.ACTIVE_SEARCHES)
-      .where('userId', '==', userId)
-      .where('userType', '==', userType)
-      .where('isSearching', '==', true)
-      .orderBy('createdAt', 'desc')
-      .limit(1)
-      .get();
-
-    if (!activeSearchQuery.empty) {
-      const searchDoc = activeSearchQuery.docs[0];
-      await searchDoc.ref.update({
-        currentLocation: {
+    // Update separate collections for active searches
+    const collectionName = getUserCollection(userType);
+    const searchDocRef = db.collection(collectionName).doc(userId);
+    const searchDoc = await searchDocRef.get();
+    
+    if (searchDoc.exists) {
+      const searchData = searchDoc.data();
+      
+      if (searchData.isSearching) {
+        await searchDocRef.update({
+          currentLocation: {
+            latitude: location.latitude,
+            longitude: location.longitude,
+            accuracy: location.accuracy || 0,
+            heading: location.heading || 0,
+            speed: location.speed || 0,
+            timestamp: timestamp
+          },
+          locationUpdatedAt: timestamp,
+          lastUpdated: timestamp
+        });
+        
+        console.log(`✅ Updated location in active search for ${userType}: ${userId}`);
+        
+        // Return updated search data for immediate matching
+        const updatedSearch = searchDoc.data();
+        updatedSearch.currentLocation = {
           latitude: location.latitude,
           longitude: location.longitude,
-          accuracy: location.accuracy || 0,
-          heading: location.heading || 0,
-          speed: location.speed || 0,
-          timestamp: timestamp
-        },
-        locationUpdatedAt: timestamp,
-        lastUpdated: timestamp
-      });
-      
-      console.log(`✅ Updated location in active search for ${userType}: ${userId}`);
-      
-      // Return updated search data for immediate matching
-      const updatedSearch = searchDoc.data();
-      updatedSearch.currentLocation = {
-        latitude: location.latitude,
-        longitude: location.longitude,
-        accuracy: location.accuracy || 0
-      };
-      
-      return updatedSearch;
+          accuracy: location.accuracy || 0
+        };
+        
+        return updatedSearch;
+      }
     }
     
     console.log(`✅ Location updated for ${userType}: ${userId}`);
@@ -2481,7 +2503,7 @@ const forceCreateTestMatch = async (db, driverData, passengerData) => {
       notificationSent: false
     };
 
-    // Single Firestore write
+    // Single Firestore write for match
     await db.collection('potential_matches').doc(matchId).set(matchData);
     console.log(`✅ Created test match: ${matchId}`);
     
@@ -2695,13 +2717,13 @@ module.exports = {
   calculateHaversineDistance,
   calculateETA,
   
-  // 🎯 SYMMETRICAL Firestore functions (for BOTH drivers AND passengers)
-  saveActiveSearch,                    // ✅ For BOTH drivers AND passengers
+  // 🎯 SEPARATED Firestore functions
+  saveActiveSearch,                    // ✅ For BOTH drivers AND passengers (separate collections)
   updateUserLocation,                  // ✅ For BOTH drivers AND passengers (UPDATED)
-  getActiveSearchesByType,             // ✅ For BOTH drivers AND passengers
-  processUserLocationUpdateAndMatch,   // ✅ SYMMETRICAL location matching
+  getActiveSearchesByType,             // ✅ For BOTH drivers AND passengers (separate collections)
+  processUserLocationUpdateAndMatch,   // ✅ SEPARATED location matching
   cleanupExpiredSearches,
-  getActiveSearchDoc,                  // 🎯 NEW: Get active search document
+  getActiveSearchDoc,                  // 🎯 NEW: Get active search document from separate collections
   
   // 🎯 NEW: Ride management functions
   acceptPassenger,                     // 🎯 NEW: Handle driver accepting passenger
@@ -2713,6 +2735,7 @@ module.exports = {
   
   // 🎯 NEW: Helper functions
   hasUserMovedSignificantly,           // 🎯 NEW: Movement detection
+  getUserCollection,                   // 🎯 NEW: Get collection name by user type
   
   // Backward compatibility aliases
   saveActiveDriverSearch: saveActiveSearch,
