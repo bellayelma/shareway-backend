@@ -1,767 +1,377 @@
-// src/websocketServer.js - COMPLETELY FIXED VERSION WITH sendMatchProposal
-const WebSocket = require('ws');
-
-class WebSocketServer {
-  constructor(server) {
-    this.wss = new WebSocket.Server({ 
-      server,
-      perMessageDeflate: false,
-      clientTracking: true
-    });
-    this.connectedClients = new Map(); // userId -> WebSocket
-    
-    this.setupWebSocket();
-    console.log('✅ WebSocket Server Constructor Initialized');
+// services/notificationService.js
+class NotificationService {
+  constructor(websocketServer) {
+    this.websocketServer = websocketServer;
+    this.cleanupInterval = null;
+    this.stats = {
+      notificationsSent: 0,
+      notificationsFailed: 0,
+      errors: 0,
+      lastCleanup: null
+    };
+    console.log('🔔 NotificationService initialized');
   }
 
-  setupWebSocket() {
-    this.wss.on('connection', (ws, req) => {
-      console.log('🔌 New WebSocket connection attempt');
-      
-      try {
-        // Extract userId from query parameters - FIXED URL PARSING
-        const url = new URL(req.url, `http://${req.headers.host}`);
-        const userId = url.searchParams.get('userId');
-        
-        if (!userId) {
-          console.log('❌ WebSocket connection rejected: No userId provided');
-          ws.close(1008, 'User ID required');
-          return;
-        }
+  // ==================== MATCH NOTIFICATIONS ====================
 
-        console.log(`✅ Flutter app connected: ${userId}`);
-        
-        // Store connection
-        this.connectedClients.set(userId, ws);
-        
-        // Send immediate welcome message
-        this.sendToUser(userId, {
-          type: 'CONNECTED',
-          message: 'WebSocket connected successfully',
-          timestamp: Date.now(),
-          serverTime: new Date().toISOString(),
-          userId: userId
-        });
-
-        // ✅ ADDED: Send connection stats
-        console.log(`📊 Connection established - Total: ${this.connectedClients.size}, Users: ${Array.from(this.connectedClients.keys()).join(', ')}`);
-
-        ws.on('message', (message) => {
-          try {
-            const data = JSON.parse(message);
-            console.log(`📨 Received from ${userId}: ${data.type}`);
-            this.handleMessage(userId, data);
-          } catch (error) {
-            console.error('❌ Error parsing WebSocket message:', error);
-            this.sendToUser(userId, {
-              type: 'ERROR',
-              message: 'Invalid message format',
-              timestamp: new Date().toISOString()
-            });
-          }
-        });
-
-        ws.on('close', (code, reason) => {
-          console.log(`❌ Flutter app disconnected: ${userId} (Code: ${code}, Reason: ${reason})`);
-          if (userId) {
-            this.connectedClients.delete(userId);
-          }
-        });
-
-        ws.on('error', (error) => {
-          console.error(`❌ WebSocket error for ${userId}:`, error);
-          if (userId) {
-            this.connectedClients.delete(userId);
-          }
-        });
-
-        // ✅ ADDED: Heartbeat/ping to keep connection alive
-        ws.isAlive = true;
-        ws.on('pong', () => {
-          ws.isAlive = true;
-        });
-
-      } catch (error) {
-        console.error('❌ WebSocket connection setup error:', error);
-        ws.close(1011, 'Server error');
-      }
-    });
-
-    // ✅ ADDED: Heartbeat interval to detect dead connections
-    const heartbeatInterval = setInterval(() => {
-      this.wss.clients.forEach((ws) => {
-        if (ws.isAlive === false) {
-          console.log('💔 Terminating dead WebSocket connection');
-          return ws.terminate();
-        }
-        ws.isAlive = false;
-        ws.ping();
-      });
-    }, 30000);
-
-    this.wss.on('close', () => {
-      clearInterval(heartbeatInterval);
-    });
-
-    console.log('✅ WebSocket Server Started Successfully');
-  }
-
-  // ✅ IMPROVED: Send message to specific user with better error handling
-  sendToUser(userId, message) {
+  // Send a match proposal to both driver and passenger
+  async sendMatchProposals(match) {
     try {
-      if (!userId) {
-        console.log('⚠️ Cannot send message: userId is null/undefined');
-        return false;
-      }
-
-      const client = this.connectedClients.get(userId);
+      console.log(`📱 Sending match proposals for match ${match?.matchId}`);
       
-      if (!client) {
-        console.log(`⚠️ User ${userId} not connected in connectedClients map`);
-        console.log(`📊 Currently connected users: ${Array.from(this.connectedClients.keys()).join(', ') || 'None'}`);
+      if (!match || !match.driverId || !match.passengerId) {
+        console.error('❌ Invalid match data for proposals:', match);
+        this.stats.errors++;
         return false;
       }
-
-      if (client.readyState === WebSocket.OPEN) {
-        const messageString = JSON.stringify(message);
-        client.send(messageString);
-        console.log(`📱 Message sent to ${userId}: ${message.type}`);
-        return true;
+      
+      // Send to driver using WebSocketServer's sendMatchProposal
+      const driverSent = this.websocketServer.sendMatchProposal(match);
+      
+      if (driverSent) {
+        console.log(`✅ Match proposal sent to driver ${match.driverId}`);
       } else {
-        console.log(`⚠️ WebSocket not open for ${userId}. State: ${client.readyState}`);
-        // Remove stale connection
-        if (client.readyState === WebSocket.CLOSED || client.readyState === WebSocket.CLOSING) {
-          this.connectedClients.delete(userId);
-          console.log(`🧹 Removed stale connection for ${userId}`);
-        }
-        return false;
+        console.error(`❌ Failed to send match proposal to driver ${match.driverId}`);
       }
+      
+      // For passenger, send a different type of message
+      const passengerSent = this.sendToPassenger(match);
+      
+      if (passengerSent) {
+        console.log(`✅ Match notification sent to passenger ${match.passengerId}`);
+      } else {
+        console.error(`❌ Failed to send match notification to passenger ${match.passengerId}`);
+      }
+      
+      const success = driverSent && passengerSent;
+      if (success) this.stats.notificationsSent += 2;
+      
+      return success;
     } catch (error) {
-      console.error(`❌ Error sending message to ${userId}:`, error);
-      // Remove problematic connection
-      this.connectedClients.delete(userId);
+      console.error('❌ Error sending match proposals:', error);
+      this.stats.errors++;
       return false;
     }
   }
 
-  // ✅ NEW: Send search started notification
-  sendSearchStarted(userId, searchData) {
-    const message = {
-      type: 'SEARCH_STARTED',
-      data: {
-        searchId: searchData.searchId,
-        userId: userId,
-        status: 'searching',
-        rideType: searchData.rideType || 'immediate',
-        pickupName: searchData.pickupName,
-        destinationName: searchData.destinationName,
-        passengerCapacity: searchData.capacity || searchData.passengerCapacity || 1,
-        scheduledTime: searchData.scheduledTime,
-        message: 'Search started successfully',
-        timestamp: new Date().toISOString()
+  // Send notification to passenger about the match
+  sendToPassenger(match) {
+    try {
+      if (!this.websocketServer) {
+        console.error('❌ WebSocket server not available');
+        return false;
       }
-    };
-
-    const sent = this.sendToUser(userId, message);
-    console.log(`🎯 Search started notification sent to ${userId}: ${sent}`);
-    return sent;
+      
+      if (!match || !match.passengerId) {
+        console.error('❌ Cannot send to passenger: passengerId is null/undefined');
+        return false;
+      }
+      
+      const message = {
+        type: 'MATCH_PROPOSAL',
+        data: {
+          matchId: match.matchId,
+          driver: {
+            id: match.driverId,
+            name: match.driverName,
+            vehicleInfo: match.vehicleInfo || {},
+            rating: match.driverRating || 4.5,
+            capacity: match.capacity || 4
+          },
+          route: {
+            pickupName: match.pickupName,
+            destinationName: match.destinationName
+          },
+          fare: {
+            amount: match.estimatedFare || 25.50,
+            currency: 'USD'
+          },
+          expiresAt: new Date(Date.now() + 120000).toISOString(), // 2 minutes
+          timestamp: new Date().toISOString(),
+          message: 'A driver has been found for your route!'
+        }
+      };
+      
+      return this.websocketServer.sendToUser(match.passengerId, message);
+      
+    } catch (error) {
+      console.error('❌ Error sending to passenger:', error);
+      return false;
+    }
   }
 
-  // ✅ ENHANCED: Send match to both driver and passenger
-  sendMatchToUsers(matchData) {
-    const isScheduled = matchData.rideType === 'scheduled' || matchData.isScheduled;
-    const matchType = isScheduled ? 'SCHEDULED_' : '';
+  // Send match proposal to a single user (backup method)
+  sendMatchProposal(userId, data) {
+    if (!this.websocketServer) {
+      console.error('❌ WebSocket server not available');
+      this.stats.errors++;
+      return false;
+    }
     
-    const driverMessage = {
-      type: `${matchType}PASSENGER_FOUND`,
-      data: {
-        matchId: matchData.matchId,
-        passenger: {
-          id: matchData.passengerId,
-          name: matchData.passengerName,
-          similarityScore: matchData.similarityScore,
-          pickupLocation: matchData.pickupLocation,
-          destinationLocation: matchData.destinationLocation,
-          passengerCount: matchData.passengerCount || 1
-        },
-        route: {
-          pickupName: matchData.pickupName,
-          destinationName: matchData.destinationName
-        },
-        matchInfo: {
-          isScheduled: isScheduled,
-          scheduledTime: matchData.scheduledTime,
-          rideType: matchData.rideType || 'immediate',
-          matchQuality: matchData.matchQuality || 'good'
-        },
-        timestamp: matchData.timestamp || new Date().toISOString()
-      }
-    };
-
-    const passengerMessage = {
-      type: `${matchType}DRIVER_FOUND`,
-      data: {
-        matchId: matchData.matchId,
-        driver: {
-          id: matchData.driverId,
-          name: matchData.driverName,
-          similarityScore: matchData.similarityScore,
-          vehicleInfo: matchData.vehicleInfo || {},
-          capacity: matchData.capacity || 4,
-          vehicleType: matchData.vehicleType || 'car'
-        },
-        route: {
-          pickupName: matchData.pickupName,
-          destinationName: matchData.destinationName
-        },
-        matchInfo: {
-          isScheduled: isScheduled,
-          scheduledTime: matchData.scheduledTime,
-          rideType: matchData.rideType || 'immediate',
-          matchQuality: matchData.matchQuality || 'good'
-        },
-        timestamp: matchData.timestamp || new Date().toISOString()
-      }
-    };
-
-    const driverSent = this.sendToUser(matchData.driverId, driverMessage);
-    const passengerSent = this.sendToUser(matchData.passengerId, passengerMessage);
-
-    console.log(`📱 ${isScheduled ? 'SCHEDULED ' : ''}Match sent - Driver: ${driverSent}, Passenger: ${passengerSent}`);
-    return { driverSent, passengerSent };
-  }
-
-  // ✅ NEW: Send match proposal to passenger (CRITICAL - THIS FIXES YOUR ERROR)
-  sendMatchProposal(matchData) {
-    console.log(`📋 Sending match proposal for match: ${matchData.matchId}`);
+    if (!userId) {
+      console.error('❌ Cannot send message: userId is null/undefined');
+      this.stats.errors++;
+      return false;
+    }
     
-    const message = {
+    console.log(`📋 Sending match proposal for match: ${data?.matchId} to user: ${userId}`);
+    
+    // Use the WebSocketServer's sendToUser method
+    const sent = this.websocketServer.sendToUser(userId, {
       type: 'MATCH_PROPOSAL',
-      data: {
-        matchId: matchData.matchId,
-        driver: {
-          id: matchData.driverId,
-          name: matchData.driverName,
-          vehicleInfo: matchData.vehicleInfo || {},
-          rating: matchData.driverRating || 4.5,
-          capacity: matchData.capacity || 4,
-          vehicleType: matchData.vehicleType || 'car',
-          estimatedTime: matchData.estimatedTime || '5-10 mins',
-          phone: matchData.driverPhone || null,
-          licensePlate: matchData.licensePlate || null
-        },
-        route: {
-          pickupLocation: matchData.pickupLocation,
-          destinationLocation: matchData.destinationLocation,
-          pickupName: matchData.pickupName,
-          destinationName: matchData.destinationName,
-          distance: matchData.distance || '2.5 km',
-          estimatedDuration: matchData.estimatedDuration || '15 mins',
-          polyline: matchData.polyline || null
-        },
-        fare: {
-          amount: matchData.fareAmount || 25.50,
-          currency: matchData.currency || 'USD',
-          isEstimated: matchData.isEstimated || true,
-          breakdown: matchData.fareBreakdown || {
-            baseFare: 15.00,
-            distanceCharge: 8.50,
-            timeCharge: 2.00
-          }
-        },
-        matchInfo: {
-          similarityScore: matchData.similarityScore || 85,
-          matchQuality: matchData.matchQuality || 'good',
-          isScheduled: matchData.isScheduled || false,
-          scheduledTime: matchData.scheduledTime,
-          rideType: matchData.rideType || 'immediate',
-          matchAlgorithm: matchData.matchAlgorithm || 'optimal_route'
-        },
-        proposalDetails: {
-          expiresAt: matchData.expiresAt || new Date(Date.now() + 30000).toISOString(), // 30 seconds to accept
-          acceptDeadline: matchData.acceptDeadline || new Date(Date.now() + 30000).toISOString(),
-          requiresAcceptance: true,
-          autoDeclineIfNotAccepted: true
-        },
-        timestamp: new Date().toISOString(),
-        serverTime: new Date().toISOString(),
-        message: 'A driver is available for your route. Please accept within 30 seconds.'
-      }
-    };
-
-    // Send to passenger
-    const sent = this.sendToUser(matchData.passengerId, message);
+      ...data
+    });
     
     if (sent) {
-      console.log(`✅ Match proposal sent to passenger ${matchData.passengerId} for match ${matchData.matchId}`);
-      
-      // Also notify driver that proposal was sent
-      this.sendToUser(matchData.driverId, {
-        type: 'MATCH_PROPOSAL_SENT',
-        data: {
-          matchId: matchData.matchId,
-          passengerId: matchData.passengerId,
-          passengerName: matchData.passengerName,
-          proposalSentAt: new Date().toISOString(),
-          expiresAt: matchData.expiresAt || new Date(Date.now() + 30000).toISOString(),
-          timestamp: new Date().toISOString(),
-          message: 'Match proposal sent to passenger. Waiting for acceptance...'
-        }
-      });
+      this.stats.notificationsSent++;
+      console.log(`✅ Match proposal sent to ${userId}`);
     } else {
-      console.error(`❌ Failed to send match proposal to passenger ${matchData.passengerId}`);
-      
-      // Notify driver of failure
-      this.sendToUser(matchData.driverId, {
-        type: 'MATCH_PROPOSAL_FAILED',
-        data: {
-          matchId: matchData.matchId,
-          passengerId: matchData.passengerId,
-          reason: 'Passenger not connected',
-          timestamp: new Date().toISOString(),
-          message: 'Could not send proposal to passenger'
-        }
-      });
+      console.log(`📭 User ${userId} not connected, notification will be lost`);
+      this.stats.notificationsFailed++;
     }
     
     return sent;
   }
 
-  // ✅ NEW: Send match proposal accepted notification
-  sendMatchProposalAccepted(matchData) {
-    const message = {
-      type: 'MATCH_PROPOSAL_ACCEPTED',
-      data: {
-        matchId: matchData.matchId,
-        acceptedBy: matchData.acceptedBy,
-        acceptedAt: new Date().toISOString(),
-        timestamp: new Date().toISOString(),
-        message: 'Match proposal accepted',
-        nextSteps: 'Proceed to pickup location'
+  // Send match accepted notification
+  sendMatchAccepted(match) {
+    try {
+      if (!match || !match.driverId || !match.passengerId) {
+        console.error('❌ Invalid match data for match accepted');
+        return false;
       }
-    };
-
-    // Notify both parties
-    const driverSent = this.sendToUser(matchData.driverId, message);
-    const passengerSent = this.sendToUser(matchData.passengerId, {
-      type: 'MATCH_PROPOSAL_ACCEPTED_CONFIRMATION',
-      data: {
-        matchId: matchData.matchId,
-        acceptedAt: new Date().toISOString(),
-        driverNotified: driverSent,
-        timestamp: new Date().toISOString(),
-        message: 'You have accepted the match. Driver has been notified.'
+      
+      // Use WebSocketServer's sendMatchProposalAccepted if available
+      if (this.websocketServer.sendMatchProposalAccepted) {
+        return this.websocketServer.sendMatchProposalAccepted(match);
       }
-    });
-
-    console.log(`✅ Match proposal accepted - Driver notified: ${driverSent}, Passenger confirmed: ${passengerSent}`);
-    return { driverSent, passengerSent };
-  }
-
-  // ✅ NEW: Send match proposal declined notification
-  sendMatchProposalDeclined(matchData) {
-    const message = {
-      type: 'MATCH_PROPOSAL_DECLINED',
-      data: {
-        matchId: matchData.matchId,
-        declinedBy: matchData.declinedBy,
-        reason: matchData.reason || 'No reason provided',
-        declinedAt: new Date().toISOString(),
-        timestamp: new Date().toISOString(),
-        message: 'Match proposal declined'
-      }
-    };
-
-    // Notify both parties
-    const driverSent = this.sendToUser(matchData.driverId, message);
-    const passengerSent = this.sendToUser(matchData.passengerId, message);
-
-    console.log(`❌ Match proposal declined - Driver notified: ${driverSent}, Passenger notified: ${passengerSent}`);
-    return { driverSent, passengerSent };
-  }
-
-  // ✅ NEW: Send match proposal expired notification
-  sendMatchProposalExpired(matchData) {
-    const message = {
-      type: 'MATCH_PROPOSAL_EXPIRED',
-      data: {
-        matchId: matchData.matchId,
-        expiredAt: new Date().toISOString(),
-        reason: 'Proposal acceptance time expired',
-        timestamp: new Date().toISOString(),
-        message: 'Match proposal has expired'
-      }
-    };
-
-    // Notify both parties
-    const driverSent = this.sendToUser(matchData.driverId, message);
-    const passengerSent = this.sendToUser(matchData.passengerId, message);
-
-    console.log(`⏰ Match proposal expired - Driver notified: ${driverSent}, Passenger notified: ${passengerSent}`);
-    return { driverSent, passengerSent };
-  }
-
-  // ✅ Send search status updates
-  sendSearchStatusUpdate(userId, statusData) {
-    const message = {
-      type: 'SEARCH_STATUS_UPDATE',
-      data: {
-        searchId: statusData.searchId,
-        status: statusData.status,
-        rideType: statusData.rideType,
-        matchesFound: statusData.matchesFound || 0,
-        timeRemaining: statusData.timeRemaining,
-        scheduledTime: statusData.scheduledTime,
-        pickupName: statusData.pickupName,
-        destinationName: statusData.destinationName,
-        activeProposals: statusData.activeProposals || 0,
-        timestamp: new Date().toISOString()
-      }
-    };
-
-    return this.sendToUser(userId, message);
-  }
-
-  // ✅ Send search timeout notification
-  sendSearchTimeout(userId, timeoutData) {
-    const message = {
-      type: 'SEARCH_TIMEOUT',
-      data: {
-        searchId: timeoutData.searchId,
-        message: timeoutData.message || 'Search automatically stopped',
-        duration: timeoutData.duration,
-        rideType: timeoutData.rideType,
-        matchesFound: timeoutData.matchesFound || 0,
-        proposalsSent: timeoutData.proposalsSent || 0,
-        timestamp: new Date().toISOString()
-      }
-    };
-
-    return this.sendToUser(userId, message);
-  }
-
-  // ✅ Send search stopped notification
-  sendSearchStopped(userId, stopData) {
-    const message = {
-      type: 'SEARCH_STOPPED',
-      data: {
-        searchId: stopData.searchId,
-        message: 'Search stopped successfully',
-        rideType: stopData.rideType,
-        totalMatches: stopData.totalMatches || 0,
-        totalProposals: stopData.totalProposals || 0,
-        stoppedBy: stopData.stoppedBy || 'user',
-        timestamp: new Date().toISOString()
-      }
-    };
-
-    return this.sendToUser(userId, message);
-  }
-
-  // ✅ Send scheduled search activation notification
-  sendScheduledSearchActivated(userId, activationData) {
-    const message = {
-      type: 'SCHEDULED_SEARCH_ACTIVATED',
-      data: {
-        searchId: activationData.searchId,
-        scheduledTime: activationData.scheduledTime,
-        message: 'Your scheduled search is now active and looking for matches',
-        activationTime: new Date().toISOString(),
-        timeUntilRide: activationData.timeUntilRide,
-        timestamp: new Date().toISOString()
-      }
-    };
-
-    return this.sendToUser(userId, message);
-  }
-
-  // ✅ Send match decision updates
-  sendMatchDecisionUpdate(userId, decisionData) {
-    const message = {
-      type: 'MATCH_DECISION_UPDATE',
-      data: {
-        matchId: decisionData.matchId,
-        decision: decisionData.decision,
-        decidedBy: decisionData.decidedBy,
-        timestamp: new Date().toISOString()
-      }
-    };
-
-    return this.sendToUser(userId, message);
-  }
-
-  // ✅ Send ride reminder (for scheduled matches)
-  sendRideReminder(userId, reminderData) {
-    const message = {
-      type: 'RIDE_REMINDER',
-      data: {
-        matchId: reminderData.matchId,
-        scheduledTime: reminderData.scheduledTime,
-        message: `Reminder: Your scheduled ride is coming up soon`,
-        timeUntilRide: reminderData.timeUntilRide,
-        partnerName: reminderData.partnerName,
-        pickupLocation: reminderData.pickupLocation,
-        timestamp: new Date().toISOString()
-      }
-    };
-
-    return this.sendToUser(userId, message);
-  }
-
-  // Handle incoming messages from Flutter
-  handleMessage(userId, data) {
-    console.log(`📨 Handling message from ${userId}: ${data.type}`);
-    
-    switch (data.type) {
-      case 'PING':
-        this.sendToUser(userId, { 
-          type: 'PONG', 
-          timestamp: Date.now(),
-          serverTime: new Date().toISOString()
-        });
-        break;
-        
-      case 'MATCH_DECISION':
-        console.log(`🤝 Match decision from ${userId}:`, data.decision);
-        this.handleMatchDecision(userId, data);
-        break;
-        
-      case 'HEARTBEAT':
-        this.sendToUser(userId, { 
-          type: 'HEARTBEAT_ACK',
-          timestamp: Date.now(),
-          serverTime: new Date().toISOString()
-        });
-        break;
-
-      case 'SEARCH_STATUS_REQUEST':
-        console.log(`🔍 Search status request from ${userId}`);
-        this.handleSearchStatusRequest(userId, data);
-        break;
-
-      case 'ACKNOWLEDGE_MATCH':
-        console.log(`✅ Match acknowledged by ${userId}: ${data.matchId}`);
-        this.handleMatchAcknowledgment(userId, data);
-        break;
-
-      case 'CLIENT_CONNECTED':
-        console.log(`📱 Client connection confirmed by ${userId}`);
-        this.sendToUser(userId, {
-          type: 'CONNECTION_CONFIRMED',
-          message: 'Connection confirmed by server',
-          timestamp: new Date().toISOString()
-        });
-        break;
-        
-      case 'MATCH_PROPOSAL_RESPONSE':
-        console.log(`📋 Match proposal response from ${userId}:`, data.decision);
-        this.handleMatchProposalResponse(userId, data);
-        break;
-        
-      case 'PROPOSAL_STATUS_REQUEST':
-        console.log(`🔍 Proposal status request from ${userId} for match: ${data.matchId}`);
-        this.handleProposalStatusRequest(userId, data);
-        break;
-        
-      default:
-        console.log(`📨 Unknown message type from ${userId}:`, data.type);
-        this.sendToUser(userId, {
-          type: 'UNKNOWN_MESSAGE_TYPE',
-          receivedType: data.type,
-          timestamp: new Date().toISOString(),
-          message: 'Unknown message type received'
-        });
-    }
-  }
-
-  // Handle match decisions
-  handleMatchDecision(userId, data) {
-    const { matchId, decision } = data;
-    console.log(`🤝 Match decision from ${userId}: ${decision} for match ${matchId}`);
-    
-    // Send acknowledgment
-    this.sendToUser(userId, {
-      type: 'MATCH_DECISION_ACK',
-      matchId: matchId,
-      decision: decision,
-      timestamp: new Date().toISOString()
-    });
-  }
-
-  // Handle search status requests
-  handleSearchStatusRequest(userId, data) {
-    this.sendToUser(userId, {
-      type: 'SEARCH_STATUS_RESPONSE',
-      data: {
-        userId: userId,
-        isSearching: false, // This should be calculated from your search state
-        matchesFound: 0,
-        activeProposals: 0,
-        timestamp: new Date().toISOString()
-      }
-    });
-  }
-
-  // Handle match acknowledgments
-  handleMatchAcknowledgment(userId, data) {
-    const { matchId } = data;
-    console.log(`✅ Match ${matchId} acknowledged by ${userId}`);
-    
-    this.sendToUser(userId, {
-      type: 'MATCH_ACKNOWLEDGED',
-      matchId: matchId,
-      timestamp: new Date().toISOString(),
-      message: 'Match acknowledgment received'
-    });
-  }
-
-  // ✅ NEW: Handle match proposal responses
-  handleMatchProposalResponse(userId, data) {
-    const { matchId, decision, reason } = data;
-    console.log(`📋 Match proposal response from ${userId}: ${decision} for match ${matchId}`);
-    
-    // Send immediate acknowledgment
-    this.sendToUser(userId, {
-      type: 'PROPOSAL_RESPONSE_ACK',
-      matchId: matchId,
-      decision: decision,
-      timestamp: new Date().toISOString(),
-      message: `Your ${decision} response has been received`
-    });
-    
-    // You would typically forward this to the other user here
-    // For example, if passenger accepted, notify driver
-    if (decision === 'accept') {
-      console.log(`✅ Passenger ${userId} accepted match ${matchId}`);
-    } else if (decision === 'decline') {
-      console.log(`❌ Passenger ${userId} declined match ${matchId}: ${reason || 'No reason given'}`);
-    }
-  }
-
-  // ✅ NEW: Handle proposal status requests
-  handleProposalStatusRequest(userId, data) {
-    const { matchId } = data;
-    
-    this.sendToUser(userId, {
-      type: 'PROPOSAL_STATUS_RESPONSE',
-      data: {
-        matchId: matchId,
-        status: 'unknown', // You would check your match state here
-        expiresAt: new Date(Date.now() + 15000).toISOString(),
-        timestamp: new Date().toISOString(),
-        message: 'Proposal status response'
-      }
-    });
-  }
-
-  // Helper to calculate days until scheduled ride
-  calculateDaysUntil(scheduledTime) {
-    const now = new Date();
-    const scheduled = new Date(scheduledTime);
-    const diffTime = scheduled.getTime() - now.getTime();
-    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-    return diffDays;
-  }
-
-  // Get connected clients count
-  getConnectedCount() {
-    return this.connectedClients.size;
-  }
-
-  // Get all connected user IDs
-  getConnectedUsers() {
-    return Array.from(this.connectedClients.keys());
-  }
-
-  // Broadcast to all connected clients
-  broadcast(message) {
-    let sentCount = 0;
-    this.connectedClients.forEach((client, userId) => {
-      if (this.sendToUser(userId, message)) {
-        sentCount++;
-      }
-    });
-    console.log(`📢 Broadcast sent to ${sentCount} clients`);
-    return sentCount;
-  }
-
-  // Check if user is connected
-  isUserConnected(userId) {
-    const client = this.connectedClients.get(userId);
-    return client && client.readyState === WebSocket.OPEN;
-  }
-
-  // Get connection statistics
-  getConnectionStats() {
-    return {
-      totalConnections: this.connectedClients.size,
-      connectedUsers: Array.from(this.connectedClients.keys()),
-      timestamp: new Date().toISOString()
-    };
-  }
-
-  // ✅ NEW: Force disconnect user
-  disconnectUser(userId) {
-    const client = this.connectedClients.get(userId);
-    if (client) {
-      client.close(1000, 'Manual disconnect');
-      this.connectedClients.delete(userId);
-      console.log(`🔌 Manually disconnected user: ${userId}`);
-    }
-  }
-
-  // ✅ NEW: Get detailed connection info
-  getDetailedConnectionInfo() {
-    const connections = [];
-    this.connectedClients.forEach((client, userId) => {
-      connections.push({
-        userId: userId,
-        readyState: client.readyState,
-        isAlive: client.isAlive,
-        connectedSince: client.connectedSince || 'unknown'
-      });
-    });
-    return connections;
-  }
-
-  // ✅ NEW: Clean up stale connections
-  cleanupStaleConnections() {
-    const staleUsers = [];
-    this.connectedClients.forEach((client, userId) => {
-      if (client.readyState !== WebSocket.OPEN) {
-        staleUsers.push(userId);
-      }
-    });
-    
-    staleUsers.forEach(userId => {
-      this.connectedClients.delete(userId);
-    });
-    
-    if (staleUsers.length > 0) {
-      console.log(`🧹 Cleaned up ${staleUsers.length} stale connections: ${staleUsers.join(', ')}`);
-    }
-    
-    return staleUsers.length;
-  }
-
-  // ✅ NEW: Get user connection status
-  getUserConnectionStatus(userId) {
-    const client = this.connectedClients.get(userId);
-    if (!client) {
-      return {
-        connected: false,
-        message: 'User not connected'
+      
+      // Fallback: Send notifications manually
+      const driverMessage = {
+        type: 'MATCH_ACCEPTED',
+        data: {
+          matchId: match.matchId,
+          passengerId: match.passengerId,
+          passengerName: match.passengerName,
+          acceptedAt: new Date().toISOString(),
+          message: 'Passenger has accepted the match!'
+        }
       };
+      
+      const passengerMessage = {
+        type: 'MATCH_ACCEPTED',
+        data: {
+          matchId: match.matchId,
+          driverId: match.driverId,
+          driverName: match.driverName,
+          acceptedAt: new Date().toISOString(),
+          message: 'Driver has accepted the match!'
+        }
+      };
+      
+      const driverSent = this.websocketServer.sendToUser(match.driverId, driverMessage);
+      const passengerSent = this.websocketServer.sendToUser(match.passengerId, passengerMessage);
+      
+      console.log(`✅ Match accepted notifications - Driver: ${driverSent}, Passenger: ${passengerSent}`);
+      return driverSent && passengerSent;
+      
+    } catch (error) {
+      console.error('❌ Error sending match accepted:', error);
+      return false;
+    }
+  }
+
+  // Send match expired notification
+  sendMatchExpired(match) {
+    try {
+      if (!match) {
+        console.error('❌ Invalid match data for match expired');
+        return false;
+      }
+      
+      console.log(`📤 Sending match expired for match: ${match.matchId}`);
+      
+      // Use WebSocketServer's sendMatchProposalExpired if available
+      if (this.websocketServer.sendMatchProposalExpired) {
+        return this.websocketServer.sendMatchProposalExpired(match);
+      }
+      
+      // Fallback: Send notifications manually
+      let driverSent = true;
+      let passengerSent = true;
+      
+      if (match.driverId) {
+        driverSent = this.websocketServer.sendToUser(match.driverId, {
+          type: 'MATCH_EXPIRED',
+          data: {
+            matchId: match.matchId,
+            expiredAt: new Date().toISOString(),
+            message: 'Match proposal has expired'
+          }
+        });
+      }
+      
+      if (match.passengerId) {
+        passengerSent = this.websocketServer.sendToUser(match.passengerId, {
+          type: 'MATCH_EXPIRED',
+          data: {
+            matchId: match.matchId,
+            expiredAt: new Date().toISOString(),
+            message: 'Match proposal has expired'
+          }
+        });
+      }
+      
+      console.log(`⏰ Match expired notifications - Driver: ${driverSent}, Passenger: ${passengerSent}`);
+      return driverSent && passengerSent;
+      
+    } catch (error) {
+      console.error('❌ Error sending match expired:', error);
+      return false;
+    }
+  }
+
+  // ==================== SEARCH NOTIFICATIONS ====================
+
+  // Send search stopped notification
+  sendSearchStopped(userId, data) {
+    return this.sendNotification({
+      userId,
+      message: 'Your search has been stopped',
+      type: 'info',
+      data: {
+        event: 'SEARCH_STOPPED',
+        ...data
+      }
+    });
+  }
+
+  // Send search timeout notification
+  sendSearchTimeout(userId, data) {
+    return this.sendNotification({
+      userId,
+      message: 'Your search has timed out',
+      type: 'warning',
+      data: {
+        event: 'SEARCH_TIMEOUT',
+        ...data
+      }
+    });
+  }
+
+  // ==================== GENERAL NOTIFICATIONS ====================
+
+  // Send notification to a user
+  sendNotification(notification) {
+    const { userId, message, type = 'info', data = {} } = notification;
+    
+    if (!userId) {
+      console.error('❌ Cannot send notification: userId is required');
+      this.stats.errors++;
+      return false;
     }
     
+    if (!this.websocketServer) {
+      console.error('❌ WebSocket server not available');
+      return false;
+    }
+    
+    const wsMessage = {
+      type: 'NOTIFICATION',
+      data: {
+        message,
+        notificationType: type,
+        ...data,
+        timestamp: new Date().toISOString()
+      }
+    };
+    
+    const sent = this.websocketServer.sendToUser(userId, wsMessage);
+    
+    if (sent) {
+      console.log(`📱 Notification sent to ${userId}: ${message}`);
+      this.stats.notificationsSent++;
+      return true;
+    } else {
+      console.log(`📭 User ${userId} not connected, notification will be lost`);
+      this.stats.notificationsFailed++;
+      return false;
+    }
+  }
+
+  // ==================== CLEANUP & MAINTENANCE ====================
+
+  // Start cleanup interval (for stats cleanup only)
+  startCleanupInterval(intervalMinutes = 60) {
+    if (this.cleanupInterval) {
+      clearInterval(this.cleanupInterval);
+    }
+    
+    this.cleanupInterval = setInterval(() => {
+      this.cleanupStats();
+    }, intervalMinutes * 60 * 1000);
+    
+    console.log(`📊 Notification stats cleanup started (every ${intervalMinutes} minutes)`);
+    
+    // Also cleanup WebSocket stale connections if available
+    if (this.websocketServer.cleanupStaleConnections) {
+      setInterval(() => {
+        this.websocketServer.cleanupStaleConnections();
+      }, 5 * 60 * 1000); // Every 5 minutes
+    }
+  }
+
+  // Stop cleanup interval
+  stopCleanupInterval() {
+    if (this.cleanupInterval) {
+      clearInterval(this.cleanupInterval);
+      this.cleanupInterval = null;
+      console.log('✅ Notification cleanup interval stopped');
+    }
+  }
+
+  // Cleanup stats (reset counters periodically)
+  cleanupStats() {
+    console.log('🧹 Cleaning up notification stats');
+    this.stats = {
+      notificationsSent: 0,
+      notificationsFailed: 0,
+      errors: 0,
+      lastCleanup: new Date().toISOString()
+    };
+    console.log('✅ Notification stats cleaned up');
+  }
+
+  // ==================== UTILITY METHODS ====================
+
+  // Get connected users
+  getConnectedUsers() {
+    return this.websocketServer ? this.websocketServer.getConnectedUsers() : [];
+  }
+
+  // Check if user is connected - FIXED: Use the WebSocketServer's method
+  isUserConnected(userId) {
+    if (!this.websocketServer) return false;
+    
+    // Use the new method from WebSocketServer
+    if (this.websocketServer.isUserConnected) {
+      return this.websocketServer.isUserConnected(userId);
+    }
+    
+    // Fallback: Check via getConnectedUsers
+    const connectedUsers = this.getConnectedUsers();
+    return connectedUsers.includes(userId);
+  }
+
+  // Get statistics
+  getStats() {
     return {
-      connected: client.readyState === WebSocket.OPEN,
-      readyState: client.readyState,
-      isAlive: client.isAlive,
-      userId: userId,
-      timestamp: new Date().toISOString()
+      ...this.stats,
+      connectedUsers: this.getConnectedUsers().length,
+      websocketServer: this.websocketServer ? 'Available' : 'Not available',
+      status: 'Active'
     };
   }
 }
 
-module.exports = WebSocketServer;
+module.exports = NotificationService;
