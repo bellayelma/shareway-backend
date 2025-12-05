@@ -220,23 +220,38 @@ class FirestoreService {
       throw new Error('driverId is required for saving driver search');
     }
     
+    console.log('💾 Saving driver search in FirestoreService:', {
+      driverId,
+      driverName: driverData.driverName,
+      driverPhone: driverData.driverPhone,
+      driverPhotoUrl: driverData.driverPhotoUrl
+    });
+    
     const searchData = {
       // Basic identification
       driverId: driverId,
       userType: 'driver',
       
-      // Driver profile data
+      // Driver profile data - Ensure these are included
       driverName: driverData.driverName || 'Unknown Driver',
       driverPhone: driverData.driverPhone || 'Not provided',
       driverPhotoUrl: driverData.driverPhotoUrl || '',
       driverRating: driverData.driverRating || 5.0,
+      totalRides: driverData.totalRides || 0,
+      isVerified: driverData.isVerified || false,
+      totalEarnings: driverData.totalEarnings || 0.0,
+      completedRides: driverData.completedRides || 0,
+      isOnline: driverData.isOnline !== undefined ? driverData.isOnline : true,
+      isSearching: driverData.isSearching !== undefined ? driverData.isSearching : true,
       
       // Vehicle information
       vehicleInfo: driverData.vehicleInfo || {
-        model: driverData.vehicleModel || 'Unknown Model',
-        plate: driverData.vehiclePlate || 'Unknown Plate',
-        color: driverData.vehicleColor || 'Unknown Color',
-        type: driverData.vehicleType || 'car'
+        model: 'Car Model',
+        plate: 'ABC123',
+        color: 'Unknown',
+        type: 'car',
+        year: 'Unknown',
+        passengerCapacity: driverData.capacity || 4
       },
       
       // Location data
@@ -252,7 +267,7 @@ class FirestoreService {
       passengerCount: driverData.passengerCount || 0,
       capacity: driverData.capacity || 4,
       vehicleType: driverData.vehicleType || 'car',
-      availableSeats: driverData.capacity || 4,
+      availableSeats: driverData.availableSeats || driverData.capacity || 4,
       currentPassengers: 0,
       
       // Match acceptance fields
@@ -271,16 +286,17 @@ class FirestoreService {
       
       // Search metadata
       rideType: driverData.rideType || 'immediate',
-      scheduledTime: driverData.scheduledTime ? 
-        new Date(driverData.scheduledTime) : null,  // FIXED: Use Date object
+      scheduledTime: driverData.scheduledTime ? new Date(driverData.scheduledTime) : null,
       searchId: driverData.searchId || `driver_search_${driverId}_${Date.now()}`,
       status: 'searching',
       
       // System data
-      createdAt: new Date(),  // FIXED: Use Date object
-      updatedAt: new Date()   // FIXED: Use Date object
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      lastUpdated: Date.now()
     };
     
+    // Queue the write operation
     this.queueWrite(COLLECTIONS.ACTIVE_SEARCHES_DRIVER, driverId, searchData, 'set');
     
     // Clear cache
@@ -288,6 +304,8 @@ class FirestoreService {
     cache.del('active_searches_all');
     
     console.log(`✅ Driver search queued: ${searchData.driverName}`);
+    
+    // Return the data that will be saved
     return searchData;
   }
   
@@ -343,7 +361,8 @@ class FirestoreService {
       
       // System data
       createdAt: new Date(),  // FIXED: Use Date object
-      updatedAt: new Date()   // FIXED: Use Date object
+      updatedAt: new Date(),  // FIXED: Use Date object
+      lastUpdated: Date.now()
     };
     
     this.queueWrite(COLLECTIONS.ACTIVE_SEARCHES_PASSENGER, passengerId, searchData, 'set');
@@ -362,7 +381,8 @@ class FirestoreService {
     this.queueWrite(COLLECTIONS.ACTIVE_MATCHES, matchData.matchId, {
       ...matchData,
       createdAt: new Date(),  // FIXED: Use Date object
-      updatedAt: new Date()   // FIXED: Use Date object
+      updatedAt: new Date(),   // FIXED: Use Date object
+      lastUpdated: Date.now()
     }, 'set');
     
     console.log(`✅ Match queued: ${matchData.matchId}`);
@@ -409,7 +429,8 @@ class FirestoreService {
       tripStatus: 'driver_accepted',
       acceptedAt: new Date(),  // FIXED: Use Date object
       createdAt: new Date(),   // FIXED: Use Date object
-      updatedAt: new Date()    // FIXED: Use Date object
+      updatedAt: new Date(),   // FIXED: Use Date object
+      lastUpdated: Date.now()
     };
     
     this.queueWrite(COLLECTIONS.ACTIVE_RIDES, rideId, rideData, 'set');
