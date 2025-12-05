@@ -184,7 +184,7 @@ class FirestoreService {
     if (options.immediate) {
       await this.db.collection(COLLECTIONS.ACTIVE_SEARCHES_DRIVER).doc(driverId).update({
         ...updates,
-        updatedAt: this.admin.firestore.FieldValue.serverTimestamp()
+        updatedAt: new Date()  // FIXED: Use simple timestamp
       });
       return true;
     } else {
@@ -203,7 +203,7 @@ class FirestoreService {
     if (options.immediate) {
       await this.db.collection(COLLECTIONS.ACTIVE_SEARCHES_PASSENGER).doc(passengerId).update({
         ...updates,
-        updatedAt: this.admin.firestore.FieldValue.serverTimestamp()
+        updatedAt: new Date()  // FIXED: Use simple timestamp
       });
       return true;
     } else {
@@ -272,13 +272,13 @@ class FirestoreService {
       // Search metadata
       rideType: driverData.rideType || 'immediate',
       scheduledTime: driverData.scheduledTime ? 
-        this.admin.firestore.Timestamp.fromDate(new Date(driverData.scheduledTime)) : null,
+        new Date(driverData.scheduledTime) : null,  // FIXED: Use Date object
       searchId: driverData.searchId || `driver_search_${driverId}_${Date.now()}`,
       status: 'searching',
       
       // System data
-      createdAt: this.admin.firestore.FieldValue.serverTimestamp(),
-      updatedAt: this.admin.firestore.FieldValue.serverTimestamp()
+      createdAt: new Date(),  // FIXED: Use Date object
+      updatedAt: new Date()   // FIXED: Use Date object
     };
     
     this.queueWrite(COLLECTIONS.ACTIVE_SEARCHES_DRIVER, driverId, searchData, 'set');
@@ -337,13 +337,13 @@ class FirestoreService {
       // Search metadata
       rideType: passengerData.rideType || 'immediate',
       scheduledTime: passengerData.scheduledTime ? 
-        this.admin.firestore.Timestamp.fromDate(new Date(passengerData.scheduledTime)) : null,
+        new Date(passengerData.scheduledTime) : null,  // FIXED: Use Date object
       searchId: passengerData.searchId || `passenger_search_${passengerId}_${Date.now()}`,
       status: 'searching',
       
       // System data
-      createdAt: this.admin.firestore.FieldValue.serverTimestamp(),
-      updatedAt: this.admin.firestore.FieldValue.serverTimestamp()
+      createdAt: new Date(),  // FIXED: Use Date object
+      updatedAt: new Date()   // FIXED: Use Date object
     };
     
     this.queueWrite(COLLECTIONS.ACTIVE_SEARCHES_PASSENGER, passengerId, searchData, 'set');
@@ -361,8 +361,8 @@ class FirestoreService {
   async saveMatch(matchData) {
     this.queueWrite(COLLECTIONS.ACTIVE_MATCHES, matchData.matchId, {
       ...matchData,
-      createdAt: this.admin.firestore.FieldValue.serverTimestamp(),
-      updatedAt: this.admin.firestore.FieldValue.serverTimestamp()
+      createdAt: new Date(),  // FIXED: Use Date object
+      updatedAt: new Date()   // FIXED: Use Date object
     }, 'set');
     
     console.log(`✅ Match queued: ${matchData.matchId}`);
@@ -407,9 +407,9 @@ class FirestoreService {
       status: 'driver_accepted',
       matchId: driverData.matchId,
       tripStatus: 'driver_accepted',
-      acceptedAt: this.admin.firestore.FieldValue.serverTimestamp(),
-      createdAt: this.admin.firestore.FieldValue.serverTimestamp(),
-      updatedAt: this.admin.firestore.FieldValue.serverTimestamp()
+      acceptedAt: new Date(),  // FIXED: Use Date object
+      createdAt: new Date(),   // FIXED: Use Date object
+      updatedAt: new Date()    // FIXED: Use Date object
     };
     
     this.queueWrite(COLLECTIONS.ACTIVE_RIDES, rideId, rideData, 'set');
