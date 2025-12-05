@@ -18,7 +18,7 @@ const WebSocketServer = require('./websocketServer');
 // Middlewares
 const requestLogger = require('./middlewares/logging');
 
-// Controllers
+// Controller imports (NOT initialized yet)
 const matchController = require('./controllers/matchController');
 const searchController = require('./controllers/searchController');
 const driverController = require('./controllers/driverController');
@@ -51,21 +51,33 @@ let websocketServer = null;
 // Services that need WebSocket
 let searchService, rideService, matchingService, scheduledService;
 
-// Services container
+// Services container (will be populated later)
 const services = {
   db,
   admin,
   constants,
   firestoreService
+  // websocketServer, searchService, rideService, matchingService, scheduledService
+  // will be added AFTER server starts
 };
 
-// Initialize controllers with services (partial for now)
-matchController.init(services);
+// Register routes WITHOUT controllers (register route objects directly)
+const routes = {
+  match: matchController.router,
+  search: searchController.router,
+  driver: driverController.router,
+  passenger: passengerController.router,
+  ride: rideController.router
+};
 
-// Register routes
-app.use('/api/match', matchController.router);
+// Register all routes (controllers will be initialized later)
+app.use('/api/match', routes.match);
+app.use('/api/search', routes.search);
+app.use('/api/driver', routes.driver);
+app.use('/api/passenger', routes.passenger);
+app.use('/api/ride', routes.ride);
 
-// Health endpoint
+// Health endpoint (no controller needed)
 app.get('/api/health', (req, res) => {
   res.json({
     success: true,
@@ -83,7 +95,7 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-// Debug endpoint
+// Debug endpoint (no controller needed)
 app.get('/api/debug/status', async (req, res) => {
   try {
     const firestoreStats = firestoreService.getStats();
@@ -140,27 +152,29 @@ if (require.main === module) {
   searchService = new SearchService(firestoreService, websocketServer);
   rideService = new RideService(firestoreService, websocketServer);
   matchingService = new MatchingService(firestoreService, searchService, websocketServer);
-  scheduledService = new ScheduledService(firestoreService, websocketServer, admin); // PASS ADMIN HERE
+  scheduledService = new ScheduledService(firestoreService, websocketServer, admin);
   
-  // Update services container
+  // Update services container with COMPLETE services
   services.websocketServer = websocketServer;
   services.searchService = searchService;
   services.rideService = rideService;
   services.matchingService = matchingService;
   services.scheduledService = scheduledService;
   
-  // Re-initialize controllers with complete services
+  // NOW initialize ALL controllers with COMPLETE services
+  console.log('🔧 Initializing controllers with all services...');
   matchController.init(services);
   searchController.init(services);
   driverController.init(services);
   passengerController.init(services);
   rideController.init(services);
+  console.log('✅ All controllers initialized');
   
-  // Register all routes
-  app.use('/api/search', searchController.router);
-  app.use('/api/driver', driverController.router);
-  app.use('/api/passenger', passengerController.router);
-  app.use('/api/ride', rideController.router);
+  // Log what's in driverController
+  console.log('🔍 DriverController services check:');
+  console.log('- Has firestoreService:', driverController.firestoreService !== undefined);
+  console.log('- Has websocketServer:', driverController.websocketServer !== undefined);
+  console.log('- Has searchService:', driverController.searchService !== undefined);
   
   // Start services
   matchingService.start();
