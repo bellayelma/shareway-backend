@@ -1,8 +1,8 @@
 // utils/schedulerouteMatching.js - HYBRID APPROACH FOR BILLING MINIMIZATION
-const admin = require('firebase-admin');
+const admin = require('firebase-admin'); // CHANGE THIS LINE
 
 // TEST MODE - Set to true for immediate testing
-const TEST_MODE = true;
+const TEST_MODE = process.env.TEST_MODE === 'true';
 const TEST_ACTIVATION_BUFFER = 1 * 60 * 1000; // 1 minute for testing
 
 // Memory storage for ACTIVE MATCHING (cost optimization)
@@ -47,15 +47,14 @@ const initializeScheduledSearch = async (db, searchData) => {
     // 🎯 ALSO store in memory for FAST MATCHING (cost optimization)
     scheduledSearches.set(userId, scheduledSearch);
     
-    console.log(`📅 INITIALIZED scheduled search: ${scheduledSearch.driverName || scheduledSearch.passengerName}`);
-    console.log(`   - User: ${userId} (${userType})`);
-    console.log(`   - Scheduled: ${scheduledSearch.scheduledTime.toISOString()}`);
-    console.log(`   - Storage: Firestore (persistence) + Memory (matching)`);
-    console.log(`   - TEST MODE: ${TEST_MODE ? 'ACTIVE - Auto-activating!' : 'INACTIVE'}`);
+    console.log(`📅 INITIALIZED scheduled search for user: ${userId} (${userType})`);
+    console.log(`   Scheduled: ${scheduledSearch.scheduledTime.toISOString()}`);
+    console.log(`   Storage: Firestore + Memory`);
+    console.log(`   Test Mode: ${TEST_MODE}`);
     
     // 🎯 CRITICAL FIX: Auto-activate immediately in test mode
     if (TEST_MODE) {
-      console.log(`   🚨 TEST MODE: Auto-activating scheduled search immediately!`);
+      console.log(`   🚨 TEST MODE: Auto-activating immediately!`);
       scheduledSearch.status = 'activating';
       scheduledSearch.lastUpdated = Date.now();
       scheduledSearch.forceActivated = true;
@@ -82,7 +81,7 @@ const saveScheduledSearchToFirestore = async (db, searchData) => {
     };
 
     await db.collection(SCHEDULED_SEARCHES_COLLECTION).doc(searchData.searchId).set(searchDoc);
-    console.log(`✅ Scheduled search saved to Firestore: ${searchData.searchId}`);
+    console.log(`✅ Saved scheduled search to Firestore: ${searchData.searchId}`);
     return true;
   } catch (error) {
     console.error('❌ Error saving scheduled search to Firestore:', error);
@@ -95,11 +94,9 @@ const getScheduledSearchFromFirestore = async (db, userId) => {
   try {
     console.log(`🔍 Reading scheduled search from Firestore for user: ${userId}`);
     
+    // Use simpler query without composite index requirements
     const snapshot = await db.collection(SCHEDULED_SEARCHES_COLLECTION)
       .where('userId', '==', userId)
-      .where('status', 'in', ['scheduled', 'activating', 'active'])
-      .orderBy('scheduledTime', 'desc')
-      .limit(1)
       .get();
 
     if (snapshot.empty) {
@@ -107,15 +104,31 @@ const getScheduledSearchFromFirestore = async (db, userId) => {
       return null;
     }
 
-    const searchData = snapshot.docs[0].data();
+    // Filter in memory to avoid composite index requirement
+    const validSearches = snapshot.docs
+      .map(doc => {
+        const data = doc.data();
+        return {
+          ...data,
+          scheduledTime: data.scheduledTime.toDate(),
+          exists: true,
+          source: 'firestore'
+        };
+      })
+      .filter(search => 
+        ['scheduled', 'activating', 'active'].includes(search.status)
+      )
+      .sort((a, b) => b.scheduledTime - a.scheduledTime); // Sort by most recent
+
+    if (validSearches.length === 0) {
+      console.log(`📭 No active scheduled searches for user: ${userId}`);
+      return null;
+    }
+
+    const searchData = validSearches[0];
     console.log(`✅ Found scheduled search in Firestore: ${searchData.searchId}`);
     
-    return {
-      ...searchData,
-      scheduledTime: searchData.scheduledTime.toDate(),
-      exists: true,
-      source: 'firestore'
-    };
+    return searchData;
   } catch (error) {
     console.error('❌ Error reading scheduled search from Firestore:', error);
     return null;
@@ -144,7 +157,7 @@ const getScheduledSearchStatus = async (db, userId) => {
     // First check memory (fastest, free)
     const memorySearch = scheduledSearches.get(userId);
     if (memorySearch) {
-      console.log(`⚡ Using memory for status check: ${userId}`);
+      console.log(`⚡ Status check from memory: ${userId}`);
       return formatSearchStatus(memorySearch, 'memory');
     }
 
@@ -231,22 +244,32 @@ const updateScheduledSearchStatus = async (db, userId, newStatus) => {
   }
 };
 
-// 🎯 FOR SERVER STARTUP: Load active searches from Firestore to memory
+// 🎯 FIXED: Load scheduled searches from Firestore to memory (no composite index needed)
 const loadScheduledSearchesToMemory = async (db) => {
   try {
     console.log('🔄 Loading scheduled searches from Firestore to memory...');
     
+    // Use simpler query without composite index
     const snapshot = await db.collection(SCHEDULED_SEARCHES_COLLECTION)
       .where('status', 'in', ['scheduled', 'activating', 'active'])
-      .where('scheduledTime', '>=', admin.firestore.Timestamp.fromDate(new Date()))
       .get();
 
     let loadedCount = 0;
+    const now = new Date();
+    
     snapshot.forEach(doc => {
       const searchData = doc.data();
+      
       // Convert Firestore Timestamp to Date
       searchData.scheduledTime = searchData.scheduledTime.toDate();
       searchData.createdAt = searchData.createdAt.toDate();
+      
+      // Filter out expired searches (more than 2 hours past scheduled time)
+      const timeUntilRide = searchData.scheduledTime.getTime() - now.getTime();
+      if (timeUntilRide < -120 * 60 * 1000) {
+        console.log(`🗑️ Skipping expired search: ${searchData.searchId}`);
+        return; // Skip expired searches
+      }
       
       scheduledSearches.set(searchData.userId, searchData);
       loadedCount++;
@@ -256,6 +279,55 @@ const loadScheduledSearchesToMemory = async (db) => {
     return loadedCount;
   } catch (error) {
     console.error('❌ Error loading scheduled searches to memory:', error);
+    
+    // Provide helpful error message
+    if (error.code === 9) {
+      console.error('⚠️ Firestore composite index is building or missing.');
+      console.error('⚠️ To create the index, visit the link in the error message or run:');
+      console.error('⚠️ firebase deploy --only firestore:indexes');
+      console.error('⚠️ For now, using fallback loading method...');
+      
+      // Fallback: Load all and filter in memory
+      return await fallbackLoadScheduledSearches(db);
+    }
+    
+    return 0;
+  }
+};
+
+// Fallback method for loading scheduled searches
+const fallbackLoadScheduledSearches = async (db) => {
+  try {
+    console.log('🔄 Using fallback method to load scheduled searches...');
+    
+    const snapshot = await db.collection(SCHEDULED_SEARCHES_COLLECTION).get();
+    
+    let loadedCount = 0;
+    const now = new Date();
+    
+    snapshot.forEach(doc => {
+      const searchData = doc.data();
+      
+      // Convert Firestore Timestamp to Date
+      searchData.scheduledTime = searchData.scheduledTime.toDate();
+      searchData.createdAt = searchData.createdAt.toDate();
+      
+      // Filter in memory
+      const timeUntilRide = searchData.scheduledTime.getTime() - now.getTime();
+      const isActiveStatus = ['scheduled', 'activating', 'active'].includes(searchData.status);
+      const isNotExpired = timeUntilRide >= -120 * 60 * 1000; // Not more than 2 hours past
+      const isFutureOrNearFuture = timeUntilRide >= -30 * 60 * 1000; // Within 30 minutes past
+      
+      if (isActiveStatus && isNotExpired) {
+        scheduledSearches.set(searchData.userId, searchData);
+        loadedCount++;
+      }
+    });
+
+    console.log(`✅ Fallback loaded ${loadedCount} scheduled searches`);
+    return loadedCount;
+  } catch (error) {
+    console.error('❌ Error in fallback loading:', error);
     return 0;
   }
 };
@@ -266,8 +338,8 @@ const checkScheduledSearchActivation = async (db) => {
   let activatedCount = 0;
   let expiredCount = 0;
 
-  console.log(`\n🕒 Checking scheduled searches activation... (Total: ${scheduledSearches.size})`);
-  console.log(`🧪 TEST MODE: ${TEST_MODE ? 'ACTIVE' : 'INACTIVE'}`);
+  console.log(`\n🕒 Checking scheduled searches activation (${scheduledSearches.size} total)`);
+  console.log(`🧪 Test Mode: ${TEST_MODE}`);
 
   for (const [userId, search] of scheduledSearches.entries()) {
     const timeUntilRide = search.scheduledTime.getTime() - now.getTime();
@@ -276,19 +348,16 @@ const checkScheduledSearchActivation = async (db) => {
     const activationBuffer = TEST_MODE ? TEST_ACTIVATION_BUFFER : ACTIVATION_BUFFER;
     const timeUntilActivation = timeUntilRide - activationBuffer;
     
-    console.log(`   - ${search.driverName || search.passengerName}:`);
+    console.log(`   ${search.userType}: ${search.driverName || search.passengerName}`);
     console.log(`     Status: ${search.status}`);
-    console.log(`     Scheduled: ${search.scheduledTime.toISOString()}`);
-    console.log(`     Time until ride: ${Math.round(timeUntilRide / 60000)}min`);
     console.log(`     Time until activation: ${Math.round(timeUntilActivation / 60000)}min`);
-    console.log(`     TEST MODE: ${TEST_MODE ? 'ACTIVE' : 'INACTIVE'}`);
 
     // Check if search should be expired (more than 2 hours past scheduled time)
     if (timeUntilRide < -120 * 60 * 1000) {
       search.status = 'expired';
       await updateScheduledSearchStatus(db, userId, 'expired');
       expiredCount++;
-      console.log(`     ❌ EXPIRED: More than 2 hours past scheduled time`);
+      console.log(`     ❌ EXPIRED: More than 2 hours past`);
       continue;
     }
 
@@ -299,7 +368,7 @@ const checkScheduledSearchActivation = async (db) => {
       search.forceActivated = true;
       await updateScheduledSearchStatus(db, userId, 'activating');
       activatedCount++;
-      console.log(`     🚨 TEST MODE: Auto-activating immediately!`);
+      console.log(`     🚨 TEST MODE: Auto-activating!`);
       continue;
     }
 
@@ -309,19 +378,19 @@ const checkScheduledSearchActivation = async (db) => {
       search.lastUpdated = Date.now();
       await updateScheduledSearchStatus(db, userId, 'activating');
       activatedCount++;
-      console.log(`     🔄 ACTIVATING: Within activation buffer of scheduled time`);
+      console.log(`     🔄 ACTIVATING: Within activation buffer`);
     }
 
     // Check if search should be fully active (within 5 minutes of scheduled time)
     if (timeUntilRide <= 5 * 60 * 1000 && search.status === 'activating') {
       search.status = 'active';
       await updateScheduledSearchStatus(db, userId, 'active');
-      console.log(`     ✅ ACTIVE: Within 5 minutes of scheduled time`);
+      console.log(`     ✅ ACTIVE: Within 5 minutes of ride`);
     }
   }
 
   if (activatedCount > 0) {
-    console.log(`\n🎯 Activated ${activatedCount} scheduled searches for matching`);
+    console.log(`\n🎯 Activated ${activatedCount} scheduled searches`);
   }
   if (expiredCount > 0) {
     console.log(`\n🧹 Cleaned ${expiredCount} expired scheduled searches`);
@@ -344,16 +413,16 @@ const getScheduledSearchesForMatching = (userType) => {
         (search.status === 'activating' || search.status === 'active');
       
       if (shouldMatch) {
-        console.log(`   ✅ ${search.driverName || search.passengerName}: ${search.status} - READY FOR MATCHING`);
+        console.log(`   ✅ ${search.userType}: ${search.driverName || search.passengerName} - READY`);
         if (search.forceActivated) {
-          console.log(`      🚨 FORCE ACTIVATED FOR TESTING`);
+          console.log(`      🚨 FORCE ACTIVATED`);
         }
       }
       
       return shouldMatch;
     });
 
-  console.log(`📊 Scheduled ${userType}s ready for matching: ${matchingSearches.length}`);
+  console.log(`📊 Scheduled ${userType}s ready: ${matchingSearches.length}`);
   
   if (matchingSearches.length === 0 && scheduledSearches.size > 0) {
     console.log(`   ⚠️  No ${userType}s ready - checking status:`);
@@ -375,7 +444,7 @@ const getScheduledSearchesForMatching = (userType) => {
 const performScheduledMatching = async (db) => {
   try {
     console.log(`\n📅 ===== SCHEDULED MATCHING CYCLE START =====`);
-    console.log(`🧪 TEST MODE: ${TEST_MODE ? 'ACTIVE - Matching immediately!' : 'INACTIVE'}`);
+    console.log(`🧪 Test Mode: ${TEST_MODE}`);
     
     // First, check and update activation status
     const activationResult = await checkScheduledSearchActivation(db);
@@ -389,9 +458,6 @@ const performScheduledMatching = async (db) => {
     if (scheduledDrivers.length === 0 || scheduledPassengers.length === 0) {
       const reason = scheduledDrivers.length === 0 ? 'No drivers' : 'No passengers';
       console.log(`💤 No scheduled matches possible: ${reason}`);
-      console.log(`   Total scheduled searches: ${scheduledSearches.size}`);
-      console.log(`   - Drivers: ${Array.from(scheduledSearches.values()).filter(s => s.userType === 'driver').length}`);
-      console.log(`   - Passengers: ${Array.from(scheduledSearches.values()).filter(s => s.userType === 'passenger').length}`);
       console.log(`📅 ===== SCHEDULED MATCHING CYCLE END =====\n`);
       return { matchesCreated: 0, reason };
     }
@@ -409,11 +475,11 @@ const performScheduledMatching = async (db) => {
 
         // Enhanced validation
         if (!driver.routePoints || driver.routePoints.length === 0) {
-          console.log(`⚠️ Skipping scheduled driver ${driver.driverName} - no route points`);
+          console.log(`⚠️ Skipping driver ${driver.driverName} - no route points`);
           continue;
         }
         if (!passenger.routePoints || passenger.routePoints.length === 0) {
-          console.log(`⚠️ Skipping scheduled passenger ${passenger.passengerName} - no route points`);
+          console.log(`⚠️ Skipping passenger ${passenger.passengerName} - no route points`);
           continue;
         }
 
@@ -435,7 +501,7 @@ const performScheduledMatching = async (db) => {
           }
         );
 
-        console.log(`🔍 SCHEDULED ${driver.driverName} ↔ ${passenger.passengerName}: Score=${similarity.toFixed(3)}`);
+        console.log(`🔍 ${driver.driverName} ↔ ${passenger.passengerName}: Score=${similarity.toFixed(3)}`);
 
         // 🎯 LOWER THRESHOLD FOR TESTING - match even with lower similarity
         const matchThreshold = TEST_MODE ? 0.005 : 0.01;
@@ -471,7 +537,7 @@ const performScheduledMatching = async (db) => {
             if (created) {
               matchesCreated++;
               scheduledMatches.set(matchKey, Date.now());
-              console.log(`🎉 SCHEDULED MATCH CREATED: ${driver.driverName} ↔ ${passenger.passengerName} (Score: ${similarity.toFixed(3)})`);
+              console.log(`🎉 SCHEDULED MATCH: ${driver.driverName} ↔ ${passenger.passengerName} (${similarity.toFixed(3)})`);
               
               // In test mode, also create immediate match for testing
               if (TEST_MODE) {
@@ -479,14 +545,14 @@ const performScheduledMatching = async (db) => {
               }
             }
           } else {
-            console.log(`🔁 Skipping duplicate scheduled match: ${matchKey}`);
+            console.log(`🔁 Skipping duplicate: ${matchKey}`);
           }
         } else {
-          console.log(`📉 Scheduled similarity too low: ${similarity.toFixed(3)} (threshold: ${matchThreshold})`);
+          console.log(`📉 Similarity too low: ${similarity.toFixed(3)} (threshold: ${matchThreshold})`);
           
           // 🎯 TEST MODE: Force create match even with low similarity
           if (TEST_MODE && similarity > 0.001) {
-            console.log(`🧪 TEST MODE: Force creating match despite low similarity`);
+            console.log(`🧪 TEST MODE: Force creating match`);
             const forceMatch = await forceCreateScheduledMatch(db, driver, passenger, similarity);
             if (forceMatch) {
               matchesCreated++;
@@ -496,7 +562,7 @@ const performScheduledMatching = async (db) => {
       }
     }
 
-    console.log(`📱 Created ${matchesCreated} scheduled matches this cycle`);
+    console.log(`📱 Created ${matchesCreated} scheduled matches`);
     console.log(`📅 ===== SCHEDULED MATCHING CYCLE END =====\n`);
 
     return { matchesCreated, activationResult };
@@ -542,7 +608,7 @@ const forceCreateScheduledMatch = async (db, driver, passenger, similarity) => {
       createdAt: admin.firestore.FieldValue.serverTimestamp()
     });
 
-    console.log(`🧪 FORCE CREATED SCHEDULED MATCH: ${driver.driverName} ↔ ${passenger.passengerName}`);
+    console.log(`🧪 FORCE CREATED: ${driver.driverName} ↔ ${passenger.passengerName}`);
     return matchData;
   } catch (error) {
     console.error('❌ Error force creating scheduled match:', error);
@@ -580,7 +646,7 @@ const createImmediateMatchFromScheduled = async (db, driver, passenger, similari
       createdAt: admin.firestore.FieldValue.serverTimestamp()
     });
 
-    console.log(`🧪 TEST: Created immediate match from scheduled: ${driver.driverName} ↔ ${passenger.passengerName}`);
+    console.log(`🧪 TEST: Created immediate match`);
     return true;
   } catch (error) {
     console.error('❌ Error creating test immediate match:', error);
@@ -603,9 +669,6 @@ const createScheduledMatch = async (db, matchData) => {
     await db.collection(SCHEDULED_MATCHES_COLLECTION).doc(matchData.matchId).set(scheduledMatchData);
     console.log(`✅ Scheduled match stored: ${matchData.driverName} ↔ ${matchData.passengerName}`);
 
-    // Send scheduled match notification
-    await sendScheduledMatchNotification(db, matchData);
-
     return true;
   } catch (error) {
     console.error('❌ Error creating scheduled match:', error);
@@ -613,121 +676,40 @@ const createScheduledMatch = async (db, matchData) => {
   }
 };
 
-// Send notification for scheduled match
-const sendScheduledMatchNotification = async (db, matchData) => {
-  try {
-    const batch = db.batch();
-    const timestamp = admin.firestore.FieldValue.serverTimestamp();
-
-    // Format scheduled time for display
-    const scheduledTime = new Date(matchData.scheduledTime);
-    const timeString = scheduledTime.toLocaleString();
-
-    // Driver notification
-    const driverNotificationRef = db.collection('notifications').doc();
-    batch.set(driverNotificationRef, {
-      type: 'scheduled_match_proposal',
-      userId: matchData.driverId,
-      title: '📅 Scheduled Passenger Found!',
-      message: `Passenger ${matchData.passengerName} scheduled for ${timeString}. Route similarity: ${(matchData.similarityScore * 100).toFixed(1)}%`,
-      read: false,
-      createdAt: timestamp,
-      data: {
-        matchId: matchData.matchId,
-        matchType: 'scheduled',
-        scheduledTime: matchData.scheduledTime,
-        driverId: matchData.driverId,
-        passengerId: matchData.passengerId,
-        similarityScore: matchData.similarityScore,
-        testMode: TEST_MODE
-      }
-    });
-
-    // Passenger notification
-    const passengerNotificationRef = db.collection('notifications').doc();
-    batch.set(passengerNotificationRef, {
-      type: 'scheduled_match_proposal',
-      userId: matchData.passengerId,
-      title: '📅 Scheduled Driver Found!',
-      message: `Driver ${matchData.driverName} scheduled for ${timeString}. Route similarity: ${(matchData.similarityScore * 100).toFixed(1)}%`,
-      read: false,
-      createdAt: timestamp,
-      data: {
-        matchId: matchData.matchId,
-        matchType: 'scheduled',
-        scheduledTime: matchData.scheduledTime,
-        driverId: matchData.driverId,
-        passengerId: matchData.passengerId,
-        similarityScore: matchData.similarityScore,
-        testMode: TEST_MODE
-      }
-    });
-
-    await batch.commit();
-    console.log(`✅ Scheduled match notifications sent for: ${matchData.matchId}`);
-
-    // Update match with notification status
-    await db.collection(SCHEDULED_MATCHES_COLLECTION).doc(matchData.matchId).update({
-      notificationSent: true,
-      notifiedAt: timestamp
-    });
-
-    return true;
-  } catch (error) {
-    console.error('❌ Error sending scheduled match notifications:', error);
-    return false;
-  }
-};
-
-// 🎯 NEW: Force activate all scheduled searches for testing
-const forceActivateAllScheduledSearches = async (db) => {
-  let activatedCount = 0;
-  
-  for (const [userId, search] of scheduledSearches.entries()) {
-    if (search.status === 'scheduled') {
-      search.status = 'activating';
-      search.lastUpdated = Date.now();
-      search.forceActivated = true;
-      await updateScheduledSearchStatus(db, userId, 'activating');
-      activatedCount++;
-      console.log(`🚨 FORCE ACTIVATED: ${search.driverName || search.passengerName}`);
-    }
-  }
-  
-  console.log(`🎯 Force activated ${activatedCount} scheduled searches`);
-  return activatedCount;
-};
-
-// Get statistics with test mode info
-const getScheduledMatchingStats = () => {
-  const stats = {
-    totalScheduledSearches: scheduledSearches.size,
-    scheduledDrivers: Array.from(scheduledSearches.values()).filter(s => s.userType === 'driver').length,
-    scheduledPassengers: Array.from(scheduledSearches.values()).filter(s => s.userType === 'passenger').length,
-    byStatus: {
-      scheduled: Array.from(scheduledSearches.values()).filter(s => s.status === 'scheduled').length,
-      activating: Array.from(scheduledSearches.values()).filter(s => s.status === 'activating').length,
-      active: Array.from(scheduledSearches.values()).filter(s => s.status === 'active').length,
-      expired: Array.from(scheduledSearches.values()).filter(s => s.status === 'expired').length
-    },
-    totalScheduledMatches: scheduledMatches.size,
-    testMode: TEST_MODE,
-    readyForMatching: Array.from(scheduledSearches.values()).filter(s => 
-      s.status === 'activating' || s.status === 'active'
-    ).length,
-    forceActivated: Array.from(scheduledSearches.values()).filter(s => 
-      s.forceActivated
-    ).length,
-    storageStrategy: 'HYBRID (Firestore persistence + Memory matching)',
-    costOptimization: 'Matching uses memory (free), schedule checks use Firestore (cheap)'
-  };
-
-  return stats;
-};
-
 // Import necessary utility functions from routeMatching
 const calculateRouteSimilarity = require('./routeMatching').calculateRouteSimilarity;
 const hasCapacity = require('./routeMatching').hasCapacity;
+
+// Helper function for cleaner logs
+const log = {
+  info: (message, data = null) => {
+    const timestamp = new Date().toISOString().substr(11, 8);
+    console.log(`[${timestamp}] ℹ️  ${message}`);
+    if (data) console.log(`   ${JSON.stringify(data, null, 2)}`);
+  },
+  success: (message, data = null) => {
+    const timestamp = new Date().toISOString().substr(11, 8);
+    console.log(`[${timestamp}] ✅ ${message}`);
+    if (data) console.log(`   ${JSON.stringify(data, null, 2)}`);
+  },
+  error: (message, error = null) => {
+    const timestamp = new Date().toISOString().substr(11, 8);
+    console.log(`[${timestamp}] ❌ ${message}`);
+    if (error) console.log(`   Error: ${error.message || error}`);
+  },
+  warning: (message, data = null) => {
+    const timestamp = new Date().toISOString().substr(11, 8);
+    console.log(`[${timestamp}] ⚠️  ${message}`);
+    if (data) console.log(`   ${JSON.stringify(data, null, 2)}`);
+  },
+  debug: (message, data = null) => {
+    if (process.env.DEBUG === 'true') {
+      const timestamp = new Date().toISOString().substr(11, 8);
+      console.log(`[${timestamp}] 🐛 ${message}`);
+      if (data) console.log(`   ${JSON.stringify(data, null, 2)}`);
+    }
+  }
+};
 
 module.exports = {
   // Core scheduled search management
@@ -740,34 +722,68 @@ module.exports = {
   saveScheduledSearchToFirestore,
   getScheduledSearchFromFirestore,
   getScheduledSearchFromMemory,
-  getScheduledSearchStatus, // Updated hybrid version
+  getScheduledSearchStatus,
   updateScheduledSearchStatus,
   loadScheduledSearchesToMemory,
-  
-  // Conversion to active searches
-  convertScheduledToActive,
-  getScheduledSearchesForConversion,
+  fallbackLoadScheduledSearches, // Export fallback method
   
   // Match management
   createScheduledMatch,
-  sendScheduledMatchNotification,
-  
-  // Search management
-  removeScheduledSearch,
+  forceCreateScheduledMatch,
+  createImmediateMatchFromScheduled,
   
   // TESTING FUNCTIONS
-  forceActivateAllScheduledSearches,
-  forceCreateScheduledMatch,
+  forceActivateAllScheduledSearches: async (db) => {
+    let activatedCount = 0;
+    
+    for (const [userId, search] of scheduledSearches.entries()) {
+      if (search.status === 'scheduled') {
+        search.status = 'activating';
+        search.lastUpdated = Date.now();
+        search.forceActivated = true;
+        await updateScheduledSearchStatus(db, userId, 'activating');
+        activatedCount++;
+      }
+    }
+    
+    log.success(`Force activated ${activatedCount} scheduled searches`);
+    return activatedCount;
+  },
   
   // Maintenance
-  cleanupOldScheduledMatches,
+  cleanupOldScheduledMatches: () => {}, // Placeholder
   
   // Monitoring
-  getScheduledMatchingStats,
+  getScheduledMatchingStats: () => {
+    return {
+      totalScheduledSearches: scheduledSearches.size,
+      scheduledDrivers: Array.from(scheduledSearches.values()).filter(s => s.userType === 'driver').length,
+      scheduledPassengers: Array.from(scheduledSearches.values()).filter(s => s.userType === 'passenger').length,
+      byStatus: {
+        scheduled: Array.from(scheduledSearches.values()).filter(s => s.status === 'scheduled').length,
+        activating: Array.from(scheduledSearches.values()).filter(s => s.status === 'activating').length,
+        active: Array.from(scheduledSearches.values()).filter(s => s.status === 'active').length,
+        expired: Array.from(scheduledSearches.values()).filter(s => s.status === 'expired').length
+      },
+      totalScheduledMatches: scheduledMatches.size,
+      testMode: TEST_MODE,
+      readyForMatching: Array.from(scheduledSearches.values()).filter(s => 
+        s.status === 'activating' || s.status === 'active'
+      ).length,
+      forceActivated: Array.from(scheduledSearches.values()).filter(s => 
+        s.forceActivated
+      ).length,
+      storageStrategy: 'HYBRID (Firestore persistence + Memory matching)',
+      costOptimization: 'Matching uses memory (free), schedule checks use Firestore (cheap)'
+    };
+  },
   
   // Data access (for debugging)
   getAllScheduledSearches: () => Array.from(scheduledSearches.values()),
   getAllScheduledMatches: () => Array.from(scheduledMatches.values()),
+  
+  // Utility functions
+  log, // Export log utility
   
   // Test mode flag
   TEST_MODE
