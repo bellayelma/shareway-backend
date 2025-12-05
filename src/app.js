@@ -18,7 +18,7 @@ const WebSocketServer = require('./websocketServer');
 // Middlewares
 const requestLogger = require('./middlewares/logging');
 
-// Controller imports (NOT initialized yet)
+// Controller imports
 const matchController = require('./controllers/matchController');
 const searchController = require('./controllers/searchController');
 const driverController = require('./controllers/driverController');
@@ -57,27 +57,16 @@ const services = {
   admin,
   constants,
   firestoreService
-  // websocketServer, searchService, rideService, matchingService, scheduledService
-  // will be added AFTER server starts
 };
 
-// Register routes WITHOUT controllers (register route objects directly)
-const routes = {
-  match: matchController.router,
-  search: searchController.router,
-  driver: driverController.router,
-  passenger: passengerController.router,
-  ride: rideController.router
-};
+// Register routes
+app.use('/api/match', matchController.router);
+app.use('/api/search', searchController.router);
+app.use('/api/driver', driverController.router);
+app.use('/api/passenger', passengerController.router);
+app.use('/api/ride', rideController.router);
 
-// Register all routes (controllers will be initialized later)
-app.use('/api/match', routes.match);
-app.use('/api/search', routes.search);
-app.use('/api/driver', routes.driver);
-app.use('/api/passenger', routes.passenger);
-app.use('/api/ride', routes.ride);
-
-// Health endpoint (no controller needed)
+// Health endpoint
 app.get('/api/health', (req, res) => {
   res.json({
     success: true,
@@ -95,7 +84,7 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-// Debug endpoint (no controller needed)
+// Debug endpoint
 app.get('/api/debug/status', async (req, res) => {
   try {
     const firestoreStats = firestoreService.getStats();
@@ -108,7 +97,8 @@ app.get('/api/debug/status', async (req, res) => {
         websocketConnections: websocketServer ? websocketServer.getConnectedCount() : 0
       },
       firestore: firestoreStats,
-      cache: cache.stats()
+      cache: cache.stats(),
+      matchingService: matchingService ? matchingService.getStats() : 'Not initialized'
     };
     
     res.json(debugInfo);
@@ -118,6 +108,34 @@ app.get('/api/debug/status', async (req, res) => {
     res.status(500).json({ 
       success: false, 
       error: error.message 
+    });
+  }
+});
+
+// Add a TEST endpoint to force matching
+app.post('/api/debug/force-match', async (req, res) => {
+  try {
+    if (!matchingService) {
+      return res.status(500).json({
+        success: false,
+        error: 'Matching service not initialized'
+      });
+    }
+    
+    // Run matching cycle immediately
+    await matchingService.performMatchingCycle();
+    
+    res.json({
+      success: true,
+      message: 'Forced matching cycle completed',
+      stats: matchingService.getStats()
+    });
+    
+  } catch (error) {
+    console.error('❌ Error in force-match:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
     });
   }
 });
@@ -148,11 +166,23 @@ if (require.main === module) {
   websocketServer = new WebSocketServer(server);
   console.log('✅ WebSocket server initialized');
   
+  // DEBUG: Check if TEST_MODE is enabled
+  console.log(`🧪 TEST_MODE from constants: ${constants.TEST_MODE}`);
+  console.log(`🧪 TEST_MODE from env: ${process.env.TEST_MODE}`);
+  
   // Initialize other services with WebSocket
   searchService = new SearchService(firestoreService, websocketServer);
+  console.log('✅ SearchService initialized');
+  
   rideService = new RideService(firestoreService, websocketServer);
-  matchingService = new MatchingService(firestoreService, searchService, websocketServer);
+  console.log('✅ RideService initialized');
+  
+  // FIXED: Pass admin to MatchingService (even if it doesn't use it)
+  matchingService = new MatchingService(firestoreService, searchService, websocketServer, admin);
+  console.log('✅ MatchingService initialized');
+  
   scheduledService = new ScheduledService(firestoreService, websocketServer, admin);
+  console.log('✅ ScheduledService initialized');
   
   // Update services container with COMPLETE services
   services.websocketServer = websocketServer;
@@ -162,7 +192,7 @@ if (require.main === module) {
   services.scheduledService = scheduledService;
   
   // NOW initialize ALL controllers with COMPLETE services
-  console.log('🔧 Initializing controllers with all services...');
+  console.log('\n🔧 Initializing controllers with all services...');
   matchController.init(services);
   searchController.init(services);
   driverController.init(services);
@@ -170,15 +200,27 @@ if (require.main === module) {
   rideController.init(services);
   console.log('✅ All controllers initialized');
   
-  // Log what's in driverController
-  console.log('🔍 DriverController services check:');
-  console.log('- Has firestoreService:', driverController.firestoreService !== undefined);
-  console.log('- Has websocketServer:', driverController.websocketServer !== undefined);
-  console.log('- Has searchService:', driverController.searchService !== undefined);
+  // Debug: Check what controllers received
+  console.log('\n🔍 Services availability check:');
+  console.log('- firestoreService:', firestoreService ? '✅' : '❌');
+  console.log('- searchService:', searchService ? '✅' : '❌');
+  console.log('- matchingService:', matchingService ? '✅' : '❌');
+  console.log('- websocketServer:', websocketServer ? '✅' : '❌');
+  console.log('- rideService:', rideService ? '✅' : '❌');
   
   // Start services
+  console.log('\n🚀 Starting services...');
   matchingService.start();
+  console.log('✅ MatchingService started');
+  
   scheduledService.start();
+  console.log('✅ ScheduledService started');
+  
+  // Run immediate matching cycle
+  setTimeout(() => {
+    console.log('\n🔍 Running immediate matching cycle...');
+    matchingService.performMatchingCycle();
+  }, 2000);
   
   server.on('error', (error) => {
     console.error('❌ Server error:', error);
