@@ -1,6 +1,7 @@
 const { TIMEOUTS } = require('../config/constants');
 const routeMatching = require('../utils/routeMatching');
 const helpers = require('../utils/helpers');
+const notificationService = require('./notificationService');
 
 class MatchingService {
   constructor(firestoreService, searchService, websocketServer, admin) {
@@ -291,45 +292,9 @@ class MatchingService {
       await this.firestoreService.updatePassengerSearch(passengerUserId, passengerUpdates, { immediate: true });
       console.log(`   ✅ Passenger document updated`);
       
-      // Send WebSocket notifications
-      if (this.websocketServer) {
-        // Send to driver
-        this.websocketServer.sendMatchProposal(driverUserId, {
-          matchId: matchId,
-          passengerId: passengerUserId,
-          passengerName: passenger.passengerName,
-          passengerPhone: passenger.passengerPhone,
-          passengerPhotoUrl: passenger.passengerPhotoUrl,
-          pickupName: passenger.pickupName || driver.pickupName,
-          destinationName: passenger.destinationName || driver.destinationName,
-          passengerCount: passenger.passengerCount || 1,
-          estimatedFare: matchData.estimatedFare,
-          message: '🚨 FORCED TEST MODE: Match found! (All checks bypassed)',
-          timeout: TIMEOUTS.MATCH_PROPOSAL,
-          testMode: true,
-          forcedMatch: true
-        });
-        
-        // Send to passenger
-        this.websocketServer.sendMatchProposal(passengerUserId, {
-          matchId: matchId,
-          driverId: driverUserId,
-          driverName: driver.driverName,
-          driverPhone: driver.driverPhone,
-          driverPhotoUrl: driver.driverPhotoUrl,
-          driverRating: driver.driverRating,
-          vehicleInfo: driver.vehicleInfo,
-          pickupName: passenger.pickupName || driver.pickupName,
-          destinationName: passenger.destinationName || driver.destinationName,
-          estimatedFare: matchData.estimatedFare,
-          message: '🚨 FORCED TEST MODE: Driver found! (All checks bypassed)',
-          timeout: TIMEOUTS.MATCH_PROPOSAL,
-          testMode: true,
-          forcedMatch: true
-        });
-        
-        console.log(`   📱 WebSocket notifications sent`);
-      }
+      // CRITICAL FIX: Send notifications with validated userIds
+      await this.sendMatchProposals(matchId, driver, passenger, matchData);
+      console.log(`   📱 Notifications sent via notificationService`);
       
       // Set timeout for match proposal
       setTimeout(async () => {
@@ -344,6 +309,142 @@ class MatchingService {
       console.error(`❌ Error details:`, error.message);
       console.error(`❌ Error stack:`, error.stack);
       this.failedMatches++;
+      return false;
+    }
+  }
+  
+  // CRITICAL FIX: Send match proposals with validated userIds
+  async sendMatchProposals(matchId, driver, passenger, matchData) {
+    try {
+      console.log(`📱 Sending match proposals for match ${matchId}`);
+      
+      // Validate and fix driver userId
+      let driverUserId = driver.userId || driver.driverId;
+      if (!driverUserId) {
+        console.error(`❌ Driver ${driver.id || driver.driverName} has no userId! Trying to fix...`);
+        
+        // FIX 1: Try to get userId from Firestore
+        const driverDoc = await this.firestoreService.getDriverSearch(driver.driverId || driver.id);
+        if (driverDoc && driverDoc.userId) {
+          driverUserId = driverDoc.userId;
+          console.log(`✅ Retrieved driver userId from Firestore: ${driverUserId}`);
+        } else {
+          // FIX 2: Use driver.id or driver.driverId as fallback
+          driverUserId = driver.driverId || driver.id || `driver_${helpers.generateId(8)}`;
+          console.log(`⚠️ Using fallback driver userId: ${driverUserId}`);
+        }
+      }
+      
+      // Validate and fix passenger userId
+      let passengerUserId = passenger.userId || passenger.passengerId;
+      if (!passengerUserId) {
+        console.error(`❌ Passenger ${passenger.id || passenger.passengerName} has no userId! Trying to fix...`);
+        
+        // FIX 1: Try to get userId from Firestore
+        const passengerDoc = await this.firestoreService.getPassengerSearch(passenger.passengerId || passenger.id);
+        if (passengerDoc && passengerDoc.userId) {
+          passengerUserId = passengerDoc.userId;
+          console.log(`✅ Retrieved passenger userId from Firestore: ${passengerUserId}`);
+        } else {
+          // FIX 2: Use passenger.id or passenger.passengerId as fallback
+          passengerUserId = passenger.passengerId || passenger.id || `passenger_${helpers.generateId(8)}`;
+          console.log(`⚠️ Using fallback passenger userId: ${passengerUserId}`);
+        }
+      }
+      
+      // Prepare driver data with validated userId
+      const driverWithUserId = {
+        ...driver,
+        userId: driverUserId,
+        driverId: driver.driverId || driverUserId
+      };
+      
+      // Prepare passenger data with validated userId
+      const passengerWithUserId = {
+        ...passenger,
+        userId: passengerUserId,
+        passengerId: passenger.passengerId || passengerUserId
+      };
+      
+      // Send notifications via notificationService
+      const notificationSent = await notificationService.sendMatchProposals(
+        matchId, 
+        driverWithUserId, 
+        passengerWithUserId,
+        matchData
+      );
+      
+      if (!notificationSent) {
+        console.error(`❌ Failed to send notifications for match ${matchId}`);
+        // Fallback to WebSocket if notificationService fails
+        if (this.websocketServer) {
+          console.log(`🔄 Falling back to WebSocket notifications`);
+          this.sendWebSocketFallbackNotifications(matchId, driverWithUserId, passengerWithUserId, matchData);
+        }
+      }
+      
+      return notificationSent;
+      
+    } catch (error) {
+      console.error(`❌ Error sending match proposals:`, error);
+      console.error(`❌ Error details:`, error.message);
+      
+      // Fallback to WebSocket
+      if (this.websocketServer) {
+        console.log(`🔄 Falling back to WebSocket notifications due to error`);
+        this.sendWebSocketFallbackNotifications(matchId, driver, passenger, matchData);
+      }
+      
+      return false;
+    }
+  }
+  
+  // Fallback WebSocket notification method
+  sendWebSocketFallbackNotifications(matchId, driver, passenger, matchData) {
+    try {
+      const driverUserId = driver.userId || driver.driverId;
+      const passengerUserId = passenger.userId || passenger.passengerId;
+      
+      // Send to driver
+      this.websocketServer.sendMatchProposal(driverUserId, {
+        matchId: matchId,
+        passengerId: passengerUserId,
+        passengerName: passenger.passengerName,
+        passengerPhone: passenger.passengerPhone,
+        passengerPhotoUrl: passenger.passengerPhotoUrl,
+        pickupName: passenger.pickupName || driver.pickupName,
+        destinationName: passenger.destinationName || driver.destinationName,
+        passengerCount: passenger.passengerCount || 1,
+        estimatedFare: matchData.estimatedFare,
+        message: '🚨 FORCED TEST MODE: Match found! (All checks bypassed)',
+        timeout: TIMEOUTS.MATCH_PROPOSAL,
+        testMode: true,
+        forcedMatch: true
+      });
+      
+      // Send to passenger
+      this.websocketServer.sendMatchProposal(passengerUserId, {
+        matchId: matchId,
+        driverId: driverUserId,
+        driverName: driver.driverName,
+        driverPhone: driver.driverPhone,
+        driverPhotoUrl: driver.driverPhotoUrl,
+        driverRating: driver.driverRating,
+        vehicleInfo: driver.vehicleInfo,
+        pickupName: passenger.pickupName || driver.pickupName,
+        destinationName: passenger.destinationName || driver.destinationName,
+        estimatedFare: matchData.estimatedFare,
+        message: '🚨 FORCED TEST MODE: Driver found! (All checks bypassed)',
+        timeout: TIMEOUTS.MATCH_PROPOSAL,
+        testMode: true,
+        forcedMatch: true
+      });
+      
+      console.log(`   📱 WebSocket fallback notifications sent`);
+      return true;
+      
+    } catch (error) {
+      console.error(`❌ Error in WebSocket fallback notifications:`, error);
       return false;
     }
   }
@@ -386,18 +487,13 @@ class MatchingService {
             expiryReason: 'timeout'
           });
           
-          // Notify users
-          if (this.websocketServer) {
-            this.websocketServer.sendMatchExpired(match.driverId, {
-              matchId: matchId,
-              message: 'Match proposal expired - passenger not accepted in time'
-            });
-            
-            this.websocketServer.sendMatchExpired(match.passengerId, {
-              matchId: matchId,
-              message: 'Match proposal expired'
-            });
-          }
+          // Notify users via notificationService
+          await notificationService.sendMatchExpired(
+            matchId,
+            match.driverId,
+            match.passengerId,
+            'Match proposal expired'
+          );
         }
       }
     } catch (error) {
@@ -465,6 +561,14 @@ class MatchingService {
             expiredAt: new Date(),
             expiryReason: 'timeout'
           });
+          
+          // Send expiration notifications
+          await notificationService.sendMatchExpired(
+            matchId,
+            matchData.driverId,
+            matchData.passengerId,
+            'Match proposal expired - timeout'
+          );
           
           clearedCount++;
         }

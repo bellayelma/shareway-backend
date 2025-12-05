@@ -1,4 +1,5 @@
 // src/websocketServer.js - COMPLETELY FIXED VERSION WITH sendMatchProposal
+module.exports = WebSocketServer;
 const WebSocket = require('ws');
 
 class WebSocketServer {

@@ -6,6 +6,103 @@ let services = null;
 const init = (injectedServices) => {
   services = injectedServices;
   
+  // Start passenger search endpoint (Fixed to ensure userId is always set)
+  router.post('/search', async (req, res) => {
+    try {
+      const { userId, passengerName, passengerPhone, passengerPhotoUrl, passengerCount, rideType, ...otherData } = req.body;
+      
+      // FIX: Ensure userId is always set
+      const validUserId = userId || `passenger_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      
+      const passengerData = {
+        userId: validUserId, // ✅ Always include userId
+        passengerId: validUserId, // Also set as passengerId for consistency
+        passengerName,
+        passengerPhone,
+        passengerPhotoUrl,
+        passengerCount: passengerCount || 1,
+        rideType: rideType || 'standard',
+        ...otherData,
+        createdAt: new Date().toISOString(),
+        status: 'searching',
+        matchStatus: 'searching',
+        tripStatus: 'waiting'
+      };
+      
+      console.log(`🚗 Starting passenger search for: ${validUserId} (${passengerName})`);
+      
+      // Save to Firestore
+      const searchId = await services.firestoreService.startPassengerSearch(passengerData);
+      
+      // Add searchId to passenger data
+      passengerData.searchId = searchId;
+      
+      // Notify via WebSocket if available
+      if (services.wsService) {
+        services.wsService.sendToUser(validUserId, {
+          type: 'SEARCH_STARTED',
+          data: { ...passengerData, searchId: searchId }
+        });
+      }
+      
+      res.json({ 
+        success: true, 
+        userId: validUserId,
+        passengerId: validUserId,
+        searchId: searchId,
+        message: 'Passenger search started successfully' 
+      });
+      
+    } catch (error) {
+      console.error('❌ Error starting passenger search:', error);
+      res.status(500).json({ 
+        success: false,
+        error: error.message 
+      });
+    }
+  });
+  
+  // Cancel passenger search endpoint
+  router.post('/cancel-search', async (req, res) => {
+    try {
+      const { userId, passengerId, reason } = req.body;
+      
+      const actualUserId = passengerId || userId;
+      
+      if (!actualUserId) {
+        return res.status(400).json({ 
+          success: false, 
+          error: 'passengerId or userId is required' 
+        });
+      }
+      
+      console.log(`🚫 Cancelling passenger search for: ${actualUserId}`);
+      
+      const result = await services.firestoreService.cancelPassengerSearch(actualUserId, reason);
+      
+      // Notify via WebSocket if available
+      if (services.wsService && result.success) {
+        services.wsService.sendToUser(actualUserId, {
+          type: 'SEARCH_CANCELLED',
+          data: { 
+            passengerId: actualUserId,
+            reason: reason,
+            cancelledAt: new Date().toISOString()
+          }
+        });
+      }
+      
+      res.json(result);
+      
+    } catch (error) {
+      console.error('❌ Error cancelling passenger search:', error);
+      res.status(500).json({ 
+        success: false, 
+        error: error.message 
+      });
+    }
+  });
+  
   // Passenger status endpoint
   router.get('/status/:passengerId', async (req, res) => {
     try {
@@ -39,7 +136,8 @@ const init = (injectedServices) => {
       const status = {
         success: true,
         exists: true,
-        passengerId: passengerId,
+        userId: passengerData.userId || passengerId,
+        passengerId: passengerData.passengerId || passengerId,
         passengerName: passengerData.passengerName,
         passengerPhone: passengerData.passengerPhone,
         passengerPhotoUrl: passengerData.passengerPhotoUrl,
@@ -55,7 +153,8 @@ const init = (injectedServices) => {
         rideData: rideData,
         searchId: passengerData.searchId,
         status: passengerData.status,
-        rideType: passengerData.rideType
+        rideType: passengerData.rideType,
+        createdAt: passengerData.createdAt
       };
       
       res.json(status);
@@ -95,7 +194,7 @@ const init = (injectedServices) => {
         });
       }
       
-      console.log(`📍 Passenger location update: ${actualUserId}`);
+      console.log(`📍 Passenger location update: ${actualUserId}`, location);
       
       const result = await services.rideService.updateLocation(
         actualUserId, 
@@ -104,10 +203,95 @@ const init = (injectedServices) => {
         address
       );
       
+      // Notify via WebSocket if available
+      if (services.wsService && result.success) {
+        services.wsService.broadcastLocationUpdate({
+          userId: actualUserId,
+          userType: 'passenger',
+          location: location,
+          address: address,
+          timestamp: new Date().toISOString()
+        });
+      }
+      
       res.json(result);
       
     } catch (error) {
       console.error('❌ Error updating passenger location:', error);
+      res.status(500).json({ 
+        success: false, 
+        error: error.message 
+      });
+    }
+  });
+  
+  // Get all active passenger searches
+  router.get('/active-searches', async (req, res) => {
+    try {
+      const searches = await services.firestoreService.getActivePassengerSearches();
+      
+      res.json({
+        success: true,
+        count: searches.length,
+        searches: searches
+      });
+      
+    } catch (error) {
+      console.error('❌ Error getting active passenger searches:', error);
+      res.status(500).json({ 
+        success: false, 
+        error: error.message 
+      });
+    }
+  });
+  
+  // Update passenger profile endpoint
+  router.post('/update-profile', async (req, res) => {
+    try {
+      const { 
+        userId, 
+        passengerId,
+        passengerName,
+        passengerPhone,
+        passengerPhotoUrl,
+        preferences
+      } = req.body;
+      
+      const actualUserId = passengerId || userId;
+      
+      if (!actualUserId) {
+        return res.status(400).json({ 
+          success: false, 
+          error: 'passengerId or userId is required' 
+        });
+      }
+      
+      console.log(`👤 Updating passenger profile: ${actualUserId}`);
+      
+      const updateData = {};
+      if (passengerName) updateData.passengerName = passengerName;
+      if (passengerPhone) updateData.passengerPhone = passengerPhone;
+      if (passengerPhotoUrl) updateData.passengerPhotoUrl = passengerPhotoUrl;
+      if (preferences) updateData.preferences = preferences;
+      
+      const result = await services.firestoreService.updatePassengerProfile(actualUserId, updateData);
+      
+      // Notify via WebSocket if available
+      if (services.wsService && result.success) {
+        services.wsService.sendToUser(actualUserId, {
+          type: 'PROFILE_UPDATED',
+          data: { 
+            passengerId: actualUserId,
+            ...updateData,
+            updatedAt: new Date().toISOString()
+          }
+        });
+      }
+      
+      res.json(result);
+      
+    } catch (error) {
+      console.error('❌ Error updating passenger profile:', error);
       res.status(500).json({ 
         success: false, 
         error: error.message 
