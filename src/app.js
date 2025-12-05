@@ -14,6 +14,7 @@ const MatchingService = require('./services/matchingService');
 const ScheduledService = require('./services/scheduledService');
 const RideService = require('./services/rideService');
 const WebSocketServer = require('./websocketServer');
+const NotificationService = require('./services/notificationService');
 
 // Middlewares
 const requestLogger = require('./middlewares/logging');
@@ -47,6 +48,7 @@ firestoreService.startBatchProcessor();
 
 // WebSocket server (will be set after server starts)
 let websocketServer = null;
+let notificationService = null;
 
 // Services that need WebSocket
 let searchService, rideService, matchingService, scheduledService;
@@ -77,9 +79,15 @@ app.get('/api/health', (req, res) => {
       cached: true,
       batchedWrites: true,
       testMode: constants.TEST_MODE,
-      firestoreOperationsReduced: true
+      firestoreOperationsReduced: true,
+      websocketEnabled: true,
+      notificationService: notificationService ? true : false
     },
-    stats: firestoreService.getStats()
+    stats: firestoreService.getStats(),
+    websocket: {
+      connections: websocketServer ? websocketServer.getConnectedCount() : 0,
+      notificationService: notificationService ? 'Active' : 'Inactive'
+    }
   });
 });
 
@@ -93,10 +101,12 @@ app.get('/api/debug/status', async (req, res) => {
       server: {
         timestamp: new Date().toISOString(),
         testMode: constants.TEST_MODE,
-        websocketConnections: websocketServer ? websocketServer.getConnectedCount() : 0
+        websocketConnections: websocketServer ? websocketServer.getConnectedCount() : 0,
+        notificationService: notificationService ? notificationService.getStats() : 'Not initialized'
       },
       firestore: firestoreStats,
-      cache: cache.stats()
+      cache: cache.stats(),
+      matchingService: matchingService ? matchingService.getStats() : 'Not initialized'
     };
     
     res.json(debugInfo);
@@ -106,6 +116,102 @@ app.get('/api/debug/status', async (req, res) => {
     res.status(500).json({ 
       success: false, 
       error: error.message 
+    });
+  }
+});
+
+// Debug endpoints for notifications
+app.post('/api/debug/send-notification', (req, res) => {
+  try {
+    const { userId, message, type, data } = req.body;
+    
+    if (!userId || !message) {
+      return res.status(400).json({
+        success: false,
+        error: 'userId and message are required'
+      });
+    }
+    
+    if (!notificationService) {
+      return res.status(500).json({
+        success: false,
+        error: 'Notification service not initialized'
+      });
+    }
+    
+    const notification = {
+      userId,
+      message,
+      type: type || 'info',
+      data: data || {},
+      timestamp: new Date().toISOString()
+    };
+    
+    const sent = notificationService.sendNotification(notification);
+    
+    res.json({
+      success: sent,
+      message: sent ? 'Notification sent' : 'User not connected',
+      notification
+    });
+    
+  } catch (error) {
+    console.error('❌ Error sending notification:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+app.get('/api/debug/notifications', (req, res) => {
+  try {
+    if (!notificationService) {
+      return res.status(500).json({
+        success: false,
+        error: 'Notification service not initialized'
+      });
+    }
+    
+    res.json({
+      success: true,
+      stats: notificationService.getStats(),
+      connectedUsers: notificationService.getConnectedUsers()
+    });
+    
+  } catch (error) {
+    console.error('❌ Error getting notifications:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Add a TEST endpoint to force matching
+app.post('/api/debug/force-match', async (req, res) => {
+  try {
+    if (!matchingService) {
+      return res.status(500).json({
+        success: false,
+        error: 'Matching service not initialized'
+      });
+    }
+    
+    // Run matching cycle immediately
+    await matchingService.performMatchingCycle();
+    
+    res.json({
+      success: true,
+      message: 'Forced matching cycle completed',
+      stats: matchingService.getStats()
+    });
+    
+  } catch (error) {
+    console.error('❌ Error in force-match:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
     });
   }
 });
@@ -129,6 +235,7 @@ if (require.main === module) {
 - Batched write operations
 - Modular code structure
 - Optimized logging
+- Real-time notifications
     `);
   });
 
@@ -136,25 +243,48 @@ if (require.main === module) {
   websocketServer = new WebSocketServer(server);
   console.log('✅ WebSocket server initialized');
   
-  // Initialize other services with WebSocket
-  searchService = new SearchService(firestoreService, websocketServer);
-  rideService = new RideService(firestoreService, websocketServer);
-  matchingService = new MatchingService(firestoreService, searchService, websocketServer);
-  scheduledService = new ScheduledService(firestoreService, websocketServer, admin); // PASS ADMIN HERE
+  // Initialize NotificationService
+  notificationService = new NotificationService(firestoreService, websocketServer);
+  console.log('✅ NotificationService initialized');
   
-  // Update services container
+  // Initialize other services with WebSocket and NotificationService
+  searchService = new SearchService(firestoreService, websocketServer);
+  console.log('✅ SearchService initialized');
+  
+  rideService = new RideService(firestoreService, websocketServer);
+  console.log('✅ RideService initialized');
+  
+  // Pass NotificationService to MatchingService
+  matchingService = new MatchingService(
+    firestoreService, 
+    searchService, 
+    websocketServer, 
+    notificationService, // Add NotificationService here
+    admin
+  );
+  console.log('✅ MatchingService initialized');
+  
+  scheduledService = new ScheduledService(firestoreService, websocketServer, admin);
+  console.log('✅ ScheduledService initialized');
+  
+  // Update services container with all services
   services.websocketServer = websocketServer;
   services.searchService = searchService;
   services.rideService = rideService;
   services.matchingService = matchingService;
   services.scheduledService = scheduledService;
+  services.notificationService = notificationService;
   
-  // Re-initialize controllers with complete services
+  console.log('\n🔧 Initializing all controllers with complete services...');
+  
+  // Re-initialize all controllers with complete services
   matchController.init(services);
   searchController.init(services);
   driverController.init(services);
   passengerController.init(services);
   rideController.init(services);
+  
+  console.log('✅ All controllers initialized');
   
   // Register all routes
   app.use('/api/search', searchController.router);
@@ -162,9 +292,23 @@ if (require.main === module) {
   app.use('/api/passenger', passengerController.router);
   app.use('/api/ride', rideController.router);
   
+  console.log('\n🚀 Starting all services...');
+  
   // Start services
   matchingService.start();
+  console.log('✅ MatchingService started');
+  
   scheduledService.start();
+  console.log('✅ ScheduledService started');
+  
+  notificationService.startCleanupInterval();
+  console.log('✅ NotificationService cleanup started');
+  
+  // Run immediate matching cycle
+  setTimeout(() => {
+    console.log('\n🔍 Running initial matching cycle...');
+    matchingService.performMatchingCycle();
+  }, 2000);
   
   server.on('error', (error) => {
     console.error('❌ Server error:', error);
@@ -172,20 +316,31 @@ if (require.main === module) {
   });
 
   process.on('SIGINT', () => {
-    console.log('\n🛑 Shutting down server...');
+    console.log('\n🛑 Shutting down server gracefully...');
     
     if (websocketServer) {
       websocketServer.broadcast({
         type: 'SERVER_SHUTDOWN',
-        message: 'Server is shutting down'
+        message: 'Server is shutting down for maintenance',
+        timestamp: new Date().toISOString()
       });
     }
     
+    // Stop all services
+    if (matchingService) matchingService.stop();
+    if (scheduledService) scheduledService.stop();
+    if (notificationService) notificationService.stopCleanupInterval();
+    
     server.close(() => {
-      console.log('✅ Server closed');
+      console.log('✅ Server closed gracefully');
       process.exit(0);
     });
   });
 }
 
-module.exports = { app, services };
+module.exports = { 
+  app, 
+  services,
+  websocketServer,
+  notificationService 
+};
