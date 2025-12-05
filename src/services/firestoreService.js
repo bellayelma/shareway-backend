@@ -12,7 +12,8 @@ class FirestoreService {
       reads: 0,
       writes: 0,
       cacheHits: 0,
-      batchWrites: 0
+      batchWrites: 0,
+      immediateWrites: 0
     };
   }
   
@@ -37,14 +38,21 @@ class FirestoreService {
   }
   
   async flushWrites() {
-    if (this.writeQueue.length === 0) return;
+    if (this.writeQueue.length === 0) {
+      console.log('🔄 flushWrites called but queue is empty');
+      return;
+    }
     
     try {
+      console.log(`🔄 Starting batch flush with ${this.writeQueue.length} operations`);
       const batch = this.db.batch();
       const operations = [];
       const toProcess = this.writeQueue.splice(0, this.batchLimit);
       
+      console.log(`📝 Processing ${toProcess.length} operations`);
+      
       for (const op of toProcess) {
+        console.log(`   - ${op.operation} to ${op.collection}/${op.docId}`);
         const docRef = this.db.collection(op.collection).doc(op.docId);
         
         if (op.operation === 'set') {
@@ -59,13 +67,14 @@ class FirestoreService {
       }
       
       await batch.commit();
-      console.log(`✅ Batch write: ${operations.length} operations`);
+      console.log(`✅ Batch write completed: ${operations.length} operations`);
       this.stats.batchWrites += operations.length;
       
     } catch (error) {
       console.error('❌ Batch write failed:', error);
       // Re-add failed operations to queue
       this.writeQueue.unshift(...toProcess);
+      throw error;
     }
   }
   
@@ -182,9 +191,10 @@ class FirestoreService {
     cache.del('active_searches_all');
     
     if (options.immediate) {
+      this.stats.immediateWrites++;
       await this.db.collection(COLLECTIONS.ACTIVE_SEARCHES_DRIVER).doc(driverId).update({
         ...updates,
-        updatedAt: new Date()  // FIXED: Use simple timestamp
+        updatedAt: new Date()
       });
       return true;
     } else {
@@ -201,9 +211,10 @@ class FirestoreService {
     cache.del('active_searches_all');
     
     if (options.immediate) {
+      this.stats.immediateWrites++;
       await this.db.collection(COLLECTIONS.ACTIVE_SEARCHES_PASSENGER).doc(passengerId).update({
         ...updates,
-        updatedAt: new Date()  // FIXED: Use simple timestamp
+        updatedAt: new Date()
       });
       return true;
     } else {
@@ -214,7 +225,7 @@ class FirestoreService {
   
   // ========== SEARCH MANAGEMENT ==========
   
-  async saveDriverSearch(driverData) {
+  async saveDriverSearch(driverData, options = {}) {
     const driverId = driverData.userId || driverData.driverId;
     if (!driverId) {
       throw new Error('driverId is required for saving driver search');
@@ -224,7 +235,8 @@ class FirestoreService {
       driverId,
       driverName: driverData.driverName,
       driverPhone: driverData.driverPhone,
-      driverPhotoUrl: driverData.driverPhotoUrl
+      driverPhotoUrl: driverData.driverPhotoUrl,
+      immediate: options.immediate || false
     });
     
     const searchData = {
@@ -296,20 +308,32 @@ class FirestoreService {
       lastUpdated: Date.now()
     };
     
-    // Queue the write operation
-    this.queueWrite(COLLECTIONS.ACTIVE_SEARCHES_DRIVER, driverId, searchData, 'set');
+    // If immediate option is set, save directly
+    if (options.immediate) {
+      console.log('⚡ Immediate save requested for driver');
+      try {
+        this.stats.immediateWrites++;
+        await this.db.collection(COLLECTIONS.ACTIVE_SEARCHES_DRIVER).doc(driverId).set(searchData);
+        console.log(`✅ Driver search saved immediately: ${searchData.driverName}`);
+      } catch (error) {
+        console.error('❌ Immediate save failed:', error);
+        throw error;
+      }
+    } else {
+      // Queue the write operation
+      this.queueWrite(COLLECTIONS.ACTIVE_SEARCHES_DRIVER, driverId, searchData, 'set');
+      console.log(`✅ Driver search queued: ${searchData.driverName}`);
+    }
     
     // Clear cache
     cache.del(`driver_${driverId}`);
     cache.del('active_searches_all');
     
-    console.log(`✅ Driver search queued: ${searchData.driverName}`);
-    
     // Return the data that will be saved
     return searchData;
   }
   
-  async savePassengerSearch(passengerData) {
+  async savePassengerSearch(passengerData, options = {}) {
     const passengerId = passengerData.userId || passengerData.passengerId;
     if (!passengerId) {
       throw new Error('passengerId is required for saving passenger search');
@@ -355,37 +379,68 @@ class FirestoreService {
       // Search metadata
       rideType: passengerData.rideType || 'immediate',
       scheduledTime: passengerData.scheduledTime ? 
-        new Date(passengerData.scheduledTime) : null,  // FIXED: Use Date object
+        new Date(passengerData.scheduledTime) : null,
       searchId: passengerData.searchId || `passenger_search_${passengerId}_${Date.now()}`,
       status: 'searching',
       
       // System data
-      createdAt: new Date(),  // FIXED: Use Date object
-      updatedAt: new Date(),  // FIXED: Use Date object
+      createdAt: new Date(),
+      updatedAt: new Date(),
       lastUpdated: Date.now()
     };
     
-    this.queueWrite(COLLECTIONS.ACTIVE_SEARCHES_PASSENGER, passengerId, searchData, 'set');
+    // If immediate option is set, save directly
+    if (options.immediate) {
+      console.log('⚡ Immediate save requested for passenger');
+      try {
+        this.stats.immediateWrites++;
+        await this.db.collection(COLLECTIONS.ACTIVE_SEARCHES_PASSENGER).doc(passengerId).set(searchData);
+        console.log(`✅ Passenger search saved immediately: ${searchData.passengerName}`);
+      } catch (error) {
+        console.error('❌ Immediate save failed:', error);
+        throw error;
+      }
+    } else {
+      this.queueWrite(COLLECTIONS.ACTIVE_SEARCHES_PASSENGER, passengerId, searchData, 'set');
+      console.log(`✅ Passenger search queued: ${searchData.passengerName}`);
+    }
     
     // Clear cache
     cache.del(`passenger_${passengerId}`);
     cache.del('active_searches_all');
     
-    console.log(`✅ Passenger search queued: ${searchData.passengerName}`);
     return searchData;
   }
   
   // ========== MATCH MANAGEMENT ==========
   
-  async saveMatch(matchData) {
-    this.queueWrite(COLLECTIONS.ACTIVE_MATCHES, matchData.matchId, {
-      ...matchData,
-      createdAt: new Date(),  // FIXED: Use Date object
-      updatedAt: new Date(),   // FIXED: Use Date object
-      lastUpdated: Date.now()
-    }, 'set');
-    
-    console.log(`✅ Match queued: ${matchData.matchId}`);
+  async saveMatch(matchData, options = {}) {
+    // If immediate option is set, save directly
+    if (options.immediate) {
+      console.log('⚡ Immediate save requested for match');
+      try {
+        this.stats.immediateWrites++;
+        await this.db.collection(COLLECTIONS.ACTIVE_MATCHES).doc(matchData.matchId).set({
+          ...matchData,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          lastUpdated: Date.now()
+        });
+        console.log(`✅ Match saved immediately: ${matchData.matchId}`);
+      } catch (error) {
+        console.error('❌ Immediate save failed:', error);
+        throw error;
+      }
+    } else {
+      this.queueWrite(COLLECTIONS.ACTIVE_MATCHES, matchData.matchId, {
+        ...matchData,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        lastUpdated: Date.now()
+      }, 'set');
+      
+      console.log(`✅ Match queued: ${matchData.matchId}`);
+    }
     return true;
   }
   
@@ -400,7 +455,7 @@ class FirestoreService {
   
   // ========== RIDE MANAGEMENT ==========
   
-  async createActiveRide(driverData, passengerData) {
+  async createActiveRide(driverData, passengerData, options = {}) {
     const rideId = helpers.generateId('ride_');
     
     const rideData = {
@@ -427,16 +482,61 @@ class FirestoreService {
       status: 'driver_accepted',
       matchId: driverData.matchId,
       tripStatus: 'driver_accepted',
-      acceptedAt: new Date(),  // FIXED: Use Date object
-      createdAt: new Date(),   // FIXED: Use Date object
-      updatedAt: new Date(),   // FIXED: Use Date object
+      acceptedAt: new Date(),
+      createdAt: new Date(),
+      updatedAt: new Date(),
       lastUpdated: Date.now()
     };
     
-    this.queueWrite(COLLECTIONS.ACTIVE_RIDES, rideId, rideData, 'set');
+    // If immediate option is set, save directly
+    if (options.immediate) {
+      console.log('⚡ Immediate save requested for ride');
+      try {
+        this.stats.immediateWrites++;
+        await this.db.collection(COLLECTIONS.ACTIVE_RIDES).doc(rideId).set(rideData);
+        console.log(`✅ Ride saved immediately: ${rideId}`);
+      } catch (error) {
+        console.error('❌ Immediate save failed:', error);
+        throw error;
+      }
+    } else {
+      this.queueWrite(COLLECTIONS.ACTIVE_RIDES, rideId, rideData, 'set');
+      console.log(`✅ Ride queued: ${rideId}`);
+    }
     
-    console.log(`✅ Ride created: ${rideId}`);
     return rideData;
+  }
+  
+  // ========== DIRECT SAVE (for debugging) ==========
+  
+  async directSave(collection, docId, data) {
+    console.log(`⚡ Direct save to ${collection}/${docId}`);
+    try {
+      await this.db.collection(collection).doc(docId).set(data);
+      console.log(`✅ Direct save successful: ${collection}/${docId}`);
+      return true;
+    } catch (error) {
+      console.error(`❌ Direct save failed: ${error.message}`);
+      throw error;
+    }
+  }
+  
+  // ========== VERIFICATION ==========
+  
+  async verifyDocumentExists(collection, docId) {
+    try {
+      const doc = await this.db.collection(collection).doc(docId).get();
+      if (doc.exists) {
+        console.log(`✅ Document exists: ${collection}/${docId}`);
+        return { exists: true, data: doc.data() };
+      } else {
+        console.log(`❌ Document not found: ${collection}/${docId}`);
+        return { exists: false, data: null };
+      }
+    } catch (error) {
+      console.error(`❌ Error verifying document: ${error.message}`);
+      return { exists: false, data: null, error: error.message };
+    }
   }
   
   // ========== STATISTICS ==========
@@ -454,7 +554,8 @@ class FirestoreService {
       reads: 0,
       writes: 0,
       cacheHits: 0,
-      batchWrites: 0
+      batchWrites: 0,
+      immediateWrites: 0
     };
   }
   
