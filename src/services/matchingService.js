@@ -1,4 +1,4 @@
-const { TIMEOUTS, TEST_MODE } = require('../config/constants');
+const { TIMEOUTS } = require('../config/constants');
 const routeMatching = require('../utils/routeMatching');
 const helpers = require('../utils/helpers');
 
@@ -12,13 +12,18 @@ class MatchingService {
     this.successfulMatches = 0;
     this.failedMatches = 0;
     this.cycleCount = 0;
+    
+    // FORCE TEST MODE - ALWAYS TRUE
+    this.FORCE_TEST_MODE = true;
+    console.log(`🧪 FORCED TEST MODE: ${this.FORCE_TEST_MODE ? 'ALWAYS ON' : 'OFF'}`);
   }
   
   // Start matching service
   start() {
-    console.log('🔄 Starting Optimized Matching Service...');
-    console.log(`🧪 TEST MODE: ${TEST_MODE ? 'ACTIVE' : 'INACTIVE'}`);
-    console.log(`📏 MAX DISTANCE: ${TEST_MODE ? 'UNLIMITED (Test Mode)' : '10km'}`);
+    console.log('🔄 Starting FORCED TEST MODE Matching Service...');
+    console.log(`🧪 TEST MODE: FORCED ON (Always matching)`);
+    console.log(`📏 MAX DISTANCE: UNLIMITED (All distances allowed)`);
+    console.log(`⚡ MATCHING: ANY driver ↔ ANY passenger`);
     
     const matchingInterval = TIMEOUTS.MATCHING_INTERVAL;
     
@@ -27,7 +32,7 @@ class MatchingService {
       this.performMatchingCycle();
     }, 1000);
     
-    // Then regular intervals
+    // Then regular intervals (every 10 seconds)
     setInterval(async () => {
       await this.performMatchingCycle();
     }, matchingInterval);
@@ -42,13 +47,13 @@ class MatchingService {
       this.searchService.cleanupOldData();
     }, 60000);
     
-    console.log('✅ Matching Service started');
+    console.log('✅ FORCED TEST MODE Matching Service started');
   }
   
   // Perform matching cycle
   async performMatchingCycle() {
     this.cycleCount++;
-    console.log(`\n📊 ===== MATCHING CYCLE #${this.cycleCount} START =====`);
+    console.log(`\n📊 ===== FORCED MATCHING CYCLE #${this.cycleCount} START =====`);
     
     try {
       // Clear expired match proposals
@@ -72,7 +77,6 @@ class MatchingService {
         console.log(`      Status: ${driver.status}, Match: ${driver.matchStatus || 'none'}`);
         console.log(`      Seats: ${driver.availableSeats || driver.capacity || 4}/${driver.capacity || 4}`);
         console.log(`      From: ${driver.pickupName || 'Unknown'} to ${driver.destinationName || 'Unknown'}`);
-        console.log(`      Route points: ${driver.routePoints?.length || 0}`);
       });
       
       console.log('\n🔍 DEBUG - Active Passengers:');
@@ -81,31 +85,35 @@ class MatchingService {
         console.log(`      Status: ${passenger.status}, Match: ${passenger.matchStatus || 'none'}`);
         console.log(`      Count: ${passenger.passengerCount || 1}`);
         console.log(`      From: ${passenger.pickupName || 'Unknown'} to ${passenger.destinationName || 'Unknown'}`);
-        console.log(`      Route points: ${passenger.routePoints?.length || 0}`);
       });
       
       let matchesCreated = 0;
       let matchAttempts = 0;
       
-      // Perform matching - SIMPLIFIED VERSION THAT WORKS EVEN WITH FAR DISTANCES
+      // FORCED MATCHING: Match ANY available driver with ANY available passenger
       for (const driver of drivers) {
         const driverUserId = driver.driverId || driver.userId;
         
         // Skip if driver already has a match
         if (driver.matchStatus === 'proposed' || driver.matchStatus === 'accepted') {
+          console.log(`   ⏸️ Skipping driver ${driver.driverName} - already matched`);
           continue;
         }
         
         // Check driver is searching
         if (driver.status !== 'searching') {
+          console.log(`   ⏸️ Skipping driver ${driver.driverName} - not searching (${driver.status})`);
           continue;
         }
         
         // Check available seats
         const availableSeats = driver.availableSeats || driver.capacity || 4;
         if (availableSeats <= 0) {
+          console.log(`   ⏸️ Skipping driver ${driver.driverName} - no available seats`);
           continue;
         }
+        
+        console.log(`\n🚗 Driver available: ${driver.driverName} (${availableSeats} seats available)`);
         
         for (const passenger of passengers) {
           const passengerUserId = passenger.passengerId || passenger.userId;
@@ -113,61 +121,48 @@ class MatchingService {
           
           // Skip if passenger already has a match
           if (passenger.matchStatus === 'proposed' || passenger.matchStatus === 'accepted') {
+            console.log(`   ⏸️ Skipping passenger ${passenger.passengerName} - already matched`);
             continue;
           }
           
           // Check passenger is searching
           if (passenger.status !== 'searching') {
+            console.log(`   ⏸️ Skipping passenger ${passenger.passengerName} - not searching (${passenger.status})`);
             continue;
           }
           
           // Check passenger count fits in available seats
           const passengerCount = passenger.passengerCount || 1;
           if (passengerCount > availableSeats) {
+            console.log(`   ⏸️ Skipping passenger ${passenger.passengerName} - needs ${passengerCount} seats, only ${availableSeats} available`);
             continue;
           }
           
-          // SIMPLE CHECK: In test mode, match ANY driver with ANY passenger regardless of distance
-          if (TEST_MODE) {
-            console.log(`\n🎯 TEST MODE: Matching ${driver.driverName} with ${passenger.passengerName}`);
-            console.log(`   Ignoring distance check in test mode`);
-            
-            const matchCreated = await this.createSimpleMatch(driver, passenger);
-            if (matchCreated) {
-              matchesCreated++;
-              break; // Driver can only take one passenger at a time
-            }
-          } else {
-            // Normal mode: Try route matching
-            try {
-              const match = await routeMatching.performIntelligentMatching(
-                this.firestoreService.db, 
-                driver, 
-                passenger
-              );
-              
-              if (match) {
-                console.log(`\n🎯 Route match found: ${driver.driverName} ↔ ${passenger.passengerName}`);
-                console.log(`   Similarity score: ${match.similarityScore}`);
-                
-                const matchCreated = await this.createSimpleMatch(driver, passenger, match);
-                if (matchCreated) {
-                  matchesCreated++;
-                  break; // Driver can only take one passenger at a time
-                }
-              }
-            } catch (error) {
-              console.log(`   ⚠️ Route matching error: ${error.message}`);
-            }
+          // FORCE MATCH - ALWAYS CREATE MATCH
+          console.log(`🎯 FORCED MATCH: ${driver.driverName} ↔ ${passenger.passengerName}`);
+          console.log(`   Driver seats: ${availableSeats}, Passenger count: ${passengerCount}`);
+          console.log(`   FROM: ${driver.pickupName} → ${passenger.pickupName}`);
+          console.log(`   TO: ${driver.destinationName} → ${passenger.destinationName}`);
+          
+          const matchCreated = await this.createForcedMatch(driver, passenger);
+          if (matchCreated) {
+            matchesCreated++;
+            console.log(`✅ Match created! Moving to next driver...`);
+            break; // Driver can only take one passenger at a time
           }
         }
       }
       
       if (matchesCreated > 0) {
-        console.log(`\n🎉 SUCCESS: Created ${matchesCreated} match${matchesCreated > 1 ? 'es' : ''} this cycle`);
+        console.log(`\n🎉 SUCCESS: Created ${matchesCreated} match${matchesCreated > 1 ? 'es' : ''} this cycle!`);
         this.successfulMatches += matchesCreated;
       } else {
         console.log(`\n🔍 No new matches created this cycle`);
+        console.log(`   Possible reasons:`);
+        console.log(`   - All drivers already matched`);
+        console.log(`   - All passengers already matched`);
+        console.log(`   - Seat capacity mismatch`);
+        console.log(`   - Status not 'searching'`);
       }
       
       this.matchAttempts += matchAttempts;
@@ -175,21 +170,33 @@ class MatchingService {
       
     } catch (error) {
       console.error('❌ Matching cycle error:', error);
+      console.error('❌ Error stack:', error.stack);
     }
     
     console.log(`📊 ===== MATCHING CYCLE END =====\n`);
   }
   
-  // Create simple match (bypasses complex route checking)
-  async createSimpleMatch(driver, passenger, routeMatch = null) {
+  // Create forced match (always works)
+  async createForcedMatch(driver, passenger) {
     try {
-      const matchId = `match_${Date.now()}_${helpers.generateId(6)}`;
+      const matchId = `match_${Date.now()}_${helpers.generateId(8)}`;
       const driverUserId = driver.driverId || driver.userId;
       const passengerUserId = passenger.passengerId || passenger.userId;
       
-      console.log(`🤝 Creating match ${matchId}`);
-      console.log(`   Driver: ${driver.driverName} (${driverUserId})`);
-      console.log(`   Passenger: ${passenger.passengerName} (${passengerUserId})`);
+      console.log(`\n🤝 Creating FORCED match ${matchId}`);
+      console.log(`   Driver: ${driver.driverName || 'Unknown'} (${driverUserId})`);
+      console.log(`   Passenger: ${passenger.passengerName || 'Unknown'} (${passengerUserId})`);
+      
+      // Calculate distance for display (even though we're ignoring it)
+      let distance = 0;
+      let duration = 0;
+      if (driver.pickupLocation && passenger.pickupLocation) {
+        // Simple distance calculation for display only
+        const latDiff = Math.abs(driver.pickupLocation.lat - passenger.pickupLocation.lat);
+        const lngDiff = Math.abs(driver.pickupLocation.lng - passenger.pickupLocation.lng);
+        distance = Math.sqrt(latDiff * latDiff + lngDiff * lngDiff) * 111; // Rough km
+        duration = distance * 2; // Rough minutes
+      }
       
       const matchData = {
         matchId: matchId,
@@ -198,7 +205,12 @@ class MatchingService {
         driverPhone: driver.driverPhone || 'Not provided',
         driverPhotoUrl: driver.driverPhotoUrl || '',
         driverRating: driver.driverRating || 5.0,
-        vehicleInfo: driver.vehicleInfo || {},
+        vehicleInfo: driver.vehicleInfo || {
+          model: 'Test Vehicle',
+          plate: 'TEST123',
+          color: 'Test Color',
+          type: 'car'
+        },
         passengerId: passengerUserId,
         passengerName: passenger.passengerName || 'Unknown Passenger',
         passengerPhone: passenger.passengerPhone || 'Not provided',
@@ -208,21 +220,25 @@ class MatchingService {
         pickupName: passenger.pickupName || driver.pickupName || 'Pickup Location',
         destinationLocation: passenger.destinationLocation || driver.destinationLocation,
         destinationName: passenger.destinationName || driver.destinationName || 'Destination',
-        distance: passenger.distance || driver.distance || 0,
-        duration: passenger.duration || driver.duration || 0,
-        estimatedFare: passenger.estimatedFare || driver.estimatedFare || 0,
-        similarityScore: routeMatch?.similarityScore || 0.8, // Default score
-        matchScore: 85, // Arbitrary high score
+        distance: distance,
+        duration: duration,
+        estimatedFare: passenger.estimatedFare || driver.estimatedFare || 500,
+        similarityScore: 0.95, // High score for forced match
+        matchScore: 99, // Very high match score
         matchStatus: 'proposed',
         rideType: driver.rideType || passenger.rideType || 'immediate',
         scheduledTime: driver.scheduledTime || passenger.scheduledTime,
         createdAt: new Date(),
         expiresAt: Date.now() + TIMEOUTS.MATCH_PROPOSAL,
         notified: false,
-        matchType: 'simple',
-        testMode: TEST_MODE,
-        distanceIgnored: TEST_MODE
+        matchType: 'forced',
+        testMode: true,
+        distanceIgnored: true,
+        forcedMatch: true,
+        notes: 'This match was created in FORCED TEST MODE - all checks bypassed'
       };
+      
+      console.log(`   📝 Match data prepared`);
       
       // Save match to Firestore IMMEDIATELY
       await this.firestoreService.saveMatch(matchData, { immediate: true });
@@ -245,11 +261,12 @@ class MatchingService {
           destinationLocation: passenger.destinationLocation,
           destinationName: passenger.destinationName
         },
-        lastUpdated: Date.now()
+        lastUpdated: Date.now(),
+        matchNotes: 'FORCED TEST MODE MATCH'
       };
       
       await this.firestoreService.updateDriverSearch(driverUserId, driverUpdates, { immediate: true });
-      console.log(`   ✅ Driver updated`);
+      console.log(`   ✅ Driver document updated`);
       
       // Update passenger's document
       const passengerUpdates = {
@@ -267,11 +284,12 @@ class MatchingService {
           availableSeats: driver.availableSeats || driver.capacity || 4,
           capacity: driver.capacity || 4
         },
-        lastUpdated: Date.now()
+        lastUpdated: Date.now(),
+        matchNotes: 'FORCED TEST MODE MATCH'
       };
       
       await this.firestoreService.updatePassengerSearch(passengerUserId, passengerUpdates, { immediate: true });
-      console.log(`   ✅ Passenger updated`);
+      console.log(`   ✅ Passenger document updated`);
       
       // Send WebSocket notifications
       if (this.websocketServer) {
@@ -286,9 +304,10 @@ class MatchingService {
           destinationName: passenger.destinationName || driver.destinationName,
           passengerCount: passenger.passengerCount || 1,
           estimatedFare: matchData.estimatedFare,
-          message: TEST_MODE ? 'TEST MODE: Match found!' : 'New passenger match found!',
+          message: '🚨 FORCED TEST MODE: Match found! (All checks bypassed)',
           timeout: TIMEOUTS.MATCH_PROPOSAL,
-          testMode: TEST_MODE
+          testMode: true,
+          forcedMatch: true
         });
         
         // Send to passenger
@@ -303,9 +322,10 @@ class MatchingService {
           pickupName: passenger.pickupName || driver.pickupName,
           destinationName: passenger.destinationName || driver.destinationName,
           estimatedFare: matchData.estimatedFare,
-          message: TEST_MODE ? 'TEST MODE: Driver found!' : 'Driver match found!',
+          message: '🚨 FORCED TEST MODE: Driver found! (All checks bypassed)',
           timeout: TIMEOUTS.MATCH_PROPOSAL,
-          testMode: TEST_MODE
+          testMode: true,
+          forcedMatch: true
         });
         
         console.log(`   📱 WebSocket notifications sent`);
@@ -316,11 +336,13 @@ class MatchingService {
         await this.checkAndExpireMatch(matchId);
       }, TIMEOUTS.MATCH_PROPOSAL);
       
-      console.log(`✅ Match ${matchId} created successfully!`);
+      console.log(`✅ FORCED match ${matchId} created successfully!`);
       return true;
       
     } catch (error) {
-      console.error(`❌ Error creating match:`, error);
+      console.error(`❌ ERROR creating forced match:`, error);
+      console.error(`❌ Error details:`, error.message);
+      console.error(`❌ Error stack:`, error.stack);
       this.failedMatches++;
       return false;
     }
@@ -360,7 +382,8 @@ class MatchingService {
           await this.firestoreService.db.collection('active_matches').doc(matchId).update({
             matchStatus: 'expired',
             expiredAt: new Date(),
-            updatedAt: new Date()
+            updatedAt: new Date(),
+            expiryReason: 'timeout'
           });
           
           // Notify users
@@ -511,8 +534,36 @@ class MatchingService {
       successfulMatches: this.successfulMatches,
       failedMatches: this.failedMatches,
       totalAttempts: this.matchAttempts,
-      successRate: this.matchAttempts > 0 ? (this.successfulMatches / this.matchAttempts * 100).toFixed(1) + '%' : '0%'
+      successRate: this.matchAttempts > 0 ? (this.successfulMatches / this.matchAttempts * 100).toFixed(1) + '%' : '0%',
+      forcedTestMode: this.FORCE_TEST_MODE
     };
+  }
+  
+  // Manual match function for testing
+  async manualMatch(driverId, passengerId) {
+    console.log(`\n🔧 MANUAL MATCH REQUESTED: ${driverId} ↔ ${passengerId}`);
+    
+    try {
+      // Get driver and passenger data
+      const driver = await this.firestoreService.getDriverSearch(driverId);
+      const passenger = await this.firestoreService.getPassengerSearch(passengerId);
+      
+      if (!driver || !passenger) {
+        console.log(`❌ Driver or passenger not found`);
+        return false;
+      }
+      
+      console.log(`   Driver: ${driver.driverName}`);
+      console.log(`   Passenger: ${passenger.passengerName}`);
+      
+      const result = await this.createForcedMatch(driver, passenger);
+      console.log(`   Result: ${result ? '✅ Success' : '❌ Failed'}`);
+      return result;
+      
+    } catch (error) {
+      console.error('❌ Error in manual match:', error);
+      return false;
+    }
   }
 }
 
