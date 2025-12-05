@@ -1,12 +1,11 @@
 // services/notificationService.js
 class NotificationService {
-  constructor(firestoreService, websocketServer) {
-    this.firestoreService = firestoreService;
+  constructor(websocketServer) {
     this.websocketServer = websocketServer;
     this.cleanupInterval = null;
     this.stats = {
       notificationsSent: 0,
-      notificationsSaved: 0,
+      notificationsFailed: 0,
       errors: 0,
       lastCleanup: null
     };
@@ -18,10 +17,10 @@ class NotificationService {
   // Send a match proposal to both driver and passenger
   async sendMatchProposals(match) {
     try {
-      console.log(`📱 Sending match proposals for match ${match.matchId}`);
+      console.log(`📱 Sending match proposals for match ${match?.matchId}`);
       
       if (!match || !match.driverId || !match.passengerId) {
-        console.error('❌ Invalid match data:', match);
+        console.error('❌ Invalid match data for proposals:', match);
         this.stats.errors++;
         return false;
       }
@@ -67,11 +66,12 @@ class NotificationService {
     
     if (!userId) {
       console.error('❌ Cannot send message: userId is null/undefined');
+      console.error('❌ Data being sent:', data);
       this.stats.errors++;
       return false;
     }
     
-    console.log(`📋 Sending match proposal for match: ${data.matchId}`);
+    console.log(`📋 Sending match proposal for match: ${data?.matchId} to user: ${userId}`);
     
     if (this.websocketServer.isUserConnected(userId)) {
       this.websocketServer.sendToUser(userId, {
@@ -82,13 +82,8 @@ class NotificationService {
       console.log(`✅ Match proposal sent to ${userId}`);
       return true;
     } else {
-      console.log(`📭 User ${userId} not connected, saving notification`);
-      // Save to Firestore for later delivery
-      this.saveNotification(userId, {
-        type: 'MATCH_PROPOSAL',
-        ...data,
-        timestamp: new Date().toISOString()
-      });
+      console.log(`📭 User ${userId} not connected, notification will be lost`);
+      this.stats.notificationsFailed++;
       return false;
     }
   }
@@ -135,6 +130,8 @@ class NotificationService {
       console.error('❌ Invalid match data for match expired');
       return false;
     }
+    
+    console.log(`📤 Sending match expired for match: ${match.matchId}`);
     
     // Notify driver if exists
     let driverNotified = true;
@@ -203,6 +200,7 @@ class NotificationService {
     
     if (!userId) {
       console.error('❌ Cannot send notification: userId is required');
+      console.error('❌ Notification data:', notification);
       this.stats.errors++;
       return false;
     }
@@ -219,63 +217,25 @@ class NotificationService {
       this.stats.notificationsSent++;
       return true;
     } else {
-      console.log(`📭 User ${userId} not connected, saving notification`);
-      this.saveNotification(userId, {
-        type: 'NOTIFICATION',
-        message,
-        notificationType: type,
-        data,
-        timestamp: new Date().toISOString()
-      });
+      console.log(`📭 User ${userId} not connected, notification will be lost`);
+      this.stats.notificationsFailed++;
       return false;
-    }
-  }
-
-  // Save notification to Firestore for offline users
-  async saveNotification(userId, notification) {
-    try {
-      if (!this.firestoreService) {
-        console.error('❌ Firestore service not available');
-        this.stats.errors++;
-        return;
-      }
-      
-      await this.firestoreService.saveNotification({
-        userId,
-        ...notification,
-        delivered: false,
-        createdAt: new Date().toISOString()
-      });
-      console.log(`💾 Notification saved for user ${userId}`);
-      this.stats.notificationsSaved++;
-    } catch (error) {
-      console.error('❌ Error saving notification:', error);
-      this.stats.errors++;
     }
   }
 
   // ==================== CLEANUP & MAINTENANCE ====================
 
-  // Start cleanup interval for old notifications
+  // Start cleanup interval (for stats cleanup only)
   startCleanupInterval(intervalMinutes = 60) {
     if (this.cleanupInterval) {
       clearInterval(this.cleanupInterval);
     }
     
-    this.cleanupInterval = setInterval(async () => {
-      try {
-        await this.cleanupOldNotifications();
-      } catch (error) {
-        console.error('❌ Error in notification cleanup:', error);
-      }
+    this.cleanupInterval = setInterval(() => {
+      this.cleanupStats();
     }, intervalMinutes * 60 * 1000);
     
-    console.log(`🧹 Notification cleanup interval started (every ${intervalMinutes} minutes)`);
-    
-    // Run initial cleanup
-    setTimeout(() => {
-      this.cleanupOldNotifications();
-    }, 5000);
+    console.log(`📊 Notification stats cleanup started (every ${intervalMinutes} minutes)`);
   }
 
   // Stop cleanup interval
@@ -287,29 +247,16 @@ class NotificationService {
     }
   }
 
-  // Cleanup old notifications (older than 7 days)
-  async cleanupOldNotifications() {
-    try {
-      if (!this.firestoreService) {
-        console.error('❌ Firestore service not available for cleanup');
-        return;
-      }
-      
-      const sevenDaysAgo = new Date();
-      sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-      
-      console.log(`🧹 Cleaning up notifications older than ${sevenDaysAgo.toISOString()}`);
-      
-      // This would be implemented in FirestoreService
-      const deletedCount = await this.firestoreService.cleanupOldNotifications(sevenDaysAgo);
-      
-      this.stats.lastCleanup = new Date().toISOString();
-      console.log(`✅ Cleanup completed: ${deletedCount} notifications deleted`);
-      
-    } catch (error) {
-      console.error('❌ Error cleaning up notifications:', error);
-      this.stats.errors++;
-    }
+  // Cleanup stats (reset counters periodically)
+  cleanupStats() {
+    console.log('🧹 Cleaning up notification stats');
+    this.stats = {
+      notificationsSent: 0,
+      notificationsFailed: 0,
+      errors: 0,
+      lastCleanup: new Date().toISOString()
+    };
+    console.log('✅ Notification stats cleaned up');
   }
 
   // ==================== UTILITY METHODS ====================
@@ -329,39 +276,8 @@ class NotificationService {
     return {
       ...this.stats,
       connectedUsers: this.getConnectedUsers().length,
-      uptime: this.stats.lastCleanup ? 
-        `Last cleanup: ${this.stats.lastCleanup}` : 'No cleanup yet'
+      status: 'Active'
     };
-  }
-
-  // Deliver pending notifications when user reconnects
-  async deliverPendingNotifications(userId) {
-    try {
-      if (!this.firestoreService) {
-        return;
-      }
-      
-      const pendingNotifications = await this.firestoreService.getPendingNotifications(userId);
-      
-      if (pendingNotifications.length > 0) {
-        console.log(`📦 Delivering ${pendingNotifications.length} pending notifications to ${userId}`);
-        
-        for (const notification of pendingNotifications) {
-          if (this.websocketServer && this.websocketServer.isUserConnected(userId)) {
-            this.websocketServer.sendToUser(userId, notification);
-            
-            // Mark as delivered
-            await this.firestoreService.markNotificationDelivered(notification.id);
-            this.stats.notificationsSent++;
-          }
-        }
-        
-        console.log(`✅ ${pendingNotifications.length} pending notifications delivered to ${userId}`);
-      }
-    } catch (error) {
-      console.error(`❌ Error delivering pending notifications to ${userId}:`, error);
-      this.stats.errors++;
-    }
   }
 }
 
