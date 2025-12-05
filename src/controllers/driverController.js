@@ -1,4 +1,4 @@
-// controllers/driverController.js - FIXED VERSION WITH IMMEDIATE SAVE
+// controllers/driverController.js - FIXED VERSION
 const express = require('express');
 const router = express.Router();
 const { v4: uuidv4 } = require('uuid');
@@ -7,7 +7,6 @@ const { v4: uuidv4 } = require('uuid');
 let services;
 let firestoreService;
 let db;
-let admin;
 let searchService;
 let rideService;
 let matchingService;
@@ -19,39 +18,37 @@ const ACTIVE_SEARCHES_PASSENGER_COLLECTION = 'active_searches_passenger';
 const ACTIVE_MATCHES_COLLECTION = 'active_matches';
 const ACTIVE_RIDES_COLLECTION = 'active_rides';
 
-// Helper function to verify document exists
-async function verifyDocumentExists(collection, docId) {
-  try {
-    const doc = await db.collection(collection).doc(docId).get();
-    return {
-      exists: doc.exists,
-      data: doc.exists ? doc.data() : null,
-      id: doc.id
-    };
-  } catch (error) {
-    console.error('❌ Error verifying document:', error);
-    return { exists: false, error: error.message };
-  }
-}
-
 // Initialize controller with services
 const init = (serviceContainer) => {
   services = serviceContainer;
   db = serviceContainer.db;
-  admin = serviceContainer.admin;
   firestoreService = serviceContainer.firestoreService;
   searchService = serviceContainer.searchService;
   rideService = serviceContainer.rideService;
   matchingService = serviceContainer.matchingService;
   websocketServer = serviceContainer.websocketServer;
+  
+  console.log('✅ DriverController initialized with services:');
+  console.log('- firestoreService:', firestoreService ? '✅' : '❌');
+  console.log('- db:', db ? '✅' : '❌');
+  console.log('- searchService:', searchService ? '✅' : '❌');
+  console.log('- websocketServer:', websocketServer ? '✅' : '❌');
 };
 
 // ========== ✅ ENDPOINT 1: /api/driver/start-search ==========
 router.post('/start-search', async (req, res) => {
   try {
     console.log('🚗 === DRIVER START-SEARCH ENDPOINT ===');
-    console.log('📦 Request body keys:', Object.keys(req.body));
-    console.log('📦 Request body:', JSON.stringify(req.body, null, 2));
+    
+    // DEBUG: Log everything received
+    console.log('📦 Full request body:');
+    console.log(JSON.stringify(req.body, null, 2));
+    
+    console.log('🔍 Checking driver data in request:');
+    console.log('- driverName from request:', req.body.driverName);
+    console.log('- driverPhone from request:', req.body.driverPhone);
+    console.log('- driverPhotoUrl from request:', req.body.driverPhotoUrl);
+    console.log('- vehicleInfo from request:', req.body.vehicleInfo);
     
     const { 
       userId, 
@@ -88,6 +85,7 @@ router.post('/start-search', async (req, res) => {
       searchId
     } = req.body;
     
+    // Determine actual driver ID
     const actualUserId = userId || driverId;
     
     if (!actualUserId) {
@@ -112,6 +110,7 @@ router.post('/start-search', async (req, res) => {
     console.log(`   - Destination: ${destinationName || 'Unknown'}`);
     console.log(`   - Capacity: ${capacity || 4} seats`);
     console.log(`   - Ride Type: ${rideType}`);
+    console.log(`   - Driver ID (document ID): ${actualUserId}`);
 
     // Create search data - Pass ALL data correctly
     const searchData = {
@@ -132,7 +131,7 @@ router.post('/start-search', async (req, res) => {
       isOnline: isOnline !== undefined ? isOnline : true,
       isSearching: isSearching !== undefined ? isSearching : true,
       
-      // Vehicle information - Pass as object if provided
+      // Vehicle information
       vehicleInfo: vehicleInfo || {
         model: 'Car Model',
         plate: 'ABC123',
@@ -185,7 +184,7 @@ router.post('/start-search', async (req, res) => {
       searchId: searchId || `driver_search_${actualUserId}_${Date.now()}`,
       status: 'searching',
       
-      // System data - Use simple Date objects
+      // System data
       createdAt: new Date(),
       updatedAt: new Date(),
       lastUpdated: Date.now()
@@ -193,48 +192,44 @@ router.post('/start-search', async (req, res) => {
 
     console.log('📋 Prepared driver search data:', JSON.stringify(searchData, null, 2));
 
-    // Use FirestoreService to save - With immediate option
+    // Use FirestoreService to save with immediate option
     if (firestoreService) {
-      // Use immediate save to ensure data is saved right away
+      console.log('⚡ Using FirestoreService with immediate save');
       const savedData = await firestoreService.saveDriverSearch(searchData, { immediate: true });
-      console.log(`✅ Driver search saved immediately: ${savedData.driverName}`);
+      console.log(`✅ Driver search saved: ${savedData.driverName}`);
       
       // Verify it was saved
-      const verification = await verifyDocumentExists(
+      const verification = await firestoreService.verifyDocumentExists(
         ACTIVE_SEARCHES_DRIVER_COLLECTION, 
         actualUserId
       );
       
       if (verification.exists) {
-        console.log('✅ VERIFIED - All driver data saved correctly');
-        console.log('📊 Verification data:', {
-          hasDriverName: !!verification.data.driverName,
-          hasDriverPhone: !!verification.data.driverPhone,
-          hasDriverPhoto: !!verification.data.driverPhotoUrl,
-          hasVehicleInfo: !!verification.data.vehicleInfo
-        });
+        console.log('✅ VERIFIED - Driver data saved to Firestore');
+        console.log('- Document ID:', actualUserId);
+        console.log('- Driver Phone in DB:', verification.data.driverPhone);
+        console.log('- Driver Photo in DB:', verification.data.driverPhotoUrl);
       } else {
-        console.log('⚠️ WARNING - Driver data may not have been saved');
+        console.log('❌ VERIFICATION FAILED - Driver data not saved');
       }
     } else {
-      // Fallback to direct Firestore
       console.warn('⚠️ FirestoreService not available, using direct Firestore');
       await db.collection(ACTIVE_SEARCHES_DRIVER_COLLECTION).doc(actualUserId).set(searchData);
-      console.log('✅ Driver search saved via direct Firestore');
     }
     
     // Also add to search service for in-memory matching
     if (searchService) {
       await searchService.addSearch(searchData);
-      console.log('✅ Driver search added to memory cache');
+      console.log('✅ Added to in-memory search service');
     }
 
     // Return response with all driver data
-    const response = {
+    res.json({
       success: true,
       message: 'Driver search started successfully',
       searchId: searchData.searchId,
       userId: actualUserId,
+      documentId: actualUserId,  // IMPORTANT: Return the document ID
       driverProfile: {
         driverName: searchData.driverName,
         driverPhone: searchData.driverPhone,
@@ -248,11 +243,8 @@ router.post('/start-search', async (req, res) => {
       timeout: '5 minutes (or until match found)',
       storage: ACTIVE_SEARCHES_DRIVER_COLLECTION,
       websocketConnected: websocketServer ? websocketServer.isUserConnected(actualUserId) : false,
-      immediateSave: true
-    };
-
-    console.log('📤 Sending response to client:', JSON.stringify(response, null, 2));
-    res.json(response);
+      importantNote: 'Use this documentId for all subsequent API calls'
+    });
 
   } catch (error) {
     console.error('❌ Error in driver start-search:', error);
@@ -283,13 +275,12 @@ router.post('/stop-search', async (req, res) => {
 
     console.log(`🛑 Stopping driver search: ${actualUserId}`);
 
-    // Use FirestoreService to update with immediate save
+    // Use FirestoreService to update
     if (firestoreService) {
       await firestoreService.updateDriverSearch(actualUserId, {
         status: 'stopped',
         isSearching: false,
-        lastUpdated: Date.now(),
-        updatedAt: new Date()
+        lastUpdated: Date.now()
       }, { immediate: true });
     } else {
       // Fallback
@@ -326,8 +317,7 @@ router.post('/stop-search', async (req, res) => {
       driverId: actualUserId,
       stoppedFromFirestore: true,
       stoppedFromMemory: memoryRemoved,
-      collection: ACTIVE_SEARCHES_DRIVER_COLLECTION,
-      immediateSave: true
+      collection: ACTIVE_SEARCHES_DRIVER_COLLECTION
     });
 
   } catch (error) {
@@ -368,7 +358,8 @@ router.get('/search-status/:driverId', async (req, res) => {
         exists: false,
         message: 'Driver not found in active searches',
         driverId: driverId,
-        collection: ACTIVE_SEARCHES_DRIVER_COLLECTION
+        collection: ACTIVE_SEARCHES_DRIVER_COLLECTION,
+        suggestion: 'Make sure driver has started search first'
       });
     }
 
@@ -398,6 +389,7 @@ router.get('/search-status/:driverId', async (req, res) => {
       success: true,
       exists: true,
       driverId: driverId,
+      documentId: driverId,  // Return the document ID
       driverProfile: {
         driverName: driverData.driverName,
         driverPhone: driverData.driverPhone,
@@ -422,7 +414,8 @@ router.get('/search-status/:driverId', async (req, res) => {
       status: driverData.status,
       rideType: driverData.rideType,
       isSearching: driverData.isSearching,
-      isOnline: driverData.isOnline
+      isOnline: driverData.isOnline,
+      importantNote: 'Use this documentId for all API calls'
     });
 
   } catch (error) {
@@ -434,82 +427,139 @@ router.get('/search-status/:driverId', async (req, res) => {
   }
 });
 
-// ========== ✅ ENDPOINT 4: /api/driver/get-match/:driverId ==========
-router.get('/get-match/:driverId', async (req, res) => {
+// ========== ✅ ENDPOINT 4: /api/driver/update-location ==========
+router.post('/update-location', async (req, res) => {
   try {
-    const { driverId } = req.params;
+    console.log('📍 === DRIVER UPDATE LOCATION ENDPOINT ===');
     
-    if (!driverId) {
+    const { userId, driverId, location, address } = req.body;
+    
+    console.log('📦 Request body:', JSON.stringify(req.body, null, 2));
+    
+    // FIRST: Try to get the actual driver document ID from Firestore
+    let actualDriverId = driverId || userId;
+    
+    if (!actualDriverId) {
       return res.status(400).json({
         success: false,
-        error: 'driverId is required'
+        error: 'driverId or userId is required'
       });
-    }
-
-    // Get driver search data
-    let driverData;
-    if (firestoreService) {
-      driverData = await firestoreService.getDriverSearch(driverId);
-    } else {
-      const driverDoc = await db.collection(ACTIVE_SEARCHES_DRIVER_COLLECTION).doc(driverId).get();
-      driverData = driverDoc.exists ? { id: driverDoc.id, ...driverDoc.data() } : null;
     }
     
-    if (!driverData || !driverData.matchId) {
-      return res.json({
-        success: true,
-        hasMatch: false,
-        message: driverData ? 'No active match found' : 'Driver not found',
-        driverId: driverId
+    if (!location || !location.lat || !location.lng) {
+      return res.status(400).json({
+        success: false,
+        error: 'Valid location with lat and lng is required'
       });
-    }
-
-    // Get match data
-    let matchData;
-    if (firestoreService) {
-      matchData = await firestoreService.getMatch(driverData.matchId);
-    } else {
-      const matchDoc = await db.collection(ACTIVE_MATCHES_COLLECTION).doc(driverData.matchId).get();
-      matchData = matchDoc.exists ? { id: matchDoc.id, ...matchDoc.data() } : null;
     }
     
-    if (!matchData) {
-      return res.json({
-        success: true,
-        hasMatch: false,
-        message: 'Match data not found',
-        driverId: driverId,
-        matchId: driverData.matchId
-      });
-    }
-
-    // Get passenger data
-    let passengerData = null;
-    if (matchData.passengerId) {
-      if (firestoreService) {
-        passengerData = await firestoreService.getPassengerSearch(matchData.passengerId);
+    console.log(`📍 Updating driver location: ${actualDriverId}`);
+    console.log(`   Location: ${location.lat}, ${location.lng}`);
+    
+    // CRITICAL FIX: Check if document exists with this ID
+    const driverDoc = await db.collection(ACTIVE_SEARCHES_DRIVER_COLLECTION).doc(actualDriverId).get();
+    
+    if (!driverDoc.exists) {
+      console.log(`⚠️ Document not found with ID: ${actualDriverId}`);
+      
+      // Try to find driver by phone number
+      console.log('🔍 Searching for driver by phone number...');
+      
+      const querySnapshot = await db.collection(ACTIVE_SEARCHES_DRIVER_COLLECTION)
+        .where('driverPhone', '==', actualDriverId)
+        .limit(1)
+        .get();
+      
+      if (!querySnapshot.empty) {
+        // Found by phone number
+        const foundDriver = querySnapshot.docs[0];
+        actualDriverId = foundDriver.id;
+        console.log(`✅ Found driver by phone: ${actualDriverId}`);
       } else {
-        const passengerDoc = await db.collection(ACTIVE_SEARCHES_PASSENGER_COLLECTION).doc(matchData.passengerId).get();
-        passengerData = passengerDoc.exists ? { id: passengerDoc.id, ...passengerDoc.data() } : null;
+        // Try searching by userId field
+        const userIdQuery = await db.collection(ACTIVE_SEARCHES_DRIVER_COLLECTION)
+          .where('userId', '==', actualDriverId)
+          .limit(1)
+          .get();
+          
+        if (!userIdQuery.empty) {
+          const foundDriver = userIdQuery.docs[0];
+          actualDriverId = foundDriver.id;
+          console.log(`✅ Found driver by userId: ${actualDriverId}`);
+        } else {
+          return res.status(404).json({
+            success: false,
+            error: `Driver document not found with ID: ${actualDriverId}`,
+            suggestion: 'Make sure driver search is active first using /api/driver/start-search'
+          });
+        }
+      }
+    }
+    
+    console.log(`📍 Using actual driver document ID: ${actualDriverId}`);
+    
+    // Update driver location in Firestore
+    await db.collection(ACTIVE_SEARCHES_DRIVER_COLLECTION).doc(actualDriverId).update({
+      currentLocation: {
+        latitude: location.lat,
+        longitude: location.lng,
+        accuracy: location.accuracy || 0,
+        address: address || '',
+        timestamp: new Date()
+      },
+      updatedAt: new Date(),
+      lastUpdated: Date.now()
+    });
+
+    // If driver has a passenger, update passenger's embedded driver location
+    const updatedDriverDoc = await db.collection(ACTIVE_SEARCHES_DRIVER_COLLECTION).doc(actualDriverId).get();
+    if (updatedDriverDoc.exists) {
+      const driverData = updatedDriverDoc.data();
+      
+      if (driverData.matchedWith && driverData.passenger) {
+        await db.collection(ACTIVE_SEARCHES_PASSENGER_COLLECTION).doc(driverData.matchedWith).update({
+          'driver.currentLocation': {
+            latitude: location.lat,
+            longitude: location.lng,
+            timestamp: new Date()
+          },
+          updatedAt: new Date()
+        });
+        
+        // Notify passenger via WebSocket
+        if (websocketServer) {
+          websocketServer.sendDriverLocationUpdate(driverData.matchedWith, {
+            driverId: actualDriverId,
+            driverName: driverData.driverName,
+            location: {
+              lat: location.lat,
+              lng: location.lng
+            },
+            timestamp: new Date().toISOString()
+          });
+        }
+        
+        console.log(`✅ Passenger notified of driver location update: ${driverData.matchedWith}`);
       }
     }
 
     res.json({
       success: true,
-      hasMatch: true,
-      driverId: driverId,
-      matchStatus: driverData.matchStatus,
-      matchId: driverData.matchId,
-      passengerId: matchData.passengerId,
-      passengerData: passengerData,
-      matchData: matchData,
-      tripStatus: driverData.tripStatus,
-      rideId: driverData.rideId,
-      collection: ACTIVE_MATCHES_COLLECTION
+      message: 'Driver location updated successfully',
+      driverId: actualDriverId,
+      originalDriverId: driverId || userId,
+      location: {
+        lat: location.lat,
+        lng: location.lng
+      },
+      address: address || '',
+      timestamp: new Date().toISOString(),
+      passengerNotified: true,
+      note: `Use '${actualDriverId}' as driverId for future calls`
     });
 
   } catch (error) {
-    console.error('❌ Error getting driver match:', error);
+    console.error('❌ Error updating driver location:', error);
     res.status(500).json({
       success: false,
       error: error.message || 'Internal server error'
@@ -517,126 +567,300 @@ router.get('/get-match/:driverId', async (req, res) => {
   }
 });
 
-// ========== ✅ ENDPOINT 5: /api/driver/accept-match ==========
+// ========== ✅ ENDPOINT 5: /api/driver/availability ==========
+router.post('/availability', async (req, res) => {
+  try {
+    const { userId, driverId, isAvailable } = req.body;
+    
+    const actualDriverId = driverId || userId;
+    
+    if (!actualDriverId) {
+      return res.status(400).json({
+        success: false,
+        error: 'driverId or userId is required'
+      });
+    }
+
+    if (isAvailable === undefined) {
+      return res.status(400).json({
+        success: false,
+        error: 'isAvailable is required'
+      });
+    }
+
+    console.log(`🔄 Setting driver availability: ${actualDriverId} = ${isAvailable}`);
+
+    await db.collection(ACTIVE_SEARCHES_DRIVER_COLLECTION).doc(actualDriverId).update({
+      isOnline: isAvailable,
+      isSearching: isAvailable,
+      updatedAt: new Date(),
+      lastUpdated: Date.now()
+    });
+
+    // Notify via WebSocket if going offline
+    if (!isAvailable && websocketServer) {
+      websocketServer.sendSearchStopped(actualDriverId, {
+        userType: 'driver',
+        reason: 'driver_went_offline',
+        message: 'Driver is now offline'
+      });
+    }
+
+    res.json({
+      success: true,
+      driverId: actualDriverId,
+      isAvailable: isAvailable,
+      isOnline: isAvailable,
+      isSearching: isAvailable,
+      timestamp: new Date().toISOString()
+    });
+
+  } catch (error) {
+    console.error('❌ Error setting driver availability:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Internal server error'
+    });
+  }
+});
+
+// ========== ✅ ENDPOINT 6: /api/driver/accept-match ==========
 router.post('/accept-match', async (req, res) => {
   try {
     console.log('✅ === DRIVER ACCEPT MATCH ENDPOINT ===');
     
-    const { driverId, matchId } = req.body;
+    const { driverId, userId, matchId, passengerId } = req.body;
     
-    if (!driverId || !matchId) {
+    const actualDriverId = driverId || userId;
+    
+    if (!actualDriverId) {
       return res.status(400).json({
         success: false,
-        error: 'driverId and matchId are required'
+        error: 'driverId or userId is required'
       });
-    }
-
-    console.log(`✅ Driver accepting match: ${driverId}, match: ${matchId}`);
-
-    // Get match data
-    let matchData;
-    if (firestoreService) {
-      matchData = await firestoreService.getMatch(matchId);
-    } else {
-      const matchDoc = await db.collection(ACTIVE_MATCHES_COLLECTION).doc(matchId).get();
-      matchData = matchDoc.exists ? { id: matchDoc.id, ...matchDoc.data() } : null;
     }
     
-    if (!matchData) {
+    if (!matchId) {
+      return res.status(400).json({
+        success: false,
+        error: 'matchId is required'
+      });
+    }
+    
+    if (!passengerId) {
+      return res.status(400).json({
+        success: false,
+        error: 'passengerId is required'
+      });
+    }
+    
+    console.log(`🤝 Driver ${actualDriverId} accepting match ${matchId} with passenger ${passengerId}`);
+
+    // Get driver document
+    const driverDoc = await db.collection(ACTIVE_SEARCHES_DRIVER_COLLECTION).doc(actualDriverId).get();
+    if (!driverDoc.exists) {
       return res.status(404).json({
         success: false,
-        error: 'Match not found'
+        error: 'Driver not found in active searches'
       });
     }
-
-    // Update driver search with match acceptance
-    const updates = {
-      matchStatus: 'accepted',
+    
+    const driverData = driverDoc.data();
+    
+    // Verify match exists and is proposed
+    if (driverData.matchId !== matchId || driverData.matchStatus !== 'proposed') {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid match or match already processed'
+      });
+    }
+    
+    // Verify matched with correct passenger
+    if (driverData.matchedWith !== passengerId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Passenger ID does not match proposed match'
+      });
+    }
+    
+    // Get passenger document
+    const passengerDoc = await db.collection(ACTIVE_SEARCHES_PASSENGER_COLLECTION).doc(passengerId).get();
+    if (!passengerDoc.exists) {
+      return res.status(404).json({
+        success: false,
+        error: 'Passenger not found in active searches'
+      });
+    }
+    
+    const passengerData = passengerDoc.data();
+    
+    // Check if driver has available seats
+    const passengerCount = passengerData.passengerCount || 1;
+    const availableSeats = driverData.availableSeats || driverData.capacity || 4;
+    if (availableSeats < passengerCount) {
+      return res.status(400).json({
+        success: false,
+        error: `Not enough available seats. Available: ${availableSeats}, Needed: ${passengerCount}`
+      });
+    }
+    
+    // Generate ride ID
+    const rideId = `ride_${uuidv4()}`;
+    
+    // Create active ride
+    const rideData = {
+      rideId: rideId,
+      driverId: actualDriverId,
+      driverName: driverData.driverName,
+      driverPhone: driverData.driverPhone,
+      driverPhotoUrl: driverData.driverPhotoUrl,
+      driverRating: driverData.driverRating,
+      vehicleInfo: driverData.vehicleInfo,
+      passengerId: passengerId,
+      passengerName: passengerData.passengerName,
+      passengerPhone: passengerData.passengerPhone,
+      passengerPhotoUrl: passengerData.passengerPhotoUrl,
+      pickupLocation: passengerData.pickupLocation || driverData.pickupLocation,
+      pickupName: passengerData.pickupName || driverData.pickupName,
+      destinationLocation: passengerData.destinationLocation || driverData.destinationLocation,
+      destinationName: passengerData.destinationName || driverData.destinationName,
+      distance: passengerData.distance || driverData.distance,
+      duration: passengerData.duration || driverData.duration,
+      estimatedFare: passengerData.estimatedFare || driverData.estimatedFare,
+      rideType: driverData.rideType || passengerData.rideType || 'immediate',
+      scheduledTime: driverData.scheduledTime || passengerData.scheduledTime,
+      status: 'driver_accepted',
+      matchId: matchId,
       tripStatus: 'driver_accepted',
       acceptedAt: new Date(),
-      lastUpdated: Date.now(),
-      matchedWith: matchData.passengerId,
-      matchId: matchId
+      createdAt: new Date(),
+      updatedAt: new Date()
     };
 
-    if (firestoreService) {
-      await firestoreService.updateDriverSearch(driverId, updates, { immediate: true });
-    } else {
-      await db.collection(ACTIVE_SEARCHES_DRIVER_COLLECTION).doc(driverId).update({
-        ...updates,
-        updatedAt: new Date()
-      });
-    }
-
-    // Update match status
-    const matchUpdates = {
-      driverStatus: 'accepted',
-      status: 'driver_accepted',
+    await db.collection(ACTIVE_RIDES_COLLECTION).doc(rideId).set(rideData);
+    console.log(`✅ Created active ride: ${rideId}`);
+    
+    // Update driver document
+    const driverUpdates = {
+      matchId: matchId,
+      matchedWith: passengerId,
+      matchStatus: 'accepted',
+      rideId: rideId,
+      tripStatus: 'driver_accepted',
+      passenger: {
+        passengerId: passengerId,
+        passengerName: passengerData.passengerName,
+        passengerPhone: passengerData.passengerPhone,
+        passengerPhotoUrl: passengerData.passengerPhotoUrl,
+        pickupLocation: passengerData.pickupLocation,
+        pickupName: passengerData.pickupName,
+        destinationLocation: passengerData.destinationLocation,
+        destinationName: passengerData.destinationName,
+        passengerCount: passengerCount,
+        matchAcceptedAt: new Date()
+      },
+      currentPassengers: (driverData.currentPassengers || 0) + passengerCount,
+      availableSeats: Math.max(0, availableSeats - passengerCount),
+      acceptedAt: new Date(),
       lastUpdated: Date.now()
     };
 
-    if (firestoreService) {
-      await firestoreService.queueWrite(
-        ACTIVE_MATCHES_COLLECTION,
-        matchId,
-        { ...matchUpdates, updatedAt: new Date() },
-        'update'
-      );
-    } else {
-      await db.collection(ACTIVE_MATCHES_COLLECTION).doc(matchId).update({
-        ...matchUpdates,
-        updatedAt: new Date()
-      });
-    }
-
-    // Create ride record
-    const driverData = firestoreService 
-      ? await firestoreService.getDriverSearch(driverId)
-      : null;
+    await db.collection(ACTIVE_SEARCHES_DRIVER_COLLECTION).doc(actualDriverId).update(driverUpdates);
+    console.log(`✅ Updated driver ${actualDriverId} with passenger acceptance`);
     
-    const passengerData = firestoreService && matchData.passengerId
-      ? await firestoreService.getPassengerSearch(matchData.passengerId)
-      : null;
+    // Update passenger document
+    const passengerUpdates = {
+      matchId: matchId,
+      matchedWith: actualDriverId,
+      matchStatus: 'accepted',
+      rideId: rideId,
+      tripStatus: 'driver_accepted',
+      driver: {
+        driverId: actualDriverId,
+        driverName: driverData.driverName,
+        driverPhone: driverData.driverPhone,
+        driverPhotoUrl: driverData.driverPhotoUrl,
+        driverRating: driverData.driverRating,
+        vehicleInfo: driverData.vehicleInfo,
+        vehicleType: driverData.vehicleType,
+        capacity: driverData.capacity,
+        currentPassengers: driverUpdates.currentPassengers,
+        availableSeats: driverUpdates.availableSeats,
+        matchAcceptedAt: new Date()
+      },
+      acceptedAt: new Date(),
+      lastUpdated: Date.now()
+    };
 
-    if (driverData && passengerData && rideService) {
-      const rideId = await rideService.createRide(driverData, passengerData, matchId);
-      
-      // Update driver with rideId
-      if (firestoreService) {
-        await firestoreService.updateDriverSearch(driverId, { rideId }, { immediate: true });
-      } else {
-        await db.collection(ACTIVE_SEARCHES_DRIVER_COLLECTION).doc(driverId).update({
-          rideId: rideId,
-          updatedAt: new Date()
-        });
-      }
+    await db.collection(ACTIVE_SEARCHES_PASSENGER_COLLECTION).doc(passengerId).update(passengerUpdates);
+    console.log(`✅ Updated passenger ${passengerId} with driver acceptance`);
+    
+    // Update match document
+    await db.collection(ACTIVE_MATCHES_COLLECTION).doc(matchId).update({
+      matchStatus: 'accepted',
+      rideId: rideId,
+      acceptedAt: new Date(),
+      updatedAt: new Date()
+    });
+    
+    // Stop searching for passenger
+    if (searchService) {
+      await searchService.removeSearch(passengerId, 'passenger');
     }
-
-    // Notify via WebSocket
+    
+    // Notify both users via WebSocket
     if (websocketServer) {
-      websocketServer.sendMatchAccepted(matchId, {
-        driverId: driverId,
-        passengerId: matchData.passengerId,
-        status: 'driver_accepted',
-        timestamp: new Date().toISOString()
+      // Notify driver
+      websocketServer.sendMatchAccepted(actualDriverId, {
+        matchId: matchId,
+        rideId: rideId,
+        passengerId: passengerId,
+        passengerName: passengerData.passengerName,
+        passengerPhone: passengerData.passengerPhone,
+        pickupName: passengerData.pickupName || driverData.pickupName,
+        destinationName: passengerData.destinationName || driverData.destinationName,
+        passengerCount: passengerCount,
+        message: 'Passenger accepted successfully!',
+        nextStep: 'Proceed to pickup location'
+      });
+      
+      // Notify passenger
+      websocketServer.sendMatchAccepted(passengerId, {
+        matchId: matchId,
+        rideId: rideId,
+        driverId: actualDriverId,
+        driverName: driverData.driverName,
+        driverPhone: driverData.driverPhone,
+        driverPhotoUrl: driverData.driverPhotoUrl,
+        driverRating: driverData.driverRating,
+        vehicleInfo: driverData.vehicleInfo,
+        pickupName: passengerData.pickupName || driverData.pickupName,
+        destinationName: passengerData.destinationName || driverData.destinationName,
+        estimatedFare: passengerData.estimatedFare || driverData.estimatedFare,
+        message: 'Driver has accepted your ride!',
+        nextStep: 'Wait for driver to arrive'
       });
     }
-
-    console.log(`✅ Driver ${driverId} accepted match ${matchId}`);
-
+    
     res.json({
       success: true,
-      message: 'Match accepted successfully',
-      driverId: driverId,
+      message: 'Passenger accepted successfully',
       matchId: matchId,
-      passengerId: matchData.passengerId,
-      matchStatus: 'accepted',
-      tripStatus: 'driver_accepted',
-      immediateSave: true
+      rideId: rideId,
+      driverId: actualDriverId,
+      driverName: driverData.driverName,
+      passengerId: passengerId,
+      passengerName: passengerData.passengerName,
+      passengerCount: passengerCount,
+      availableSeats: driverUpdates.availableSeats,
+      currentPassengers: driverUpdates.currentPassengers,
+      rideData: rideData,
+      nextStep: 'Proceed to pickup location',
+      websocketNotification: true
     });
-
+    
   } catch (error) {
-    console.error('❌ Error accepting match:', error);
+    console.error('❌ Error accepting passenger:', error);
     res.status(500).json({
       success: false,
       error: error.message || 'Internal server error'
@@ -644,79 +868,76 @@ router.post('/accept-match', async (req, res) => {
   }
 });
 
-// ========== ✅ ENDPOINT 6: /api/driver/reject-match ==========
+// ========== ✅ ENDPOINT 7: /api/driver/reject-match ==========
 router.post('/reject-match', async (req, res) => {
   try {
-    console.log('❌ === DRIVER REJECT MATCH ENDPOINT ===');
+    const { driverId, userId, matchId, passengerId, userType = 'driver' } = req.body;
     
-    const { driverId, matchId } = req.body;
+    const actualUserId = driverId || userId;
     
-    if (!driverId || !matchId) {
+    if (!actualUserId) {
       return res.status(400).json({
         success: false,
-        error: 'driverId and matchId are required'
+        error: 'userId or driverId is required'
       });
     }
+    
+    if (!matchId) {
+      return res.status(400).json({
+        success: false,
+        error: 'matchId is required'
+      });
+    }
+    
+    console.log(`❌ Driver ${actualUserId} rejecting match ${matchId}`);
 
-    console.log(`❌ Driver rejecting match: ${driverId}, match: ${matchId}`);
-
-    // Update driver search to remove match
-    const updates = {
-      matchStatus: 'rejected',
-      matchedWith: null,
+    // Clear from Firestore first
+    await db.collection(ACTIVE_SEARCHES_DRIVER_COLLECTION).doc(actualUserId).update({
       matchId: null,
-      tripStatus: null,
+      matchedWith: null,
+      matchStatus: null,
+      passenger: null,
       lastUpdated: Date.now()
-    };
+    });
+    
+    // Update match document
+    await db.collection(ACTIVE_MATCHES_COLLECTION).doc(matchId).update({
+      matchStatus: 'rejected',
+      rejectedAt: new Date(),
+      updatedAt: new Date(),
+      rejectedBy: userType,
+      rejectedByUserId: actualUserId
+    });
+    
+    console.log(`✅ Match ${matchId} rejected by driver ${actualUserId}`);
 
-    if (firestoreService) {
-      await firestoreService.updateDriverSearch(driverId, updates, { immediate: true });
-    } else {
-      await db.collection(ACTIVE_SEARCHES_DRIVER_COLLECTION).doc(driverId).update({
-        ...updates,
-        updatedAt: new Date()
+    // Also update passenger if match existed
+    if (passengerId) {
+      await db.collection(ACTIVE_SEARCHES_PASSENGER_COLLECTION).doc(passengerId).update({
+        matchId: null,
+        matchedWith: null,
+        matchStatus: null,
+        driver: null,
+        lastUpdated: Date.now()
       });
+      
+      // Notify passenger
+      if (websocketServer) {
+        websocketServer.sendMatchRejected(passengerId, {
+          matchId: matchId,
+          driverId: actualUserId,
+          message: 'Driver rejected the match proposal'
+        });
+      }
     }
-
-    // Update match status
-    const matchUpdates = {
-      driverStatus: 'rejected',
-      status: 'rejected',
-      lastUpdated: Date.now()
-    };
-
-    if (firestoreService) {
-      await firestoreService.queueWrite(
-        ACTIVE_MATCHES_COLLECTION,
-        matchId,
-        { ...matchUpdates, updatedAt: new Date() },
-        'update'
-      );
-    } else {
-      await db.collection(ACTIVE_MATCHES_COLLECTION).doc(matchId).update({
-        ...matchUpdates,
-        updatedAt: new Date()
-      });
-    }
-
-    // Notify via WebSocket
-    if (websocketServer) {
-      websocketServer.sendMatchRejected(matchId, {
-        driverId: driverId,
-        status: 'rejected',
-        reason: 'driver_rejected',
-        timestamp: new Date().toISOString()
-      });
-    }
-
-    console.log(`✅ Driver ${driverId} rejected match ${matchId}`);
 
     res.json({
       success: true,
       message: 'Match rejected successfully',
-      driverId: driverId,
       matchId: matchId,
-      immediateSave: true
+      driverId: actualUserId,
+      userType: userType,
+      websocketNotification: true
     });
 
   } catch (error) {
@@ -728,147 +949,88 @@ router.post('/reject-match', async (req, res) => {
   }
 });
 
-// ========== ✅ ENDPOINT 7: /api/driver/update-location ==========
-router.post('/update-location', async (req, res) => {
-  try {
-    const { driverId, location, rideId } = req.body;
-    
-    if (!driverId || !location) {
-      return res.status(400).json({
-        success: false,
-        error: 'driverId and location are required'
-      });
-    }
-
-    console.log(`📍 Updating driver location: ${driverId}`);
-
-    // Update driver search location
-    const updates = {
-      currentLocation: location,
-      lastLocationUpdate: new Date(),
-      lastUpdated: Date.now()
-    };
-
-    if (firestoreService) {
-      await firestoreService.updateDriverSearch(driverId, updates, { immediate: true });
-    } else {
-      await db.collection(ACTIVE_SEARCHES_DRIVER_COLLECTION).doc(driverId).update({
-        ...updates,
-        updatedAt: new Date()
-      });
-    }
-
-    // If rideId exists, update ride location too
-    if (rideId) {
-      const rideUpdates = {
-        driverLocation: location,
-        lastLocationUpdate: new Date(),
-        lastUpdated: Date.now()
-      };
-
-      if (firestoreService) {
-        await firestoreService.queueWrite(
-          ACTIVE_RIDES_COLLECTION,
-          rideId,
-          { ...rideUpdates, updatedAt: new Date() },
-          'update'
-        );
-      } else {
-        await db.collection(ACTIVE_RIDES_COLLECTION).doc(rideId).update({
-          ...rideUpdates,
-          updatedAt: new Date()
-        });
-      }
-    }
-
-    // Notify via WebSocket
-    if (websocketServer) {
-      websocketServer.sendLocationUpdate(driverId, {
-        location: location,
-        timestamp: new Date().toISOString(),
-        rideId: rideId
-      });
-    }
-
-    res.json({
-      success: true,
-      message: 'Location updated successfully',
-      driverId: driverId,
-      location: location,
-      timestamp: new Date().toISOString(),
-      immediateSave: true
-    });
-
-  } catch (error) {
-    console.error('❌ Error updating location:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message || 'Internal server error'
-    });
-  }
-});
-
-// ========== ✅ ENDPOINT 8: /api/driver/get-ride/:driverId ==========
-router.get('/get-ride/:driverId', async (req, res) => {
+// ========== ✅ ENDPOINT 8: /api/driver/status/:driverId ==========
+router.get('/status/:driverId', async (req, res) => {
   try {
     const { driverId } = req.params;
     
+    console.log(`🔍 Getting driver status: ${driverId}`);
+
     if (!driverId) {
       return res.status(400).json({
         success: false,
-        error: 'driverId is required'
+        error: 'driverId parameter is required'
       });
     }
 
-    // Get driver search data
-    let driverData;
-    if (firestoreService) {
-      driverData = await firestoreService.getDriverSearch(driverId);
-    } else {
-      const driverDoc = await db.collection(ACTIVE_SEARCHES_DRIVER_COLLECTION).doc(driverId).get();
-      driverData = driverDoc.exists ? { id: driverDoc.id, ...driverDoc.data() } : null;
-    }
+    const driverDoc = await db.collection(ACTIVE_SEARCHES_DRIVER_COLLECTION).doc(driverId).get();
     
-    if (!driverData || !driverData.rideId) {
+    if (!driverDoc.exists) {
       return res.json({
         success: true,
-        hasRide: false,
-        message: driverData ? 'No active ride found' : 'Driver not found',
+        exists: false,
+        message: 'Driver not found',
         driverId: driverId
       });
     }
 
-    // Get ride data
-    const rideDoc = await db.collection(ACTIVE_RIDES_COLLECTION).doc(driverData.rideId).get();
-    const rideData = rideDoc.exists ? { id: rideDoc.id, ...rideDoc.data() } : null;
+    const driverData = driverDoc.data();
     
-    if (!rideData) {
-      return res.json({
-        success: true,
-        hasRide: false,
-        message: 'Ride data not found',
-        driverId: driverId,
-        rideId: driverData.rideId
-      });
+    // Get match and ride data
+    let matchData = null;
+    let rideData = null;
+    
+    if (driverData.matchId) {
+      const matchDoc = await db.collection(ACTIVE_MATCHES_COLLECTION).doc(driverData.matchId).get();
+      if (matchDoc.exists) {
+        matchData = matchDoc.data();
+      }
+    }
+    
+    if (driverData.rideId) {
+      const rideDoc = await db.collection(ACTIVE_RIDES_COLLECTION).doc(driverData.rideId).get();
+      if (rideDoc.exists) {
+        rideData = rideDoc.data();
+      }
     }
 
     res.json({
       success: true,
-      hasRide: true,
-      driverId: driverId,
-      rideId: driverData.rideId,
-      rideData: rideData,
-      passengerId: rideData.passengerId,
-      pickupLocation: rideData.pickupLocation,
-      destinationLocation: rideData.destinationLocation,
-      status: rideData.status,
-      tripStatus: rideData.tripStatus,
-      estimatedFare: rideData.estimatedFare,
-      collection: ACTIVE_RIDES_COLLECTION
+      driver: {
+        id: driverId,
+        name: driverData.driverName,
+        phone: driverData.driverPhone,
+        photoUrl: driverData.driverPhotoUrl,
+        rating: driverData.driverRating,
+        vehicleInfo: driverData.vehicleInfo,
+        isOnline: driverData.isOnline,
+        isSearching: driverData.isSearching,
+        status: driverData.status,
+        matchStatus: driverData.matchStatus,
+        currentPassengers: driverData.currentPassengers || 0,
+        availableSeats: driverData.availableSeats || driverData.capacity || 4,
+        capacity: driverData.capacity || 4
+      },
+      match: matchData ? {
+        id: matchData.matchId,
+        status: matchData.matchStatus,
+        passengerId: matchData.passengerId,
+        passengerName: matchData.passengerName,
+        createdAt: matchData.createdAt
+      } : null,
+      ride: rideData ? {
+        id: rideData.rideId,
+        status: rideData.status,
+        passengerName: rideData.passengerName,
+        pickupName: rideData.pickupName,
+        destinationName: rideData.destinationName
+      } : null,
+      passenger: driverData.passenger,
+      timestamp: new Date().toISOString()
     });
 
   } catch (error) {
-    console.error('❌ Error getting driver ride:', error);
+    console.error('❌ Error getting driver status:', error);
     res.status(500).json({
       success: false,
       error: error.message || 'Internal server error'
@@ -876,45 +1038,56 @@ router.get('/get-ride/:driverId', async (req, res) => {
   }
 });
 
-// ========== ✅ ENDPOINT 9: /api/driver/update-status ==========
-router.post('/update-status', async (req, res) => {
+// ========== ✅ ENDPOINT 9: /api/driver/find-by-phone/:phone ==========
+router.get('/find-by-phone/:phone', async (req, res) => {
   try {
-    const { driverId, isOnline, isSearching, status } = req.body;
+    const { phone } = req.params;
     
-    if (!driverId) {
+    console.log(`🔍 Finding driver by phone: ${phone}`);
+
+    if (!phone) {
       return res.status(400).json({
         success: false,
-        error: 'driverId is required'
+        error: 'Phone number is required'
       });
     }
 
-    console.log(`🔄 Updating driver status: ${driverId}`, { isOnline, isSearching, status });
-
-    const updates = {
-      lastUpdated: Date.now(),
-      updatedAt: new Date()
-    };
-
-    if (isOnline !== undefined) updates.isOnline = isOnline;
-    if (isSearching !== undefined) updates.isSearching = isSearching;
-    if (status) updates.status = status;
-
-    if (firestoreService) {
-      await firestoreService.updateDriverSearch(driverId, updates, { immediate: true });
-    } else {
-      await db.collection(ACTIVE_SEARCHES_DRIVER_COLLECTION).doc(driverId).update(updates);
+    // Search for driver by phone
+    const querySnapshot = await db.collection(ACTIVE_SEARCHES_DRIVER_COLLECTION)
+      .where('driverPhone', '==', phone)
+      .limit(1)
+      .get();
+    
+    if (querySnapshot.empty) {
+      return res.json({
+        success: true,
+        found: false,
+        message: 'Driver not found with this phone number',
+        phone: phone
+      });
     }
 
+    const driverDoc = querySnapshot.docs[0];
+    const driverData = driverDoc.data();
+    
     res.json({
       success: true,
-      message: 'Driver status updated successfully',
-      driverId: driverId,
-      updates: updates,
-      immediateSave: true
+      found: true,
+      driverId: driverDoc.id,
+      driver: {
+        name: driverData.driverName,
+        phone: driverData.driverPhone,
+        photoUrl: driverData.driverPhotoUrl,
+        rating: driverData.driverRating,
+        isOnline: driverData.isOnline,
+        isSearching: driverData.isSearching,
+        status: driverData.status
+      },
+      note: `Use '${driverDoc.id}' as driverId for API calls`
     });
 
   } catch (error) {
-    console.error('❌ Error updating driver status:', error);
+    console.error('❌ Error finding driver by phone:', error);
     res.status(500).json({
       success: false,
       error: error.message || 'Internal server error'
