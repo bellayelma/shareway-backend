@@ -2,9 +2,20 @@ const express = require('express');
 const router = express.Router();
 
 let services = null;
+let firestoreService = null;
+let searchService = null;
 
 const init = (injectedServices) => {
   services = injectedServices;
+  
+  // Initialize service references for backward compatibility
+  if (services.firestoreService) {
+    firestoreService = services.firestoreService;
+  }
+  
+  if (services.searchService) {
+    searchService = services.searchService;
+  }
   
   // Start passenger search endpoint (Fixed to ensure userId is always set)
   router.post('/search', async (req, res) => {
@@ -58,6 +69,78 @@ const init = (injectedServices) => {
       res.status(500).json({ 
         success: false,
         error: error.message 
+      });
+    }
+  });
+  
+  // Save passenger search endpoint (uses phone as ID)
+  router.post('/save-search', async (req, res) => {
+    try {
+      const passengerData = req.body;
+      const passengerPhone = passengerData.passengerPhone || passengerData.phone;
+      
+      if (!passengerPhone) {
+        return res.status(400).json({
+          success: false,
+          message: 'Passenger phone number is required'
+        });
+      }
+      
+      console.log(`💾 Saving passenger search for phone: ${passengerPhone}`);
+      
+      // Prepare passenger data
+      const now = new Date().toISOString();
+      const searchData = {
+        ...passengerData,
+        passengerPhone,
+        passengerId: passengerData.passengerId || passengerPhone,
+        userId: passengerData.userId || passengerPhone,
+        passengerName: passengerData.passengerName || passengerData.name || 'Unknown Passenger',
+        passengerPhotoUrl: passengerData.passengerPhotoUrl || passengerData.photoUrl || '',
+        passengerCount: passengerData.passengerCount || passengerData.count || 1,
+        rideType: passengerData.rideType || passengerData.type || 'standard',
+        status: 'searching',
+        matchStatus: 'searching',
+        tripStatus: 'waiting',
+        createdAt: now,
+        updatedAt: now,
+        immediate: passengerData.immediate || false
+      };
+      
+      // Call firestoreService with phone as ID
+      const result = await services.firestoreService.savePassengerSearch(searchData, {
+        immediate: req.body.immediate || false
+      });
+      
+      // Also update in-memory search service if available
+      if (services.searchService) {
+        await services.searchService.addPassengerSearch(passengerPhone, result);
+      }
+      
+      // Notify via WebSocket if available
+      if (services.wsService) {
+        services.wsService.sendToUser(passengerPhone, {
+          type: 'SEARCH_SAVED',
+          data: { 
+            ...searchData,
+            documentId: passengerPhone,
+            savedAt: now
+          }
+        });
+      }
+      
+      res.json({
+        success: true,
+        message: 'Passenger search saved successfully',
+        data: result,
+        documentId: passengerPhone // Return the phone as document ID
+      });
+      
+    } catch (error) {
+      console.error('❌ Error saving passenger search:', error);
+      res.status(500).json({
+        success: false,
+        message: error.message
       });
     }
   });
@@ -298,9 +381,105 @@ const init = (injectedServices) => {
       });
     }
   });
+  
+  // Get passenger search by phone (for the new save-search endpoint)
+  router.get('/search-by-phone/:phone', async (req, res) => {
+    try {
+      const { phone } = req.params;
+      
+      if (!phone) {
+        return res.status(400).json({
+          success: false,
+          message: 'Phone number is required'
+        });
+      }
+      
+      const passengerData = await services.firestoreService.getPassengerSearch(phone);
+      
+      if (!passengerData) {
+        return res.json({
+          success: true,
+          exists: false,
+          message: 'No active search found for this phone number',
+          phone: phone
+        });
+      }
+      
+      res.json({
+        success: true,
+        exists: true,
+        data: passengerData
+      });
+      
+    } catch (error) {
+      console.error('❌ Error getting passenger search by phone:', error);
+      res.status(500).json({ 
+        success: false, 
+        error: error.message 
+      });
+    }
+  });
+};
+
+// Export individual controller methods for direct usage
+const savePassengerSearch = async (req, res) => {
+  try {
+    const passengerData = req.body;
+    const passengerPhone = passengerData.passengerPhone || passengerData.phone;
+    
+    if (!passengerPhone) {
+      return res.status(400).json({
+        success: false,
+        message: 'Passenger phone number is required'
+      });
+    }
+    
+    // Prepare passenger data
+    const now = new Date().toISOString();
+    const searchData = {
+      ...passengerData,
+      passengerPhone,
+      passengerId: passengerData.passengerId || passengerPhone,
+      userId: passengerData.userId || passengerPhone,
+      passengerName: passengerData.passengerName || passengerData.name || 'Unknown Passenger',
+      passengerPhotoUrl: passengerData.passengerPhotoUrl || passengerData.photoUrl || '',
+      passengerCount: passengerData.passengerCount || passengerData.count || 1,
+      rideType: passengerData.rideType || passengerData.type || 'standard',
+      status: 'searching',
+      matchStatus: 'searching',
+      tripStatus: 'waiting',
+      createdAt: now,
+      updatedAt: now,
+      immediate: passengerData.immediate || false
+    };
+    
+    // Call firestoreService with phone as ID
+    const result = await firestoreService.savePassengerSearch(searchData, {
+      immediate: req.body.immediate || false
+    });
+    
+    // Also update in-memory search service
+    if (searchService) {
+      await searchService.addPassengerSearch(passengerPhone, result);
+    }
+    
+    res.json({
+      success: true,
+      message: 'Passenger search saved successfully',
+      data: result,
+      documentId: passengerPhone // Return the phone as document ID
+    });
+  } catch (error) {
+    console.error('Error saving passenger search:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
 };
 
 module.exports = {
   init,
-  router
+  router,
+  savePassengerSearch
 };

@@ -260,6 +260,80 @@ const init = (injectedServices) => {
       });
     }
   });
+
+  // Start search endpoint
+  router.post('/start', async (req, res) => {
+    try {
+      const searchData = req.body;
+      
+      // Validate required fields
+      if (!searchData.userType || !searchData.userId) {
+        return res.status(400).json({ 
+          success: false, 
+          error: 'userType and userId are required' 
+        });
+      }
+
+      // Check if user exists by phone
+      const phoneNumber = searchData.driverPhone || searchData.passengerPhone || searchData.phone;
+
+      if (!phoneNumber) {
+        return res.status(400).json({ 
+          success: false, 
+          error: 'Phone number is required' 
+        });
+      }
+
+      console.log(`🔍 Starting search for phone: ${phoneNumber}`);
+
+      // Try to get user by phone (returns null if not found)
+      let user = null;
+      try {
+        user = await services.firestoreService.getUserByPhone(phoneNumber);
+        
+        if (user) {
+          console.log(`✅ User found in database: ${user.id} (${user.collection})`);
+        } else {
+          console.log(`⚠️ User not found in main user/driver collections`);
+          console.log(`   ⚡ Allowing search anyway - user will be created in active_searches collection`);
+        }
+        
+      } catch (phoneError) {
+        console.error('❌ Error checking user by phone:', phoneError.message);
+        // Even on error, continue with the search
+        console.log(`⚠️ Phone check error, but continuing with search: ${phoneError.message}`);
+      }
+
+      // 🚀 Continue with search creation regardless of user existence
+      // This allows new users to start searches without being in the main collections
+
+      let savedSearch;
+      if (searchData.userType === 'driver') {
+        savedSearch = await services.firestoreService.saveDriverSearch(searchData, { immediate: true });
+      } else {
+        savedSearch = await services.firestoreService.savePassengerSearch(searchData, { immediate: true });
+      }
+
+      // Store in memory cache
+      services.searchService.storeSearchInMemory(savedSearch);
+
+      // Send success response
+      res.json({
+        success: true,
+        message: user ? 'Search started successfully' : 'Search started (new user)',
+        search: savedSearch,
+        userExists: !!user,
+        searchId: savedSearch.searchId
+      });
+      
+    } catch (error) {
+      console.error('❌ Error starting search:', error);
+      res.status(500).json({ 
+        success: false, 
+        error: error.message 
+      });
+    }
+  });
 };
 
 module.exports = {

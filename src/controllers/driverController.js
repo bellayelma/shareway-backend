@@ -1,4 +1,4 @@
-// controllers/driverController.js - FIXED VERSION
+// controllers/driverController.js - UPDATED VERSION
 const express = require('express');
 const router = express.Router();
 const { v4: uuidv4 } = require('uuid');
@@ -55,7 +55,8 @@ router.post('/start-search', async (req, res) => {
       userType = 'driver',
       driverId,
       driverName,
-      driverPhone,
+      driverPhone: driverPhoneRaw,
+      phone: phoneAlt, // Alternative field name
       driverPhotoUrl,
       driverRating,
       totalRides,
@@ -85,16 +86,20 @@ router.post('/start-search', async (req, res) => {
       searchId
     } = req.body;
     
-    // Determine actual driver ID
-    const actualUserId = userId || driverId;
+    // Determine driver phone - primary identifier
+    const driverPhone = driverPhoneRaw || phoneAlt;
     
-    if (!actualUserId) {
+    if (!driverPhone) {
       return res.status(400).json({ 
         success: false, 
-        error: 'userId or driverId is required' 
+        error: 'driverPhone or phone is required' 
       });
     }
-
+    
+    // Determine actual driver ID (use phone as primary ID)
+    const actualUserId = driverPhone; // Use phone number as the document ID
+    const originalDriverId = userId || driverId; // Keep original for reference
+    
     if (!pickupLocation || !destinationLocation) {
       return res.status(400).json({ 
         success: false, 
@@ -103,25 +108,26 @@ router.post('/start-search', async (req, res) => {
     }
 
     console.log(`🎯 Starting driver search: ${driverName || actualUserId}`);
+    console.log(`   - Driver Phone (ID): ${driverPhone}`);
     console.log(`   - Driver Name: ${driverName || 'Unknown'}`);
-    console.log(`   - Driver Phone: ${driverPhone || 'Not provided'}`);
     console.log(`   - Driver Photo: ${driverPhotoUrl || 'No photo'}`);
     console.log(`   - Pickup: ${pickupName || 'Unknown'}`);
     console.log(`   - Destination: ${destinationName || 'Unknown'}`);
     console.log(`   - Capacity: ${capacity || 4} seats`);
     console.log(`   - Ride Type: ${rideType}`);
-    console.log(`   - Driver ID (document ID): ${actualUserId}`);
+    console.log(`   - Document ID: ${actualUserId}`);
 
     // Create search data - Pass ALL data correctly
     const searchData = {
       // Basic identification
-      userId: actualUserId,
+      userId: originalDriverId || driverPhone, // Keep original user ID if provided
       userType: 'driver',
-      driverId: actualUserId,
+      driverId: originalDriverId || driverPhone,
       
       // Driver profile data - MAKE SURE THESE ARE PASSED
       driverName: driverName || 'Unknown Driver',
-      driverPhone: driverPhone || 'Not provided',
+      driverPhone: driverPhone, // Store phone in data too
+      phone: driverPhone, // Alternative field
       driverPhotoUrl: driverPhotoUrl || '',
       driverRating: driverRating || 5.0,
       totalRides: totalRides || 0,
@@ -219,7 +225,7 @@ router.post('/start-search', async (req, res) => {
     
     // Also add to search service for in-memory matching
     if (searchService) {
-      await searchService.addSearch(searchData);
+      await searchService.addDriverSearch(driverPhone, searchData);
       console.log('✅ Added to in-memory search service');
     }
 
@@ -228,8 +234,9 @@ router.post('/start-search', async (req, res) => {
       success: true,
       message: 'Driver search started successfully',
       searchId: searchData.searchId,
-      userId: actualUserId,
-      documentId: actualUserId,  // IMPORTANT: Return the document ID
+      userId: originalDriverId,
+      driverPhone: driverPhone,
+      documentId: driverPhone,  // Return phone as document ID
       driverProfile: {
         driverName: searchData.driverName,
         driverPhone: searchData.driverPhone,
@@ -243,7 +250,7 @@ router.post('/start-search', async (req, res) => {
       timeout: '5 minutes (or until match found)',
       storage: ACTIVE_SEARCHES_DRIVER_COLLECTION,
       websocketConnected: websocketServer ? websocketServer.isUserConnected(actualUserId) : false,
-      importantNote: 'Use this documentId for all subsequent API calls'
+      importantNote: 'Use driverPhone as documentId for all subsequent API calls'
     });
 
   } catch (error) {
@@ -257,19 +264,60 @@ router.post('/start-search', async (req, res) => {
   }
 });
 
+// ========== ✅ NEW ENDPOINT: /api/driver/save-search ==========
+router.post('/save-search', async (req, res) => {
+  try {
+    console.log('💾 === DRIVER SAVE-SEARCH ENDPOINT ===');
+    
+    const driverData = req.body;
+    const driverPhone = driverData.driverPhone || driverData.phone;
+    
+    if (!driverPhone) {
+      return res.status(400).json({
+        success: false,
+        message: 'Driver phone number is required'
+      });
+    }
+    
+    console.log(`📱 Saving driver search with phone: ${driverPhone}`);
+    
+    // Call firestoreService with phone as ID
+    const result = await firestoreService.saveDriverSearch(driverData, {
+      immediate: req.body.immediate || false
+    });
+    
+    // Also update in-memory search service
+    await searchService.addDriverSearch(driverPhone, result);
+    
+    res.json({
+      success: true,
+      message: 'Driver search saved successfully',
+      data: result,
+      documentId: driverPhone // Return the phone as document ID
+    });
+  } catch (error) {
+    console.error('Error saving driver search:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+});
+
 // ========== ✅ ENDPOINT 2: /api/driver/stop-search ==========
 router.post('/stop-search', async (req, res) => {
   try {
     console.log('🛑 === DRIVER STOP-SEARCH ENDPOINT ===');
     
-    const { userId, userType = 'driver', rideType = 'immediate', driverId } = req.body;
+    const { userId, userType = 'driver', rideType = 'immediate', driverId, driverPhone, phone } = req.body;
     
-    const actualUserId = userId || driverId;
+    // Determine actual user ID - prioritize phone number
+    const actualUserId = driverPhone || phone || driverId || userId;
     
     if (!actualUserId) {
       return res.status(400).json({ 
         success: false, 
-        error: 'userId or driverId is required' 
+        error: 'driverPhone, phone, driverId or userId is required' 
       });
     }
 
@@ -314,7 +362,7 @@ router.post('/stop-search', async (req, res) => {
     res.json({
       success: true,
       message: 'Driver search stopped successfully',
-      driverId: actualUserId,
+      driverPhone: actualUserId,
       stoppedFromFirestore: true,
       stoppedFromMemory: memoryRemoved,
       collection: ACTIVE_SEARCHES_DRIVER_COLLECTION
@@ -415,7 +463,7 @@ router.get('/search-status/:driverId', async (req, res) => {
       rideType: driverData.rideType,
       isSearching: driverData.isSearching,
       isOnline: driverData.isOnline,
-      importantNote: 'Use this documentId for all API calls'
+      importantNote: 'Use driverPhone as documentId for all API calls'
     });
 
   } catch (error) {
@@ -432,17 +480,18 @@ router.post('/update-location', async (req, res) => {
   try {
     console.log('📍 === DRIVER UPDATE LOCATION ENDPOINT ===');
     
-    const { userId, driverId, location, address } = req.body;
+    const { userId, driverId, driverPhone, phone, location, address } = req.body;
     
     console.log('📦 Request body:', JSON.stringify(req.body, null, 2));
     
     // FIRST: Try to get the actual driver document ID from Firestore
-    let actualDriverId = driverId || userId;
+    // Prioritize phone number as ID
+    let actualDriverId = driverPhone || phone || driverId || userId;
     
     if (!actualDriverId) {
       return res.status(400).json({
         success: false,
-        error: 'driverId or userId is required'
+        error: 'driverPhone, phone, driverId or userId is required'
       });
     }
     
@@ -456,13 +505,19 @@ router.post('/update-location', async (req, res) => {
     console.log(`📍 Updating driver location: ${actualDriverId}`);
     console.log(`   Location: ${location.lat}, ${location.lng}`);
     
-    // CRITICAL FIX: Check if document exists with this ID
+    // Declare driverData variable at the beginning
+    let driverData = null;
+    
+    // Check if document exists with this ID
     const driverDoc = await db.collection(ACTIVE_SEARCHES_DRIVER_COLLECTION).doc(actualDriverId).get();
     
-    if (!driverDoc.exists) {
+    if (driverDoc.exists) {
+      driverData = driverDoc.data();
+      console.log(`✅ Found driver document directly: ${actualDriverId}`);
+    } else {
       console.log(`⚠️ Document not found with ID: ${actualDriverId}`);
       
-      // Try to find driver by phone number
+      // Try to find driver by phone number if actualDriverId is not a phone
       console.log('🔍 Searching for driver by phone number...');
       
       const querySnapshot = await db.collection(ACTIVE_SEARCHES_DRIVER_COLLECTION)
@@ -474,6 +529,7 @@ router.post('/update-location', async (req, res) => {
         // Found by phone number
         const foundDriver = querySnapshot.docs[0];
         actualDriverId = foundDriver.id;
+        driverData = foundDriver.data();
         console.log(`✅ Found driver by phone: ${actualDriverId}`);
       } else {
         // Try searching by userId field
@@ -485,6 +541,7 @@ router.post('/update-location', async (req, res) => {
         if (!userIdQuery.empty) {
           const foundDriver = userIdQuery.docs[0];
           actualDriverId = foundDriver.id;
+          driverData = foundDriver.data();
           console.log(`✅ Found driver by userId: ${actualDriverId}`);
         } else {
           return res.status(404).json({
@@ -512,41 +569,39 @@ router.post('/update-location', async (req, res) => {
     });
 
     // If driver has a passenger, update passenger's embedded driver location
-    const updatedDriverDoc = await db.collection(ACTIVE_SEARCHES_DRIVER_COLLECTION).doc(actualDriverId).get();
-    if (updatedDriverDoc.exists) {
-      const driverData = updatedDriverDoc.data();
+    if (driverData && driverData.matchedWith && driverData.passenger) {
+      await db.collection(ACTIVE_SEARCHES_PASSENGER_COLLECTION).doc(driverData.matchedWith).update({
+        'driver.currentLocation': {
+          latitude: location.lat,
+          longitude: location.lng,
+          timestamp: new Date()
+        },
+        updatedAt: new Date()
+      });
       
-      if (driverData.matchedWith && driverData.passenger) {
-        await db.collection(ACTIVE_SEARCHES_PASSENGER_COLLECTION).doc(driverData.matchedWith).update({
-          'driver.currentLocation': {
-            latitude: location.lat,
-            longitude: location.lng,
-            timestamp: new Date()
+      // Notify passenger via WebSocket
+      if (websocketServer) {
+        websocketServer.sendDriverLocationUpdate(driverData.matchedWith, {
+          driverId: actualDriverId,
+          driverName: driverData.driverName,
+          location: {
+            lat: location.lat,
+            lng: location.lng
           },
-          updatedAt: new Date()
+          timestamp: new Date().toISOString()
         });
-        
-        // Notify passenger via WebSocket
-        if (websocketServer) {
-          websocketServer.sendDriverLocationUpdate(driverData.matchedWith, {
-            driverId: actualDriverId,
-            driverName: driverData.driverName,
-            location: {
-              lat: location.lat,
-              lng: location.lng
-            },
-            timestamp: new Date().toISOString()
-          });
-        }
-        
-        console.log(`✅ Passenger notified of driver location update: ${driverData.matchedWith}`);
       }
+      
+      console.log(`✅ Passenger notified of driver location update: ${driverData.matchedWith}`);
     }
+
+    // Get driver phone for response
+    const responseDriverPhone = driverData ? driverData.driverPhone : actualDriverId;
 
     res.json({
       success: true,
       message: 'Driver location updated successfully',
-      driverId: actualDriverId,
+      driverPhone: responseDriverPhone,
       originalDriverId: driverId || userId,
       location: {
         lat: location.lat,
@@ -554,8 +609,8 @@ router.post('/update-location', async (req, res) => {
       },
       address: address || '',
       timestamp: new Date().toISOString(),
-      passengerNotified: true,
-      note: `Use '${actualDriverId}' as driverId for future calls`
+      passengerNotified: driverData && driverData.matchedWith ? true : false,
+      note: `Use driverPhone '${responseDriverPhone}' for future calls`
     });
 
   } catch (error) {
@@ -570,14 +625,14 @@ router.post('/update-location', async (req, res) => {
 // ========== ✅ ENDPOINT 5: /api/driver/availability ==========
 router.post('/availability', async (req, res) => {
   try {
-    const { userId, driverId, isAvailable } = req.body;
+    const { userId, driverId, driverPhone, phone, isAvailable } = req.body;
     
-    const actualDriverId = driverId || userId;
+    const actualDriverId = driverPhone || phone || driverId || userId;
     
     if (!actualDriverId) {
       return res.status(400).json({
         success: false,
-        error: 'driverId or userId is required'
+        error: 'driverPhone, phone, driverId or userId is required'
       });
     }
 
@@ -608,7 +663,7 @@ router.post('/availability', async (req, res) => {
 
     res.json({
       success: true,
-      driverId: actualDriverId,
+      driverPhone: actualDriverId,
       isAvailable: isAvailable,
       isOnline: isAvailable,
       isSearching: isAvailable,
@@ -629,14 +684,14 @@ router.post('/accept-match', async (req, res) => {
   try {
     console.log('✅ === DRIVER ACCEPT MATCH ENDPOINT ===');
     
-    const { driverId, userId, matchId, passengerId } = req.body;
+    const { driverId, userId, driverPhone, phone, matchId, passengerId, passengerPhone } = req.body;
     
-    const actualDriverId = driverId || userId;
+    const actualDriverId = driverPhone || phone || driverId || userId;
     
     if (!actualDriverId) {
       return res.status(400).json({
         success: false,
-        error: 'driverId or userId is required'
+        error: 'driverPhone, phone, driverId or userId is required'
       });
     }
     
@@ -647,14 +702,14 @@ router.post('/accept-match', async (req, res) => {
       });
     }
     
-    if (!passengerId) {
+    if (!passengerId && !passengerPhone) {
       return res.status(400).json({
         success: false,
-        error: 'passengerId is required'
+        error: 'passengerId or passengerPhone is required'
       });
     }
     
-    console.log(`🤝 Driver ${actualDriverId} accepting match ${matchId} with passenger ${passengerId}`);
+    console.log(`🤝 Driver ${actualDriverId} accepting match ${matchId} with passenger ${passengerId || passengerPhone}`);
 
     // Get driver document
     const driverDoc = await db.collection(ACTIVE_SEARCHES_DRIVER_COLLECTION).doc(actualDriverId).get();
@@ -675,24 +730,41 @@ router.post('/accept-match', async (req, res) => {
       });
     }
     
+    // Determine passenger document ID
+    let actualPassengerId = passengerId || passengerPhone;
+    let passengerData;
+    
+    // Get passenger document
+    const passengerDoc = await db.collection(ACTIVE_SEARCHES_PASSENGER_COLLECTION).doc(actualPassengerId).get();
+    if (!passengerDoc.exists) {
+      // Try to find passenger by phone
+      const passengerQuery = await db.collection(ACTIVE_SEARCHES_PASSENGER_COLLECTION)
+        .where('passengerPhone', '==', actualPassengerId)
+        .limit(1)
+        .get();
+      
+      if (!passengerQuery.empty) {
+        const foundPassenger = passengerQuery.docs[0];
+        actualPassengerId = foundPassenger.id;
+        passengerData = foundPassenger.data();
+        console.log(`✅ Found passenger by phone: ${actualPassengerId}`);
+      } else {
+        return res.status(404).json({
+          success: false,
+          error: 'Passenger not found in active searches'
+        });
+      }
+    } else {
+      passengerData = passengerDoc.data();
+    }
+    
     // Verify matched with correct passenger
-    if (driverData.matchedWith !== passengerId) {
+    if (driverData.matchedWith !== actualPassengerId) {
       return res.status(400).json({
         success: false,
         error: 'Passenger ID does not match proposed match'
       });
     }
-    
-    // Get passenger document
-    const passengerDoc = await db.collection(ACTIVE_SEARCHES_PASSENGER_COLLECTION).doc(passengerId).get();
-    if (!passengerDoc.exists) {
-      return res.status(404).json({
-        success: false,
-        error: 'Passenger not found in active searches'
-      });
-    }
-    
-    const passengerData = passengerDoc.data();
     
     // Check if driver has available seats
     const passengerCount = passengerData.passengerCount || 1;
@@ -716,9 +788,9 @@ router.post('/accept-match', async (req, res) => {
       driverPhotoUrl: driverData.driverPhotoUrl,
       driverRating: driverData.driverRating,
       vehicleInfo: driverData.vehicleInfo,
-      passengerId: passengerId,
-      passengerName: passengerData.passengerName,
+      passengerId: actualPassengerId,
       passengerPhone: passengerData.passengerPhone,
+      passengerName: passengerData.passengerName,
       passengerPhotoUrl: passengerData.passengerPhotoUrl,
       pickupLocation: passengerData.pickupLocation || driverData.pickupLocation,
       pickupName: passengerData.pickupName || driverData.pickupName,
@@ -743,12 +815,12 @@ router.post('/accept-match', async (req, res) => {
     // Update driver document
     const driverUpdates = {
       matchId: matchId,
-      matchedWith: passengerId,
+      matchedWith: actualPassengerId,
       matchStatus: 'accepted',
       rideId: rideId,
       tripStatus: 'driver_accepted',
       passenger: {
-        passengerId: passengerId,
+        passengerId: actualPassengerId,
         passengerName: passengerData.passengerName,
         passengerPhone: passengerData.passengerPhone,
         passengerPhotoUrl: passengerData.passengerPhotoUrl,
@@ -792,8 +864,8 @@ router.post('/accept-match', async (req, res) => {
       lastUpdated: Date.now()
     };
 
-    await db.collection(ACTIVE_SEARCHES_PASSENGER_COLLECTION).doc(passengerId).update(passengerUpdates);
-    console.log(`✅ Updated passenger ${passengerId} with driver acceptance`);
+    await db.collection(ACTIVE_SEARCHES_PASSENGER_COLLECTION).doc(actualPassengerId).update(passengerUpdates);
+    console.log(`✅ Updated passenger ${actualPassengerId} with driver acceptance`);
     
     // Update match document
     await db.collection(ACTIVE_MATCHES_COLLECTION).doc(matchId).update({
@@ -805,7 +877,7 @@ router.post('/accept-match', async (req, res) => {
     
     // Stop searching for passenger
     if (searchService) {
-      await searchService.removeSearch(passengerId, 'passenger');
+      await searchService.removeSearch(actualPassengerId, 'passenger');
     }
     
     // Notify both users via WebSocket
@@ -814,7 +886,7 @@ router.post('/accept-match', async (req, res) => {
       websocketServer.sendMatchAccepted(actualDriverId, {
         matchId: matchId,
         rideId: rideId,
-        passengerId: passengerId,
+        passengerId: actualPassengerId,
         passengerName: passengerData.passengerName,
         passengerPhone: passengerData.passengerPhone,
         pickupName: passengerData.pickupName || driverData.pickupName,
@@ -825,7 +897,7 @@ router.post('/accept-match', async (req, res) => {
       });
       
       // Notify passenger
-      websocketServer.sendMatchAccepted(passengerId, {
+      websocketServer.sendMatchAccepted(actualPassengerId, {
         matchId: matchId,
         rideId: rideId,
         driverId: actualDriverId,
@@ -847,9 +919,9 @@ router.post('/accept-match', async (req, res) => {
       message: 'Passenger accepted successfully',
       matchId: matchId,
       rideId: rideId,
-      driverId: actualDriverId,
+      driverPhone: driverData.driverPhone,
       driverName: driverData.driverName,
-      passengerId: passengerId,
+      passengerPhone: passengerData.passengerPhone,
       passengerName: passengerData.passengerName,
       passengerCount: passengerCount,
       availableSeats: driverUpdates.availableSeats,
@@ -871,14 +943,14 @@ router.post('/accept-match', async (req, res) => {
 // ========== ✅ ENDPOINT 7: /api/driver/reject-match ==========
 router.post('/reject-match', async (req, res) => {
   try {
-    const { driverId, userId, matchId, passengerId, userType = 'driver' } = req.body;
+    const { driverId, userId, driverPhone, phone, matchId, passengerId, passengerPhone, userType = 'driver' } = req.body;
     
-    const actualUserId = driverId || userId;
+    const actualUserId = driverPhone || phone || driverId || userId;
     
     if (!actualUserId) {
       return res.status(400).json({
         success: false,
-        error: 'userId or driverId is required'
+        error: 'driverPhone, phone, driverId or userId is required'
       });
     }
     
@@ -912,8 +984,9 @@ router.post('/reject-match', async (req, res) => {
     console.log(`✅ Match ${matchId} rejected by driver ${actualUserId}`);
 
     // Also update passenger if match existed
-    if (passengerId) {
-      await db.collection(ACTIVE_SEARCHES_PASSENGER_COLLECTION).doc(passengerId).update({
+    if (passengerId || passengerPhone) {
+      const actualPassengerId = passengerId || passengerPhone;
+      await db.collection(ACTIVE_SEARCHES_PASSENGER_COLLECTION).doc(actualPassengerId).update({
         matchId: null,
         matchedWith: null,
         matchStatus: null,
@@ -923,7 +996,7 @@ router.post('/reject-match', async (req, res) => {
       
       // Notify passenger
       if (websocketServer) {
-        websocketServer.sendMatchRejected(passengerId, {
+        websocketServer.sendMatchRejected(actualPassengerId, {
           matchId: matchId,
           driverId: actualUserId,
           message: 'Driver rejected the match proposal'
@@ -935,7 +1008,7 @@ router.post('/reject-match', async (req, res) => {
       success: true,
       message: 'Match rejected successfully',
       matchId: matchId,
-      driverId: actualUserId,
+      driverPhone: actualUserId,
       userType: userType,
       websocketNotification: true
     });
@@ -1052,38 +1125,64 @@ router.get('/find-by-phone/:phone', async (req, res) => {
       });
     }
 
-    // Search for driver by phone
+    // First try direct document access (phone is document ID)
+    const driverDoc = await db.collection(ACTIVE_SEARCHES_DRIVER_COLLECTION).doc(phone).get();
+    
+    if (driverDoc.exists) {
+      const driverData = driverDoc.data();
+      return res.json({
+        success: true,
+        found: true,
+        foundBy: 'direct_document_id',
+        driverId: phone,
+        driverPhone: phone,
+        driver: {
+          name: driverData.driverName,
+          phone: driverData.driverPhone,
+          photoUrl: driverData.driverPhotoUrl,
+          rating: driverData.driverRating,
+          isOnline: driverData.isOnline,
+          isSearching: driverData.isSearching,
+          status: driverData.status
+        },
+        note: `Use phone number '${phone}' as documentId for API calls`
+      });
+    }
+    
+    // Search for driver by phone field
     const querySnapshot = await db.collection(ACTIVE_SEARCHES_DRIVER_COLLECTION)
       .where('driverPhone', '==', phone)
       .limit(1)
       .get();
     
-    if (querySnapshot.empty) {
+    if (!querySnapshot.empty) {
+      const driverDoc = querySnapshot.docs[0];
+      const driverData = driverDoc.data();
+      
       return res.json({
         success: true,
-        found: false,
-        message: 'Driver not found with this phone number',
-        phone: phone
+        found: true,
+        foundBy: 'phone_field_query',
+        driverId: driverDoc.id,
+        driverPhone: phone,
+        driver: {
+          name: driverData.driverName,
+          phone: driverData.driverPhone,
+          photoUrl: driverData.driverPhotoUrl,
+          rating: driverData.driverRating,
+          isOnline: driverData.isOnline,
+          isSearching: driverData.isSearching,
+          status: driverData.status
+        },
+        note: `Found with document ID '${driverDoc.id}', but you can use phone '${phone}' for future calls`
       });
     }
 
-    const driverDoc = querySnapshot.docs[0];
-    const driverData = driverDoc.data();
-    
-    res.json({
+    return res.json({
       success: true,
-      found: true,
-      driverId: driverDoc.id,
-      driver: {
-        name: driverData.driverName,
-        phone: driverData.driverPhone,
-        photoUrl: driverData.driverPhotoUrl,
-        rating: driverData.driverRating,
-        isOnline: driverData.isOnline,
-        isSearching: driverData.isSearching,
-        status: driverData.status
-      },
-      note: `Use '${driverDoc.id}' as driverId for API calls`
+      found: false,
+      message: 'Driver not found with this phone number',
+      phone: phone
     });
 
   } catch (error) {

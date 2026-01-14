@@ -1,20 +1,22 @@
 // services/notificationService.js
 class NotificationService {
   constructor(websocketServer) {
+    if (!websocketServer) {
+      throw new Error('WebSocket server is required for NotificationService');
+    }
     this.websocketServer = websocketServer;
-    this.cleanupInterval = null;
     this.stats = {
       notificationsSent: 0,
       notificationsFailed: 0,
       errors: 0,
       lastCleanup: null
     };
-    console.log('🔔 NotificationService initialized');
+    console.log('🔔 NotificationService initialized with WebSocket support');
   }
 
   // ==================== MATCH NOTIFICATIONS ====================
 
-  // Send a match proposal to both driver and passenger
+  // Send match proposal to both driver and passenger
   async sendMatchProposals(match) {
     try {
       console.log(`📱 Sending match proposals for match ${match?.matchId}`);
@@ -25,28 +27,52 @@ class NotificationService {
         return false;
       }
       
-      // Send to driver
-      const driverSent = this.sendMatchProposal(match.driverId, {
-        matchId: match.matchId,
-        passengerId: match.passengerId,
-        passengerName: match.passengerName,
-        from: match.from,
-        to: match.to,
-        timestamp: new Date().toISOString()
-      });
-      
-      // Send to passenger
-      const passengerSent = this.sendMatchProposal(match.passengerId, {
+      // Prepare match data for notifications
+      const matchData = {
         matchId: match.matchId,
         driverId: match.driverId,
         driverName: match.driverName,
-        from: match.from,
-        to: match.to,
-        timestamp: new Date().toISOString()
+        passengerId: match.passengerId,
+        passengerName: match.passengerName,
+        pickupName: match.fromLocation,
+        destinationName: match.toLocation,
+        estimatedFare: match.estimatedFare || 150,
+        similarityScore: match.similarityScore || 0.85,
+        passengerCount: match.passengerCount || 1,
+        availableSeats: match.availableSeats || 4,
+        vehicleInfo: match.vehicleInfo || {
+          model: 'Toyota Corolla',
+          color: 'White',
+          plate: `AA-${1000 + Math.floor(Math.random() * 9000)}`
+        }
+      };
+      
+      // Send to driver
+      const driverSent = this.websocketServer.sendPassengerFound(match.driverId, {
+        ...matchData,
+        passengerPhone: match.passengerPhone,
+        passengerRating: match.passengerRating,
+        passengerTrips: match.passengerTrips,
+        passengerVerified: match.passengerVerified
+      });
+      
+      // Send to passenger
+      const passengerSent = this.websocketServer.sendDriverFound(match.passengerId, {
+        ...matchData,
+        driverPhone: match.driverPhone,
+        driverRating: match.driverRating,
+        driverTrips: match.driverTrips,
+        driverVerified: match.driverVerified
       });
       
       const success = driverSent && passengerSent;
-      if (success) this.stats.notificationsSent += 2;
+      if (success) {
+        this.stats.notificationsSent += 2;
+        console.log(`✅ Match proposals sent to both users for match ${match.matchId}`);
+      } else {
+        console.error(`❌ Failed to send match proposals for match ${match.matchId}`);
+        this.stats.notificationsFailed += 2;
+      }
       
       return success;
     } catch (error) {
@@ -56,198 +82,284 @@ class NotificationService {
     }
   }
 
-  // Send match proposal to a single user
-  sendMatchProposal(userId, data) {
-    if (!this.websocketServer) {
-      console.error('❌ WebSocket server not available');
-      this.stats.errors++;
-      return false;
-    }
-    
-    if (!userId) {
-      console.error('❌ Cannot send message: userId is null/undefined');
-      console.error('❌ Data being sent:', data);
-      this.stats.errors++;
-      return false;
-    }
-    
-    console.log(`📋 Sending match proposal for match: ${data?.matchId} to user: ${userId}`);
-    
-    if (this.websocketServer.isUserConnected(userId)) {
-      this.websocketServer.sendToUser(userId, {
-        type: 'MATCH_PROPOSAL',
-        ...data
+  // Send scheduled match proposal
+  async sendScheduledMatchProposals(match) {
+    try {
+      console.log(`📅 Sending scheduled match proposals for match ${match?.matchId}`);
+      
+      if (!match || !match.driverId || !match.passengerId) {
+        console.error('❌ Invalid scheduled match data:', match);
+        this.stats.errors++;
+        return false;
+      }
+      
+      const matchData = {
+        matchId: match.matchId,
+        driverId: match.driverId,
+        driverName: match.driverName,
+        passengerId: match.passengerId,
+        passengerName: match.passengerName,
+        pickupName: match.fromLocation,
+        destinationName: match.toLocation,
+        estimatedFare: match.estimatedFare || 150,
+        similarityScore: match.similarityScore || 0.85,
+        passengerCount: match.passengerCount || 1,
+        availableSeats: match.availableSeats || 4,
+        scheduledTime: match.scheduledTime || match.departureTime,
+        vehicleInfo: match.vehicleInfo || {
+          model: 'Toyota Corolla',
+          color: 'White',
+          plate: `AA-${1000 + Math.floor(Math.random() * 9000)}`
+        }
+      };
+      
+      // Send to driver
+      const driverSent = this.websocketServer.sendScheduledPassengerFound(match.driverId, {
+        ...matchData,
+        passengerPhone: match.passengerPhone,
+        passengerRating: match.passengerRating,
+        passengerTrips: match.passengerTrips,
+        passengerVerified: match.passengerVerified
       });
-      this.stats.notificationsSent++;
-      console.log(`✅ Match proposal sent to ${userId}`);
-      return true;
-    } else {
-      console.log(`📭 User ${userId} not connected, notification will be lost`);
-      this.stats.notificationsFailed++;
+      
+      // Send to passenger
+      const passengerSent = this.websocketServer.sendScheduledDriverFound(match.passengerId, {
+        ...matchData,
+        driverPhone: match.driverPhone,
+        driverRating: match.driverRating,
+        driverTrips: match.driverTrips,
+        driverVerified: match.driverVerified
+      });
+      
+      const success = driverSent && passengerSent;
+      if (success) {
+        this.stats.notificationsSent += 2;
+        console.log(`✅ Scheduled match proposals sent for match ${match.matchId}`);
+      } else {
+        console.error(`❌ Failed to send scheduled match proposals for match ${match.matchId}`);
+        this.stats.notificationsFailed += 2;
+      }
+      
+      return success;
+    } catch (error) {
+      console.error('❌ Error sending scheduled match proposals:', error);
+      this.stats.errors++;
       return false;
     }
   }
 
   // Send match accepted notification
-  sendMatchAccepted(match) {
-    if (!match || !match.driverId || !match.passengerId) {
-      console.error('❌ Invalid match data for match accepted');
+  async sendMatchAccepted(match) {
+    try {
+      console.log(`🤝 Sending match accepted for match ${match?.matchId}`);
+      
+      if (!match || !match.driverId || !match.passengerId) {
+        console.error('❌ Invalid match data for accepted notification:', match);
+        return false;
+      }
+      
+      const driverSent = this.websocketServer.sendMatchDecisionUpdate(match, true, 'passenger');
+      const passengerSent = this.websocketServer.sendMatchDecisionUpdate(match, true, 'driver');
+      
+      const success = driverSent && passengerSent;
+      if (success) {
+        console.log(`✅ Match accepted notifications sent for match ${match.matchId}`);
+      }
+      
+      return success;
+    } catch (error) {
+      console.error('❌ Error sending match accepted:', error);
       return false;
     }
-    
-    // Notify driver
-    const driverNotified = this.sendNotification({
-      userId: match.driverId,
-      message: `Passenger ${match.passengerName} accepted the match!`,
-      type: 'success',
-      data: {
-        event: 'MATCH_ACCEPTED',
-        matchId: match.matchId,
-        passengerId: match.passengerId,
-        passengerName: match.passengerName
+  }
+
+  // Send match accepted by other driver notification
+  async sendMatchAcceptedByOtherDriver(match, acceptedByDriverId) {
+    try {
+      console.log(`🚗 Sending match accepted by other driver for match ${match?.matchId}`);
+      
+      if (!match || !match.passengerId) {
+        console.error('❌ Invalid match data for accepted by other driver:', match);
+        return false;
       }
-    });
-    
-    // Notify passenger
-    const passengerNotified = this.sendNotification({
-      userId: match.passengerId,
-      message: `Driver ${match.driverName} accepted the match!`,
-      type: 'success',
-      data: {
-        event: 'MATCH_ACCEPTED',
-        matchId: match.matchId,
-        driverId: match.driverId,
-        driverName: match.driverName
-      }
-    });
-    
-    return driverNotified && passengerNotified;
+      
+      return this.websocketServer.sendMatchAcceptedByOtherDriver(match, acceptedByDriverId);
+    } catch (error) {
+      console.error('❌ Error sending match accepted by other driver:', error);
+      return false;
+    }
   }
 
   // Send match expired notification
-  sendMatchExpired(match) {
-    if (!match) {
-      console.error('❌ Invalid match data for match expired');
+  async sendMatchExpired(match) {
+    try {
+      console.log(`⏰ Sending match expired for match ${match?.matchId}`);
+      
+      if (!match) {
+        console.error('❌ Invalid match data for expired notification:', match);
+        return false;
+      }
+      
+      // Send match decision update with false (rejected) to indicate expiration
+      const driverSent = match.driverId ? 
+        this.websocketServer.sendMatchDecisionUpdate(match, false, 'system') : 
+        Promise.resolve(true);
+      
+      const passengerSent = match.passengerId ? 
+        this.websocketServer.sendMatchDecisionUpdate(match, false, 'system') : 
+        Promise.resolve(true);
+      
+      const success = driverSent && passengerSent;
+      if (success) {
+        console.log(`✅ Match expired notifications sent for match ${match.matchId}`);
+      }
+      
+      return success;
+    } catch (error) {
+      console.error('❌ Error sending match expired:', error);
       return false;
     }
-    
-    console.log(`📤 Sending match expired for match: ${match.matchId}`);
-    
-    // Notify driver if exists
-    let driverNotified = true;
-    if (match.driverId) {
-      driverNotified = this.sendNotification({
-        userId: match.driverId,
-        message: `Match ${match.matchId} has expired`,
-        type: 'warning',
-        data: {
-          event: 'MATCH_EXPIRED',
-          matchId: match.matchId
-        }
-      });
-    }
-    
-    // Notify passenger if exists
-    let passengerNotified = true;
-    if (match.passengerId) {
-      passengerNotified = this.sendNotification({
-        userId: match.passengerId,
-        message: `Match ${match.matchId} has expired`,
-        type: 'warning',
-        data: {
-          event: 'MATCH_EXPIRED',
-          matchId: match.matchId
-        }
-      });
-    }
-    
-    return driverNotified && passengerNotified;
   }
 
   // ==================== SEARCH NOTIFICATIONS ====================
 
+  // Send search started notification
+  sendSearchStarted(userId, searchData) {
+    try {
+      return this.websocketServer.sendSearchStatusUpdate(userId, {
+        searchId: searchData.searchId,
+        status: 'searching',
+        progress: 10,
+        matchCount: 0,
+        estimatedTime: 60,
+        message: 'Searching for matches...'
+      });
+    } catch (error) {
+      console.error('❌ Error sending search started:', error);
+      return false;
+    }
+  }
+
   // Send search stopped notification
   sendSearchStopped(userId, data) {
-    return this.sendNotification({
-      userId,
-      message: 'Your search has been stopped',
-      type: 'info',
-      data: {
-        event: 'SEARCH_STOPPED',
-        ...data
-      }
-    });
+    try {
+      return this.websocketServer.sendSearchTimeout(userId, {
+        searchId: data.searchId,
+        message: data.reason || 'Search stopped',
+        searchType: data.searchType || 'immediate',
+        duration: data.duration || 0
+      });
+    } catch (error) {
+      console.error('❌ Error sending search stopped:', error);
+      return false;
+    }
   }
 
   // Send search timeout notification
   sendSearchTimeout(userId, data) {
-    return this.sendNotification({
-      userId,
-      message: 'Your search has timed out',
-      type: 'warning',
-      data: {
-        event: 'SEARCH_TIMEOUT',
-        ...data
-      }
-    });
+    try {
+      return this.websocketServer.sendSearchTimeout(userId, {
+        searchId: data.searchId,
+        message: 'Search timeout - No matches found',
+        searchType: data.searchType || 'immediate',
+        duration: data.duration || 300
+      });
+    } catch (error) {
+      console.error('❌ Error sending search timeout:', error);
+      return false;
+    }
+  }
+
+  // Send search status update
+  sendSearchStatusUpdate(userId, searchData) {
+    try {
+      return this.websocketServer.sendSearchStatusUpdate(userId, searchData);
+    } catch (error) {
+      console.error('❌ Error sending search status update:', error);
+      return false;
+    }
+  }
+
+  // Send scheduled search activated
+  sendScheduledSearchActivated(userId, searchData) {
+    try {
+      return this.websocketServer.sendScheduledSearchActivated(userId, searchData);
+    } catch (error) {
+      console.error('❌ Error sending scheduled search activated:', error);
+      return false;
+    }
+  }
+
+  // Send ride reminder
+  sendRideReminder(userId, reminderData) {
+    try {
+      return this.websocketServer.sendRideReminder(userId, reminderData);
+    } catch (error) {
+      console.error('❌ Error sending ride reminder:', error);
+      return false;
+    }
   }
 
   // ==================== GENERAL NOTIFICATIONS ====================
 
-  // Send notification to a user
-  sendNotification(notification) {
-    const { userId, message, type = 'info', data = {} } = notification;
-    
-    if (!userId) {
-      console.error('❌ Cannot send notification: userId is required');
-      console.error('❌ Notification data:', notification);
+  // Send custom notification to user
+  sendNotification(userId, notification) {
+    try {
+      const { type, message, data = {} } = notification;
+      
+      if (!type || !message) {
+        console.error('❌ Notification type and message are required');
+        return false;
+      }
+      
+      const success = this.websocketServer.sendToUser(userId, {
+        type: type,
+        data: {
+          message,
+          ...data,
+          timestamp: Date.now()
+        }
+      });
+      
+      if (success) {
+        this.stats.notificationsSent++;
+        console.log(`📱 ${type} sent to ${userId}: ${message}`);
+      } else {
+        this.stats.notificationsFailed++;
+      }
+      
+      return success;
+    } catch (error) {
+      console.error('❌ Error sending notification:', error);
       this.stats.errors++;
       return false;
     }
-    
-    if (this.websocketServer && this.websocketServer.isUserConnected(userId)) {
-      this.websocketServer.sendToUser(userId, {
-        type: 'NOTIFICATION',
-        message,
-        notificationType: type,
-        data,
-        timestamp: new Date().toISOString()
-      });
-      console.log(`📱 Notification sent to ${userId}: ${message}`);
-      this.stats.notificationsSent++;
-      return true;
-    } else {
-      console.log(`📭 User ${userId} not connected, notification will be lost`);
-      this.stats.notificationsFailed++;
-      return false;
-    }
   }
 
-  // ==================== CLEANUP & MAINTENANCE ====================
+  // ==================== UTILITY METHODS ====================
 
-  // Start cleanup interval (for stats cleanup only)
-  startCleanupInterval(intervalMinutes = 60) {
-    if (this.cleanupInterval) {
-      clearInterval(this.cleanupInterval);
-    }
-    
-    this.cleanupInterval = setInterval(() => {
-      this.cleanupStats();
-    }, intervalMinutes * 60 * 1000);
-    
-    console.log(`📊 Notification stats cleanup started (every ${intervalMinutes} minutes)`);
+  // Check if user is connected
+  isUserConnected(userId) {
+    if (!this.websocketServer) return false;
+    return this.websocketServer.isUserConnected(userId);
   }
 
-  // Stop cleanup interval
-  stopCleanupInterval() {
-    if (this.cleanupInterval) {
-      clearInterval(this.cleanupInterval);
-      this.cleanupInterval = null;
-      console.log('✅ Notification cleanup interval stopped');
-    }
+  // Get connected users
+  getConnectedUsers() {
+    return this.websocketServer ? this.websocketServer.getConnectedUsers() : [];
   }
 
-  // Cleanup stats (reset counters periodically)
+  // Get statistics
+  getStats() {
+    return {
+      ...this.stats,
+      connectedUsers: this.getConnectedUsers().length,
+      websocketServer: this.websocketServer ? 'Available' : 'Not available',
+      status: 'Active'
+    };
+  }
+
+  // Cleanup stats (optional)
   cleanupStats() {
     console.log('🧹 Cleaning up notification stats');
     this.stats = {
@@ -257,27 +369,6 @@ class NotificationService {
       lastCleanup: new Date().toISOString()
     };
     console.log('✅ Notification stats cleaned up');
-  }
-
-  // ==================== UTILITY METHODS ====================
-
-  // Get connected users
-  getConnectedUsers() {
-    return this.websocketServer ? this.websocketServer.getAllConnections() : [];
-  }
-
-  // Check if user is connected
-  isUserConnected(userId) {
-    return this.websocketServer ? this.websocketServer.isUserConnected(userId) : false;
-  }
-
-  // Get statistics
-  getStats() {
-    return {
-      ...this.stats,
-      connectedUsers: this.getConnectedUsers().length,
-      status: 'Active'
-    };
   }
 }
 
