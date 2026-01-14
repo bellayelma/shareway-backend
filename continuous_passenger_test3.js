@@ -1,460 +1,711 @@
-// scheduled_passenger_test.js - EXACT driver route matching for SCHEDULED rides
-const https = require('https');
+// continuous_passenger_movement_fixed.js
+const http = require('http');
+const readline = require('readline');
 
-let testCount = 0;
-let successfulSearches = 0;
-let matchesFound = 0;
-let failedSearches = 0;
-
-// Configuration
+// ✅ CONFIGURATION FOR YOUR LOCAL SERVER
 const CONFIG = {
-  baseUrl: 'shareway-backend-cbvn.onrender.com',
-  port: 443,
-  searchInterval: 30000, // 30 seconds
-  timeout: 15000,
-  maxTests: 100,
-  testDuration: 3600000,
+  hostname: 'localhost',
+  port: 3000,
+  timeout: 10000,
+  searchInterval: 5000,
+  movementUpdateInterval: 3000, // Updates every 3 seconds
+  acceptanceDelay: 5000, // Wait 5 seconds before driver accepts
+  maxContinuousHours: 24
 };
 
-// EXACT DRIVER ROUTE COORDINATES - FROM YOUR DRIVER DATA
-const DRIVER_ROUTE = {
-  pickupLocation: { lat: 9.5912196, lng: 41.9797191 }, // Dire Dawa
-  destinationLocation: { lat: 11.6, lng: 37.3833 }, // Bahir Dar
-  pickupName: "Dire Dawa",
-  destinationName: "Bahir Dar",
-  routePoints: [
-    { lat: 9.5912196, lng: 41.9797191 },
-    { lat: 9.596713, lng: 41.980184 },
-    { lat: 9.596705, lng: 41.980639 },
-    { lat: 9.458291, lng: 40.994234 },
-    { lat: 8.984281, lng: 38.828945 },
-    { lat: 9.720439, lng: 38.823141 },
-    { lat: 10.230556, lng: 38.130382 },
-    { lat: 11.599019, lng: 37.382776 }
-  ],
-  // Calculated values from your driver data
-  distance: 968.9352879081407,
-  duration: 2326, // minutes
-  fare: 4405.208795586634,
-  scheduledTime: "2025-11-30T00:00:00.000Z"
+// Ethiopian passenger profiles
+const PASSENGER_PROFILES = [
+  {
+    id: 1,
+    fullName: "Adugna Belay",
+    phone: "+251911233344",
+    rating: 4.8,
+    photo: "https://cdn-icons-png.flaticon.com/512/1946/1946429.png",
+    seatsNeeded: 1,
+    baseLat: 8.549995,
+    baseLng: 39.266714
+  },
+  {
+    id: 2,
+    fullName: "Selamawit Mekonnen",
+    phone: "+251922434455",
+    rating: 4.9,
+    photo: "https://cdn-icons-png.flaticon.com/512/4323/4323004.png",
+    seatsNeeded: 1,
+    baseLat: 8.550500,
+    baseLng: 39.267000
+  },
+  {
+    id: 3,
+    fullName: "Tewodros Haile",
+    phone: "+251933445596",
+    rating: 4.5,
+    photo: "https://cdn-icons-png.flaticon.com/512/3135/3135715.png",
+    seatsNeeded: 1,
+    baseLat: 8.551000,
+    baseLng: 39.267500
+  }
+];
+
+// Driver simulation profile
+const DRIVER_PROFILE = {
+  id: "DRIVER_001",
+  name: "Abebe Kebede",
+  phone: "+251911000000",
+  driverId: "+251911240957", // From your logs
+  userId: "y1qH8ff3zWawz6IgvXM755Lq6Pq1" // From your logs
 };
 
-// KNOWN DRIVER ID FROM YOUR DATA
-const TARGET_DRIVER_ID = "mtlB1Bd79RYtijBSR9wuyZHaI122";
+// ==================== MOVEMENT SIMULATOR ====================
+class MovementSimulator {
+  constructor(passengerPhone, baseLat, baseLng) {
+    this.passengerPhone = passengerPhone;
+    this.baseLat = baseLat;
+    this.baseLng = baseLng;
+    this.currentLat = baseLat;
+    this.currentLng = baseLng;
+    this.step = 0;
+    this.totalDistance = 0;
+    this.startTime = Date.now();
+    this.isActive = true;
+    this.tripStatus = 'searching'; // searching → accepted → enroute_to_pickup → pickup_arrived → passenger_onboard → enroute_to_destination → arrived → completed
+    this.matchId = null;
+    this.accepted = false;
+    
+    // Movement parameters
+    this.walkingSpeed = 0.00001; // Degrees per update (walking)
+    this.vehicleSpeed = 0.00005; // Degrees per update (in vehicle)
+    this.direction = Math.random() * 2 * Math.PI;
+  }
 
-function generateScheduledPassenger() {
-  const timestamp = Date.now();
-  const randomId = Math.random().toString(36).substring(2, 8);
-  
-  // Use the EXACT same scheduled time as driver
-  const scheduledTime = new Date(DRIVER_ROUTE.scheduledTime);
-  
-  return {
-    // User identification - MATCHING DRIVER'S FORMAT
-    userId: "scheduled_passenger_" + timestamp + '_' + randomId,
-    userType: "passenger",
-    rideType: "scheduled", // CRITICAL: Must be "scheduled" not "immediate"
+  generateNextPosition() {
+    this.step++;
     
-    // Passenger details
-    passengerId: "scheduled_passenger_" + timestamp + '_' + randomId,
-    passengerName: "Scheduled Test Passenger - Dire Dawa to Bahir Dar",
-    passengerPhone: "+251911223344",
-    passengerPhotoUrl: "https://example.com/avatars/passenger.jpg",
+    let latChange, lngChange;
     
-    // EXACT SAME LOCATION DATA AS DRIVER
-    pickupLocation: {
-      lat: DRIVER_ROUTE.pickupLocation.lat,
-      lng: DRIVER_ROUTE.pickupLocation.lng,
-      address: DRIVER_ROUTE.pickupName
-    },
-    destinationLocation: {
-      lat: DRIVER_ROUTE.destinationLocation.lat,
-      lng: DRIVER_ROUTE.destinationLocation.lng,
-      address: DRIVER_ROUTE.destinationName
-    },
-    pickupName: DRIVER_ROUTE.pickupName,
-    destinationName: DRIVER_ROUTE.destinationName,
-    
-    // EXACT SAME ROUTE POINTS AS DRIVER
-    routePoints: DRIVER_ROUTE.routePoints,
-    
-    // EXACT SAME SCHEDULED TIME AS DRIVER
-    scheduledTime: DRIVER_ROUTE.scheduledTime,
-    
-    // Passenger details - MATCHING DRIVER'S CAPACITY
-    passengerCount: 1,
-    currentPassengers: 0,
-    capacity: 4,
-    
-    // EXACT SAME FARE/DISTANCE AS DRIVER
-    distance: DRIVER_ROUTE.distance,
-    duration: DRIVER_ROUTE.duration,
-    fare: DRIVER_ROUTE.fare,
-    
-    // Preferences matching driver's capabilities
-    estimatedFare: DRIVER_ROUTE.fare,
-    specialRequests: "Testing SCHEDULED route matching - Dire Dawa to Bahir Dar",
-    preferredVehicleType: "car",
-    maxWaitTime: 60, // Longer wait for scheduled rides
-    maxWalkDistance: 0.5,
-    
-    // Additional fields for better matching
-    luggageCount: 1,
-    paymentMethod: "cash",
-    rating: "4.5",
-    
-    // Enhanced matching parameters
-    matchPreferences: {
-      minRating: 4.0,
-      maxDetour: 20.0, // Higher for long distance scheduled rides
-      vehicleTypes: ["car", "sedan"],
-      allowFemaleDriver: true,
-      allowMaleDriver: true
+    switch(this.tripStatus) {
+      case 'searching':
+        // Random walking while searching
+        this.direction += (Math.random() - 0.5) * 0.5;
+        latChange = Math.cos(this.direction) * this.walkingSpeed;
+        lngChange = Math.sin(this.direction) * this.walkingSpeed;
+        break;
+        
+      case 'accepted':
+      case 'enroute_to_pickup':
+        // Move towards a central pickup point
+        const pickupLat = 8.550000;
+        const pickupLng = 39.267000;
+        latChange = (pickupLat - this.currentLat) * 0.1;
+        lngChange = (pickupLng - this.currentLng) * 0.1;
+        break;
+        
+      case 'pickup_arrived':
+        // Minimal movement (waiting)
+        latChange = (Math.random() - 0.5) * 0.000001;
+        lngChange = (Math.random() - 0.5) * 0.000001;
+        break;
+        
+      case 'passenger_onboard':
+      case 'enroute_to_destination':
+        // Move towards destination (Dire Dawa)
+        const destLat = 9.589549;
+        const destLng = 41.866169;
+        latChange = (destLat - this.currentLat) * 0.01;
+        lngChange = (destLng - this.currentLng) * 0.01;
+        break;
+        
+      case 'arrived':
+        // Stop moving
+        latChange = 0;
+        lngChange = 0;
+        break;
+        
+      default:
+        latChange = (Math.random() - 0.5) * this.walkingSpeed;
+        lngChange = (Math.random() - 0.5) * this.walkingSpeed;
     }
-  };
+    
+    // Add small random GPS drift
+    latChange += (Math.random() - 0.5) * 0.000001;
+    lngChange += (Math.random() - 0.5) * 0.000001;
+    
+    // Update position
+    this.currentLat += latChange;
+    this.currentLng += lngChange;
+    
+    // Calculate distance moved (approx)
+    const distanceMoved = Math.sqrt(latChange * latChange + lngChange * lngChange) * 111320; // Convert to meters
+    this.totalDistance += distanceMoved;
+    
+    return {
+      lat: this.currentLat,
+      lng: this.currentLng,
+      step: this.step,
+      totalDistance: this.totalDistance,
+      elapsedTime: (Date.now() - this.startTime) / 1000,
+      status: this.tripStatus,
+      speed: this.tripStatus.includes('enroute') ? 15 : 5, // km/h
+      heading: (this.direction * 180 / Math.PI) % 360,
+      accuracy: this.tripStatus === 'passenger_onboard' ? 3 : 8 // Better accuracy in vehicle
+    };
+  }
+
+  updateStatus(newStatus) {
+    console.log(`   🔄 ${this.passengerPhone}: ${this.tripStatus} → ${newStatus}`);
+    this.tripStatus = newStatus;
+  }
+
+  acceptMatch(matchId) {
+    this.matchId = matchId;
+    this.accepted = true;
+    this.updateStatus('accepted');
+  }
+
+  stop() {
+    this.isActive = false;
+    console.log(`   ⏹️  Stopped movement for ${this.passengerPhone}`);
+  }
 }
 
-async function sendScheduledPassengerSearch(passengerData) {
+// Store active simulations
+const activeSimulations = new Map();
+
+// ==================== API FUNCTIONS ====================
+async function makeRequest(options, data = null) {
   return new Promise((resolve, reject) => {
-    const data = JSON.stringify(passengerData);
+    const req = http.request(options, (res) => {
+      let responseData = '';
+      
+      res.on('data', (chunk) => {
+        responseData += chunk;
+      });
+      
+      res.on('end', () => {
+        try {
+          if (responseData) {
+            const jsonResponse = JSON.parse(responseData);
+            resolve({
+              statusCode: res.statusCode,
+              data: jsonResponse
+            });
+          } else {
+            resolve({
+              statusCode: res.statusCode,
+              data: {}
+            });
+          }
+        } catch (error) {
+          resolve({
+            statusCode: res.statusCode,
+            data: responseData,
+            raw: true
+          });
+        }
+      });
+    });
+    
+    req.on('error', (error) => {
+      reject(error);
+    });
+    
+    req.setTimeout(CONFIG.timeout, () => {
+      req.destroy();
+      reject(new Error(`Request timeout`));
+    });
+    
+    if (data) {
+      req.write(JSON.stringify(data));
+    }
+    
+    req.end();
+  });
+}
+
+// Send passenger search request
+async function sendPassengerSearch(passengerProfile) {
+  try {
+    // Initialize simulator if not exists
+    if (!activeSimulations.has(passengerProfile.phone)) {
+      const simulator = new MovementSimulator(
+        passengerProfile.phone,
+        passengerProfile.baseLat,
+        passengerProfile.baseLng
+      );
+      activeSimulations.set(passengerProfile.phone, simulator);
+    }
+    
+    const simulator = activeSimulations.get(passengerProfile.phone);
+    const position = simulator.generateNextPosition();
+    
+    const passengerData = {
+      userId: passengerProfile.phone,
+      userType: 'passenger',
+      rideType: "immediate",
+      searchId: `search_${Date.now()}_${passengerProfile.id}`,
+      
+      passengerName: passengerProfile.fullName,
+      passengerPhone: passengerProfile.phone,
+      passengerPhoto: passengerProfile.photo,
+      passengerRating: passengerProfile.rating,
+      totalRides: 50,
+      isVerified: true,
+      
+      pickup: {
+        address: `Adama - ${passengerProfile.fullName}`,
+        location: { lat: position.lat, lng: position.lng },
+        name: `Pickup - ${passengerProfile.fullName}`
+      },
+      dropoff: {
+        address: "Dire Dawa City Center",
+        location: { lat: 9.589549, lng: 41.866169 },
+        name: "Dire Dawa"
+      },
+      
+      numberOfPassengers: passengerProfile.seatsNeeded,
+      passengerCount: passengerProfile.seatsNeeded,
+      
+      ridePreferences: {
+        maxWaitTime: 10,
+        preferredVehicleType: "car",
+        specialRequests: "None",
+        maxWalkDistance: 0.2
+      },
+      
+      distance: 320,
+      duration: 360,
+      estimatedFare: 800,
+      
+      currentLocation: {
+        latitude: position.lat,
+        longitude: position.lng,
+        accuracy: position.accuracy,
+        speed: position.speed,
+        heading: position.heading,
+        timestamp: Date.now()
+      },
+      
+      status: simulator.tripStatus
+    };
     
     const options = {
-      hostname: CONFIG.baseUrl,
+      hostname: CONFIG.hostname,
       port: CONFIG.port,
       path: '/api/match/search',
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(data),
-        'User-Agent': 'ShareWay-Scheduled-Passenger-Test/1.0'
-      },
-      timeout: CONFIG.timeout
+        'Accept': 'application/json'
+      }
     };
-
-    const scheduledTime = new Date(passengerData.scheduledTime);
-    const timeUntilRide = Math.round((scheduledTime - new Date()) / (1000 * 60)); // minutes
     
-    console.log(`👤 Sending SCHEDULED PASSENGER search:`);
-    console.log(`   📅 Route: ${passengerData.pickupName} → ${passengerData.destinationName}`);
-    console.log(`   ⏰ Scheduled: ${passengerData.scheduledTime}`);
-    console.log(`   ⏳ Time until ride: ${timeUntilRide} minutes`);
+    console.log(`\n🟢 Starting search: ${passengerProfile.fullName}`);
+    console.log(`   📱 Phone: ${passengerProfile.phone}`);
+    console.log(`   📍 Location: ${position.lat.toFixed(6)}, ${position.lng.toFixed(6)}`);
+    console.log(`   🎯 Status: ${simulator.tripStatus}`);
     
-    const req = https.request(options, (res) => {
-      let responseData = '';
-      let statusCode = res.statusCode;
-
-      res.on('data', (chunk) => {
-        responseData += chunk;
-      });
-
-      res.on('end', () => {
-        try {
-          const result = JSON.parse(responseData);
-          resolve({
-            statusCode: statusCode,
-            data: result,
-            passenger: passengerData,
-            headers: res.headers
-          });
-        } catch (e) {
-          resolve({
-            statusCode: statusCode,
-            data: { raw: responseData, parseError: e.message },
-            passenger: passengerData,
-            headers: res.headers
-          });
-        }
-      });
-    });
-
-    req.on('error', (error) => {
-      reject(error);
-    });
-
-    req.on('timeout', () => {
-      req.destroy();
-      reject(new Error(`Request timeout after ${CONFIG.timeout}ms`));
-    });
-
-    req.write(data);
-    req.end();
-  });
+    const response = await makeRequest(options, passengerData);
+    
+    return {
+      success: response.statusCode === 200,
+      passengerPhone: passengerProfile.phone,
+      passengerName: passengerProfile.fullName,
+      statusCode: response.statusCode,
+      data: response.data,
+      location: { lat: position.lat, lng: position.lng }
+    };
+  } catch (error) {
+    console.error(`   ❌ Search error: ${error.message}`);
+    return {
+      success: false,
+      passengerName: passengerProfile.fullName,
+      error: error.message
+    };
+  }
 }
 
-function displayResult(result, testCount) {
-  const passenger = result.passenger;
-  const response = result.data;
-  
-  const scheduledTime = new Date(passenger.scheduledTime);
-  const timeUntilRide = Math.round((scheduledTime - new Date()) / (1000 * 60)); // minutes
-  
-  console.log(`\n📊 SCHEDULED PASSENGER TEST #${testCount}`);
-  console.log('─────────────────────────────────────────────────────────');
-  console.log(`👤 Passenger: ${passenger.passengerName}`);
-  console.log(`📍 From: ${passenger.pickupName}`);
-  console.log(`🎯 To: ${passenger.destinationName}`);
-  console.log(`📅 Scheduled: ${passenger.scheduledTime}`);
-  console.log(`⏳ Time until ride: ${timeUntilRide} minutes`);
-  console.log(`💰 Fare: ETB ${passenger.fare}`);
-  console.log(`📏 Distance: ${passenger.distance}km | ⏱️ ${passenger.duration}min`);
-  console.log(`👥 Passengers: ${passenger.passengerCount}/${passenger.capacity}`);
-  console.log(`🎯 Target Driver: ${TARGET_DRIVER_ID}`);
-  console.log(`🎯 🚨 EXACT SCHEDULED DRIVER ROUTE - Should match!`);
-  
-  if (result.statusCode === 200) {
-    if (response.success) {
-      successfulSearches++;
-      
-      if (response.totalMatches > 0) {
-        matchesFound += response.totalMatches;
-        console.log(`✅ 🎉 SUCCESS! Found ${response.totalMatches} driver matches!`);
-        
-        // Check if our target driver is in the matches
-        let targetDriverFound = false;
-        if (response.matches && response.matches.length > 0) {
-          console.log('\n📋 Matching Drivers:');
-          response.matches.forEach((match, index) => {
-            const isTargetDriver = match.driverId === TARGET_DRIVER_ID;
-            if (isTargetDriver) targetDriverFound = true;
-            
-            console.log(`   ${index + 1}. ${match.driverName || 'Unknown Driver'} ${isTargetDriver ? '🎯 TARGET!' : ''}`);
-            console.log(`      🆔 ${match.driverId || 'Unknown ID'}`);
-            console.log(`      🚗 ${match.vehicleInfo?.model || 'Car'} | ⭐ ${match.matchScore || (match.similarity * 100).toFixed(1)}% match`);
-            console.log(`      💰 ETB ${match.proposedFare} | 📏 ${match.distance?.toFixed(1) || '?'}km away`);
-            console.log(`      🕒 Scheduled: ${match.scheduledTime || 'Not specified'}`);
-            console.log(`      🪑 Seats: ${match.hasSeats ? 'Yes' : 'No'} | Similarity: ${(match.similarity * 100).toFixed(1)}%`);
-          });
-        }
-        
-        if (targetDriverFound) {
-          console.log('\n🎉 SUCCESS! Target scheduled driver matched successfully!');
-          console.log('🚗 SCHEDULED DRIVER FOUND! Check your app for notifications!');
-        } else {
-          console.log('\n⚠️  Matches found but target driver not in results');
-          console.log('   Check if driver scheduled search is properly stored');
-        }
-        
-      } else {
-        console.log(`✅ Search successful but no driver matches found`);
-        console.log(`   🔍 Checking scheduled driver: ${TARGET_DRIVER_ID}`);
-        console.log(`   📅 Driver scheduled for: ${DRIVER_ROUTE.scheduledTime}`);
-        console.log(`   📍 Driver route: ${DRIVER_ROUTE.pickupName} → ${DRIVER_ROUTE.destinationName}`);
-        
-        // Check if this is because scheduled search hasn't activated yet
-        if (timeUntilRide > 30) { // More than 30 minutes until ride
-          console.log(`   💡 Scheduled search activates 30 minutes before ride time`);
-          console.log(`   ⏳ Current time until activation: ${timeUntilRide - 30} minutes`);
-        }
-        
-        // Additional debug info
-        if (response.debug) {
-          console.log(`   🔧 Debug: ${JSON.stringify(response.debug)}`);
-        }
-      }
-      
-    } else {
-      failedSearches++;
-      console.log(`❌ API returned success: false`);
-      if (response.error) {
-        console.log(`   Error: ${response.error}`);
-      }
-      if (response.details) {
-        console.log(`   Details: ${JSON.stringify(response.details)}`);
-      }
+// Update passenger location (CONTINUOUS UPDATES)
+async function updatePassengerLocation(passengerPhone) {
+  try {
+    const simulator = activeSimulations.get(passengerPhone);
+    
+    if (!simulator || !simulator.isActive) {
+      return { success: false, shouldContinue: false };
     }
-  } else {
-    failedSearches++;
-    console.log(`❌ HTTP Error: Status ${result.statusCode}`);
-    if (response && response.message) {
-      console.log(`   Message: ${response.message}`);
-    }
+    
+    // Generate next position
+    const position = simulator.generateNextPosition();
+    
+    const locationData = {
+      userId: passengerPhone,
+      userType: 'passenger',
+      latitude: position.lat,
+      longitude: position.lng,
+      accuracy: position.accuracy,
+      speed: position.speed, // km/h
+      heading: position.heading,
+      timestamp: Date.now(),
+      altitude: 1500,
+      altitudeAccuracy: 15,
+      batteryLevel: 85,
+      
+      // Trip context (important for driver to see movement)
+      tripId: simulator.matchId || `trip_${passengerPhone}_${Date.now()}`,
+      tripStatus: simulator.tripStatus,
+      
+      // For testing
+      isMock: true,
+      simulation: {
+        step: position.step,
+        totalDistance: position.totalDistance,
+        status: position.status
+      }
+    };
+    
+    // Use the correct endpoint from your logs
+    const endpointPath = '/api/location/update';
+    
+    const options = {
+      hostname: CONFIG.hostname,
+      port: CONFIG.port,
+      path: endpointPath,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    };
+    
+    const response = await makeRequest(options, locationData);
+    
+    // Display update info
+    const speedKmh = position.speed.toFixed(1);
+    const distanceM = position.totalDistance.toFixed(1);
+    
+    console.log(`   📍 Step ${position.step}: ${position.lat.toFixed(6)}, ${position.lng.toFixed(6)}`);
+    console.log(`   🚀 Speed: ${speedKmh} km/h | Distance: ${distanceM} m`);
+    console.log(`   🎯 Status: ${simulator.tripStatus}`);
+    
+    // Auto-advance trip status based on conditions
+    await autoAdvanceTripStatus(simulator, position);
+    
+    return {
+      success: response.statusCode === 200,
+      passengerPhone: passengerPhone,
+      location: position,
+      step: position.step,
+      tripStatus: simulator.tripStatus,
+      shouldContinue: simulator.isActive && simulator.tripStatus !== 'completed',
+      data: response.data
+    };
+  } catch (error) {
+    console.error(`   ❌ Update error: ${error.message}`);
+    return {
+      success: false,
+      error: error.message,
+      shouldContinue: true // Continue despite errors
+    };
+  }
+}
+
+// Auto-advance trip status
+async function autoAdvanceTripStatus(simulator, position) {
+  const currentStatus = simulator.tripStatus;
+  let newStatus = currentStatus;
+  
+  switch(currentStatus) {
+    case 'searching':
+      // Auto-accept after some time
+      if (position.step > 5 && Math.random() < 0.1) {
+        newStatus = 'accepted';
+        // Simulate match acceptance
+        simulator.acceptMatch(`match_${Date.now()}_${simulator.passengerPhone}`);
+      }
+      break;
+      
+    case 'accepted':
+      if (position.step > 2) newStatus = 'enroute_to_pickup';
+      break;
+      
+    case 'enroute_to_pickup':
+      // Check if close to pickup
+      const pickupDist = Math.sqrt(
+        Math.pow(position.lat - 8.550000, 2) + 
+        Math.pow(position.lng - 39.267000, 2)
+      ) * 111320; // Convert to meters
+      
+      if (pickupDist < 20) { // Within 20 meters
+        newStatus = 'pickup_arrived';
+      }
+      break;
+      
+    case 'pickup_arrived':
+      if (position.step > 3) newStatus = 'passenger_onboard';
+      break;
+      
+    case 'passenger_onboard':
+      if (position.step > 2) newStatus = 'enroute_to_destination';
+      break;
+      
+    case 'enroute_to_destination':
+      // Check if close to destination
+      const destDist = Math.sqrt(
+        Math.pow(position.lat - 9.589549, 2) + 
+        Math.pow(position.lng - 41.866169, 2)
+      ) * 111320;
+      
+      if (destDist < 50) { // Within 50 meters
+        newStatus = 'arrived';
+      }
+      break;
+      
+    case 'arrived':
+      if (position.step > 2) {
+        newStatus = 'completed';
+        simulator.isActive = false;
+      }
+      break;
   }
   
-  // Display summary
-  console.log('─────────────────────────────────────────────────────────');
-  const successRate = testCount > 0 ? ((successfulSearches / testCount) * 100).toFixed(1) : 0;
-  console.log(`📈 SUMMARY: ${successfulSearches}/${testCount} successful (${successRate}%) | ${matchesFound} total matches`);
-  console.log(`⏰ Next scheduled passenger search in ${CONFIG.searchInterval / 1000} seconds...`);
-  console.log('🛑 Press Ctrl+C to stop\n');
+  if (newStatus !== currentStatus) {
+    simulator.updateStatus(newStatus);
+  }
 }
 
-async function runContinuousTest() {
-  console.log('=======================================================');
-  console.log('👤 SHAREWAY SCHEDULED PASSENGER SEARCH TEST');
-  console.log('=======================================================');
-  console.log(`📍 Target: ${CONFIG.baseUrl}`);
-  console.log(`⏰ Interval: ${CONFIG.searchInterval / 1000} seconds`);
-  console.log(`📅 Route: ${DRIVER_ROUTE.pickupName} → ${DRIVER_ROUTE.destinationName}`);
-  console.log(`🎯 Scheduled: ${DRIVER_ROUTE.scheduledTime}`);
-  console.log(`📏 Distance: ${DRIVER_ROUTE.distance}km`);
-  console.log(`💰 Fare: ETB ${DRIVER_ROUTE.fare}`);
-  console.log(`🎯 Target Driver ID: ${TARGET_DRIVER_ID}`);
-  console.log(`👥 Driver Capacity: 4 passengers`);
-  console.log('🛑 Press Ctrl+C to stop the test');
-  console.log('=======================================================\n');
-  
-  // Calculate time until activation
-  const scheduledTime = new Date(DRIVER_ROUTE.scheduledTime);
-  const activationTime = new Date(scheduledTime.getTime() - (30 * 60 * 1000)); // 30 minutes before
-  const now = new Date();
-  const timeUntilActivation = Math.round((activationTime - now) / (1000 * 60)); // minutes
-  
-  console.log(`⏰ SCHEDULE INFO:`);
-  console.log(`   📅 Ride scheduled: ${DRIVER_ROUTE.scheduledTime}`);
-  console.log(`   🔔 Search activates: ${activationTime.toISOString()}`);
-  console.log(`   ⏳ Time until activation: ${timeUntilActivation} minutes`);
-  console.log(`   💡 Matching will work when activation time is reached\n`);
-  
-  // Test server connectivity first
-  await testServerConnectivity();
-  
-  // Initial delay to ensure driver scheduled search is stored
-  console.log('⏳ Waiting 5 seconds for scheduled searches to be processed...');
-  await new Promise(resolve => setTimeout(resolve, 5000));
-  
-  const startTime = Date.now();
-  let intervalId;
-
-  // Run tests with interval
-  const runTestCycle = async () => {
-    if (testCount >= CONFIG.maxTests) {
-      console.log('\n✅ Reached maximum test count. Stopping...');
-      clearInterval(intervalId);
-      displayFinalResults(startTime);
-      return;
-    }
-
-    if (Date.now() - startTime > CONFIG.testDuration) {
-      console.log('\n✅ Reached maximum test duration. Stopping...');
-      clearInterval(intervalId);
-      displayFinalResults(startTime);
-      return;
-    }
-
-    await runSingleTest();
-  };
-
-  // Run first test immediately
-  await runTestCycle();
-  
-  // Then run on interval
-  intervalId = setInterval(runTestCycle, CONFIG.searchInterval);
-  
-  // Handle graceful shutdown
-  process.on('SIGINT', () => {
-    console.log('\n\n🛑 TEST STOPPED BY USER');
-    clearInterval(intervalId);
-    displayFinalResults(startTime);
-    process.exit(0);
-  });
-}
-
-async function testServerConnectivity() {
-  console.log('🔍 Testing server connectivity...');
-  
+// Simulate driver accepting the passenger (optional)
+async function simulateDriverAcceptance(passengerPhone) {
   try {
     const options = {
-      hostname: CONFIG.baseUrl,
+      hostname: CONFIG.hostname,
       port: CONFIG.port,
-      path: '/health',
-      method: 'GET',
-      timeout: 10000
+      path: '/api/trip/accept',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      }
     };
-
-    await new Promise((resolve, reject) => {
-      const req = https.request(options, (res) => {
-        let data = '';
-        res.on('data', chunk => data += chunk);
-        res.on('end', () => {
-          try {
-            const result = JSON.parse(data);
-            if (result.status === 'healthy' || res.statusCode === 200) {
-              console.log('✅ Server is healthy and responsive');
-              resolve();
-            } else {
-              reject(new Error('Server not healthy'));
-            }
-          } catch (e) {
-            // If we can't parse but got 200, server is up
-            if (res.statusCode === 200) {
-              console.log('✅ Server is responsive (non-JSON response)');
-              resolve();
-            } else {
-              reject(new Error('Invalid response from server'));
-            }
-          }
-        });
-      });
-
-      req.on('error', reject);
-      req.on('timeout', () => reject(new Error('Connectivity test timeout')));
-      req.end();
-    });
-  } catch (error) {
-    console.log('❌ Server connectivity test failed:', error.message);
-    console.log('💡 Continuing anyway - server might be up but health endpoint down');
-  }
-}
-
-async function runSingleTest() {
-  testCount++;
-  
-  try {
-    const passengerData = generateScheduledPassenger();
-    const result = await sendScheduledPassengerSearch(passengerData);
-    displayResult(result, testCount);
-  } catch (error) {
-    failedSearches++;
-    console.log(`\n📊 SCHEDULED PASSENGER TEST #${testCount}`);
-    console.log('─────────────────────────────────────────────────────────');
-    console.log(`❌ Request failed: ${error.message}`);
-    console.log('─────────────────────────────────────────────────────────');
-    const successRate = testCount > 0 ? ((successfulSearches / testCount) * 100).toFixed(1) : 0;
-    console.log(`📈 SUMMARY: ${successfulSearches}/${testCount} successful (${successRate}%) | ${matchesFound} total matches`);
-    console.log(`⏰ Next scheduled passenger search in ${CONFIG.searchInterval / 1000} seconds...\n`);
-  }
-}
-
-function displayFinalResults(startTime) {
-  const duration = Math.round((Date.now() - startTime) / 1000);
-  const successRate = testCount > 0 ? ((successfulSearches / testCount) * 100).toFixed(1) : 0;
-  
-  console.log('=======================================================');
-  console.log('📊 SCHEDULED PASSENGER TEST FINAL RESULTS');
-  console.log('=======================================================');
-  console.log(`⏱️  Test duration: ${Math.floor(duration / 60)}m ${duration % 60}s`);
-  console.log(`🔢 Total tests run: ${testCount}`);
-  console.log(`✅ Successful searches: ${successfulSearches}`);
-  console.log(`❌ Failed searches: ${failedSearches}`);
-  console.log(`📈 Success rate: ${successRate}%`);
-  console.log(`🎯 Total driver matches found: ${matchesFound}`);
-  console.log(`🎯 Target Driver ID: ${TARGET_DRIVER_ID}`);
-  console.log(`📅 Scheduled Route: ${DRIVER_ROUTE.pickupName} → ${DRIVER_ROUTE.destinationName}`);
-  console.log(`⏰ Scheduled Time: ${DRIVER_ROUTE.scheduledTime}`);
-  console.log('=======================================================');
-  
-  if (matchesFound > 0) {
-    console.log('\n🎉 SUCCESS! Scheduled route matching is working!');
-    console.log('💡 Check if target driver appears in match results');
-  } else {
-    const scheduledTime = new Date(DRIVER_ROUTE.scheduledTime);
-    const activationTime = new Date(scheduledTime.getTime() - (30 * 60 * 1000));
-    const now = new Date();
-    const timeUntilActivation = Math.round((activationTime - now) / (1000 * 60));
     
-    console.log('\n💡 TROUBLESHOOTING SCHEDULED SEARCHES:');
-    console.log(`   1. ✅ Both passenger and driver are using SCHEDULED search type`);
-    console.log(`   2. 📅 Both have EXACT same scheduled time: ${DRIVER_ROUTE.scheduledTime}`);
-    console.log(`   3. 🔔 Scheduled searches activate 30 minutes before ride time`);
-    console.log(`   4. ⏳ Time until activation: ${timeUntilActivation} minutes`);
-    console.log(`   5. 📍 Verify route points match exactly: ${DRIVER_ROUTE.pickupName} → ${DRIVER_ROUTE.destinationName}`);
-    console.log(`   6. 🪑 Driver has capacity: 4 passengers`);
-    console.log(`   7. 🔍 Check Firestore for scheduled_search collection`);
+    const acceptanceData = {
+      passengerPhone: passengerPhone,
+      driverId: DRIVER_PROFILE.driverId,
+      driverName: DRIVER_PROFILE.name,
+      driverPhone: DRIVER_PROFILE.phone,
+      timestamp: Date.now()
+    };
+    
+    const response = await makeRequest(options, acceptanceData);
+    
+    if (response.statusCode === 200) {
+      const simulator = activeSimulations.get(passengerPhone);
+      if (simulator) {
+        simulator.acceptMatch(response.data.matchId || `match_${Date.now()}`);
+      }
+    }
+    
+    return { success: response.statusCode === 200 };
+  } catch (error) {
+    console.error(`   ❌ Acceptance error: ${error.message}`);
+    return { success: false };
   }
 }
 
-// Start the continuous test
-runContinuousTest().catch(error => {
-  console.error('💥 Scheduled passenger test script crashed:', error);
-  process.exit(1);
-});
+// ==================== CONTINUOUS SIMULATION ====================
+
+// Continuous stream for a single passenger
+async function continuousPassengerStream(passengerProfile, durationMinutes = 10) {
+  console.log(`\n📡 Starting continuous stream for: ${passengerProfile.fullName}`);
+  console.log('─'.repeat(60));
+  
+  // Send initial search
+  const searchResult = await sendPassengerSearch(passengerProfile);
+  
+  if (!searchResult.success) {
+    console.log('❌ Initial search failed, stopping');
+    return;
+  }
+  
+  console.log(`✅ Search started, beginning continuous updates...`);
+  console.log(`   ⏱️  Updates every ${CONFIG.movementUpdateInterval/1000}s`);
+  console.log(`   🕐 Duration: ${durationMinutes} minutes`);
+  
+  let updateCount = 0;
+  let errorCount = 0;
+  const startTime = Date.now();
+  const durationMs = durationMinutes * 60 * 1000;
+  
+  // Main update loop
+  while (Date.now() - startTime < durationMs) {
+    updateCount++;
+    
+    const updateResult = await updatePassengerLocation(passengerProfile.phone);
+    
+    if (!updateResult.success) {
+      errorCount++;
+    }
+    
+    // Check if trip completed
+    if (updateResult.tripStatus === 'completed') {
+      console.log(`   🏁 Trip completed after ${updateCount} updates`);
+      break;
+    }
+    
+    // Wait for next update
+    await new Promise(resolve => setTimeout(resolve, CONFIG.movementUpdateInterval));
+  }
+  
+  const elapsedSeconds = ((Date.now() - startTime) / 1000).toFixed(1);
+  
+  console.log(`\n📊 Stream completed:`);
+  console.log(`   🔄 Total updates: ${updateCount}`);
+  console.log(`   ✅ Successful: ${updateCount - errorCount}`);
+  console.log(`   ❌ Errors: ${errorCount}`);
+  console.log(`   ⏱️  Duration: ${elapsedSeconds}s`);
+  console.log(`   🎯 Final status: ${activeSimulations.get(passengerProfile.phone)?.tripStatus || 'unknown'}`);
+}
+
+// Run continuous simulation for all passengers
+async function runContinuousSimulation() {
+  console.log('='.repeat(70));
+  console.log('🚕 CONTINUOUS PASSENGER MOVEMENT SIMULATION');
+  console.log('='.repeat(70));
+  console.log(`👥 ${PASSENGER_PROFILES.length} Passengers`);
+  console.log(`🔄 Updates every ${CONFIG.movementUpdateInterval/1000}s`);
+  console.log(`🌐 Server: http://${CONFIG.hostname}:${CONFIG.port}`);
+  console.log('='.repeat(70));
+  
+  // Check server health
+  console.log('\n🔍 Checking server health...');
+  try {
+    const options = {
+      hostname: CONFIG.hostname,
+      port: CONFIG.port,
+      path: '/api/health',
+      method: 'GET'
+    };
+    
+    const response = await makeRequest(options);
+    if (response.statusCode === 200) {
+      console.log('✅ Server is responding');
+    } else {
+      console.log(`❌ Server status: ${response.statusCode}`);
+      return;
+    }
+  } catch (error) {
+    console.log(`❌ Server not responding: ${error.message}`);
+    return;
+  }
+  
+  // Run simulation for each passenger
+  for (const passenger of PASSENGER_PROFILES) {
+    console.log(`\n${'▶'.repeat(35)}`);
+    console.log(`STARTING: ${passenger.fullName}`);
+    console.log(`${'▶'.repeat(35)}`);
+    
+    await continuousPassengerStream(passenger, 10); // 10 minutes each
+    
+    // Brief pause between passengers
+    if (passenger.id < PASSENGER_PROFILES.length) {
+      console.log('\n⏸️  Pausing before next passenger...');
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    }
+  }
+  
+  console.log('\n' + '='.repeat(70));
+  console.log('✅ ALL SIMULATIONS COMPLETED');
+  console.log('='.repeat(70));
+}
+
+// Quick test for specific passenger
+async function quickTest(passengerIndex = 0, minutes = 5) {
+  const passenger = PASSENGER_PROFILES[passengerIndex];
+  console.log(`\n⚡ QUICK TEST: ${passenger.fullName} (${minutes} minutes)`);
+  console.log('─'.repeat(60));
+  
+  await continuousPassengerStream(passenger, minutes);
+}
+
+// Start specific passenger (runs indefinitely)
+async function startPassenger(passengerPhone) {
+  const passenger = PASSENGER_PROFILES.find(p => p.phone === passengerPhone);
+  if (!passenger) {
+    console.error(`Passenger ${passengerPhone} not found`);
+    return;
+  }
+  
+  console.log(`\n♾️  Starting INDEFINITE stream for: ${passenger.fullName}`);
+  console.log('─'.repeat(60));
+  
+  // Send initial search
+  await sendPassengerSearch(passenger);
+  
+  let step = 0;
+  
+  // Run indefinitely
+  while (true) {
+    step++;
+    
+    const updateResult = await updatePassengerLocation(passengerPhone);
+    
+    if (updateResult.tripStatus === 'completed') {
+      console.log(`   🏁 Trip completed, restarting search...`);
+      // Restart the cycle
+      await sendPassengerSearch(passenger);
+    }
+    
+    await new Promise(resolve => setTimeout(resolve, CONFIG.movementUpdateInterval));
+    
+    // Status update every 30 steps
+    if (step % 30 === 0) {
+      const simulator = activeSimulations.get(passengerPhone);
+      console.log(`\n📊 Status update after ${step} updates:`);
+      console.log(`   🎯 Current status: ${simulator?.tripStatus}`);
+      console.log(`   📍 Location: ${simulator?.currentLat?.toFixed(6)}, ${simulator?.currentLng?.toFixed(6)}`);
+      console.log(`   🕐 Running for: ${((Date.now() - simulator?.startTime) / 60000).toFixed(1)} minutes`);
+    }
+  }
+}
+
+// ==================== MAIN EXECUTION ====================
+if (require.main === module) {
+  const args = process.argv.slice(2);
+  
+  if (args.includes('--quick')) {
+    const passengerIndex = parseInt(args[1]) || 0;
+    const minutes = parseInt(args[2]) || 5;
+    quickTest(passengerIndex, minutes).catch(console.error);
+  } else if (args.includes('--start')) {
+    const phone = args[1];
+    if (phone) {
+      startPassenger(phone).catch(console.error);
+    } else {
+      console.log('Usage: node continuous_passenger_movement_fixed.js --start +251911233344');
+    }
+  } else if (args.includes('--help')) {
+    console.log(`
+Usage: node continuous_passenger_movement_fixed.js [options]
+
+Options:
+  --quick [index] [minutes]  Quick test (default: passenger 0, 5 minutes)
+  --start [phone]            Start indefinite stream for specific passenger
+  --help                     Show this help
+  [no args]                  Run 10-minute simulation for all passengers
+
+Examples:
+  node continuous_passenger_movement_fixed.js
+  node continuous_passenger_movement_fixed.js --quick 1 3
+  node continuous_passenger_movement_fixed.js --start +251911233344
+    `);
+  } else {
+    // Run full simulation
+    runContinuousSimulation().catch(error => {
+      console.error('\n💥 Error:', error);
+      process.exit(1);
+    });
+  }
+}
+
+// Export for module usage
+module.exports = {
+  PASSENGER_PROFILES,
+  continuousPassengerStream,
+  startPassenger
+};
