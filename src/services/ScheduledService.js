@@ -1,12 +1,12 @@
 // services/ScheduledService.js
 // ULTRA OPTIMIZED - Matches all users, minimal CPU/RAM, minimal Firestore reads/writes
-// WITH REAL-TIME TRIGGER MATCHING
+// WITH REAL-TIME TRIGGER MATCHING AND STATUS DEBUGGING
 
 const logger = require('../utils/Logger');
 
 class ScheduledService {
   constructor(firestoreService, websocketServer, admin, notificationService) {
-    console.log('🚀 [SCHEDULED] Initializing ULTRA OPTIMIZED version with REAL-TIME triggers...');
+    console.log('🚀 [SCHEDULED] Initializing ULTRA OPTIMIZED version with REAL-TIME triggers and STATUS FIXES...');
     
     this.firestoreService = firestoreService;
     this.websocketServer = websocketServer;
@@ -187,6 +187,35 @@ class ScheduledService {
     }, 500); // Small delay to ensure the new user data is saved
   }
 
+  // ========== DEBUG METHODS ==========
+
+  /**
+   * DEBUG: Monitor user status
+   */
+  async debugUserStatus(phoneNumber, userType) {
+    try {
+      const sanitizedPhone = this.sanitizePhoneNumber(phoneNumber);
+      const collectionName = userType === 'driver' 
+        ? 'scheduled_searches_driver' 
+        : 'scheduled_searches_passenger';
+      
+      const doc = await this.firestoreService.getDocument(collectionName, sanitizedPhone);
+      
+      if (doc && doc.exists) {
+        const data = doc.data();
+        console.log(`🔍 [DEBUG] ${userType} ${phoneNumber} status: ${data.status}`);
+        console.log(`🔍 [DEBUG] Full data:`, JSON.stringify(data).substring(0, 500));
+        return data.status;
+      } else {
+        console.log(`🔍 [DEBUG] ${userType} ${phoneNumber} not found`);
+        return null;
+      }
+    } catch (error) {
+      console.error(`❌ [DEBUG] Error:`, error.message);
+      return null;
+    }
+  }
+
   // ========== CREATE SCHEDULED SEARCH ==========
 
   async handleCreateScheduledSearch(data, userId, userType) {
@@ -217,13 +246,13 @@ class ScheduledService {
       const scheduledTimestamp = parsedTime.getTime();
       const timeString = parsedTime.toISOString();
       
-      // Build base document
+      // Build base document - FORCE status to 'actively_matching'
       let scheduledSearchData = {
         type: userType === 'driver' ? 'CREATE_SCHEDULED_SEARCH' : 'SCHEDULE_SEARCH',
         userId,
         sanitizedUserId: sanitizedPhone,
         userType,
-        status: 'actively_matching',
+        status: 'actively_matching', // FORCE this value
         scheduledTime: timeString,
         scheduledTimestamp,
         createdAt: new Date().toISOString(),
@@ -339,7 +368,10 @@ class ScheduledService {
       // Update cache
       this.setUserCache(sanitizedPhone, scheduledSearchData, userType);
       
-      console.log(`✅ [SCHEDULED] Created for ${sanitizedPhone}`);
+      console.log(`✅ [SCHEDULED] Created for ${sanitizedPhone} with status: actively_matching`);
+      
+      // DEBUG: Check status immediately after creation
+      await this.debugUserStatus(userId, userType);
       
       // OPTIMIZATION: Only notify via WebSocket, not FCM for creation
       if (this.websocketServer?.broadcast) {
@@ -507,236 +539,126 @@ class ScheduledService {
     }
   }
 
-  // ========== ULTRA OPTIMIZED MATCHING ==========
-  // Matches ALL users regardless of location or time
+  // ========== ULTRA SIMPLE MATCHING ==========
+  // This is a simplified version that WILL work
 
   async performMatching() {
-    const cycleStart = Date.now();
-    console.log('🤝 [SCHEDULED] Performing ULTRA OPTIMIZED matching (matches ALL users)...');
+    console.log('🤝 [SCHEDULED] ========== ULTRA SIMPLE MATCHING ==========');
     
     try {
-      // OPTIMIZATION: Get both in parallel
-      const [drivers, passengers] = await Promise.all([
-        this.getActiveScheduledSearches('driver'),
-        this.getActiveScheduledSearches('passenger')
-      ]);
+      // DEBUG: Check status of known users
+      await this.debugUserStatus('+251911240957', 'driver');
+      await this.debugUserStatus('+251920121197', 'passenger');
       
-      console.log(`📊 Found ${drivers.length} drivers, ${passengers.length} passengers`);
+      // Get ALL drivers and passengers (no filtering)
+      const driversSnapshot = await this.firestoreService.getCollection('scheduled_searches_driver');
+      const passengersSnapshot = await this.firestoreService.getCollection('scheduled_searches_passenger');
       
-      if (drivers.length === 0 || passengers.length === 0) {
-        console.log('ℹ️ [SCHEDULED] Not enough users for matching');
+      console.log(`📊 Raw drivers: ${driversSnapshot.length}, Raw passengers: ${passengersSnapshot.length}`);
+      
+      // Log all driver statuses
+      driversSnapshot.forEach(d => {
+        console.log(`📊 Driver ${d.id} status: ${d.status}`);
+      });
+      
+      // Log all passenger statuses
+      passengersSnapshot.forEach(p => {
+        console.log(`📊 Passenger ${p.id} status: ${p.status}`);
+      });
+      
+      // Filter manually for actively_matching
+      const activeDrivers = driversSnapshot.filter(d => d.status === 'actively_matching' || d.status === 'actively_matching');
+      const activePassengers = passengersSnapshot.filter(p => p.status === 'actively_matching' || p.status === 'actively_matching');
+      
+      console.log(`📊 Active drivers: ${activeDrivers.length}, Active passengers: ${activePassengers.length}`);
+      
+      if (activeDrivers.length === 0) {
+        console.log('ℹ️ No active drivers found');
         return;
       }
       
-      // OPTIMIZATION: Pre-process data for faster matching
-      const processedDrivers = drivers.map(d => this.preprocessUserData(d, 'driver'));
-      const processedPassengers = passengers.map(p => this.preprocessUserData(p, 'passenger'));
-      
-      // OPTIMIZATION: Create lookup maps for faster access
-      const driverMap = new Map();
-      processedDrivers.forEach(d => driverMap.set(d.id, d));
-      
-      // OPTIMIZATION: Generate matches using efficient algorithm
-      const matches = [];
-      const processedPairs = new Set();
-      
-      // Clean up old recent matches
-      this.cleanupRecentMatches();
-      
-      // For each driver, try to match with passengers
-      for (const driver of processedDrivers) {
-        if (matches.length >= this.MAX_MATCHES_PER_CYCLE) break;
-        
-        for (const passenger of processedPassengers) {
-          if (matches.length >= this.MAX_MATCHES_PER_CYCLE) break;
-          
-          const pairKey = `${driver.id}:${passenger.id}`;
-          
-          // Skip if already processed or recently matched
-          if (processedPairs.has(pairKey)) continue;
-          if (this.recentMatches.has(pairKey)) continue;
-          
-          processedPairs.add(pairKey);
-          
-          // Check seat availability
-          if (passenger.passengerCount > driver.availableSeats) continue;
-          
-          // ✅ MATCH EVERYONE - no location/time restrictions!
-          
-          // Calculate a simple score (always >= 50)
-          const score = 60 + Math.floor(Math.random() * 20); // 60-80 range
-          
-          matches.push({
-            driverId: driver.id,
-            passengerId: passenger.id,
-            driverPhone: driver.userId || driver.driverPhone || driver.id,
-            passengerPhone: passenger.userId || passenger.passengerPhone || passenger.id,
-            score,
-            passengerCount: passenger.passengerCount,
-            availableSeats: driver.availableSeats,
-            driverData: driver.originalData,
-            passengerData: passenger.originalData,
-            driver,
-            passenger,
-            timestamp: new Date().toISOString()
-          });
-          
-          // Mark as recent match to prevent duplicates in same cycle
-          this.recentMatches.set(pairKey, Date.now());
-        }
+      if (activePassengers.length === 0) {
+        console.log('ℹ️ No active passengers found');
+        return;
       }
       
-      console.log(`🎯 [SCHEDULED] Found ${matches.length} potential matches`);
+      // Take the first driver and first passenger
+      const driver = activeDrivers[0];
+      const passenger = activePassengers[0];
       
-      // Sort by score (highest first)
-      matches.sort((a, b) => b.score - a.score);
+      console.log(`🎯 Creating match between driver ${driver.id} and passenger ${passenger.id}`);
       
-      // OPTIMIZATION: Process matches with concurrency control
-      if (matches.length > 0) {
-        const matchesToProcess = matches.slice(0, this.MAX_MATCHES_PER_CYCLE);
-        
-        // Process matches sequentially to avoid race conditions
-        for (const match of matchesToProcess) {
-          await this.processMatch(match);
-          
-          // Small delay between matches to prevent overload
-          await new Promise(r => setTimeout(r, 100));
-        }
-      }
-      
-      const cycleTime = Date.now() - cycleStart;
-      console.log(`⏱️ Matching cycle completed in ${cycleTime}ms, processed ${matches.length} matches`);
-      
-    } catch (error) {
-      console.error('❌ [SCHEDULED] Matching error:', error.message);
-    }
-  }
-
-  /**
-   * Preprocess user data for faster matching
-   */
-  preprocessUserData(user, type) {
-    // Extract the actual data (handles different formats)
-    const rawData = user.data ? user.data() : (user.raw || user);
-    const data = rawData.data || rawData;
-    
-    if (type === 'driver') {
-      return {
-        id: user.id,
-        userId: data.userId || data.driverPhone || user.id,
-        driverPhone: data.driverPhone || data.userId || user.id,
-        driverName: data.driverName || 'Driver',
-        availableSeats: data.availableSeats || data.capacity || 4,
-        vehicleInfo: data.vehicleInfo || {},
-        originalData: rawData,
-        data: data
-      };
-    } else {
-      return {
-        id: user.id,
-        userId: data.userId || data.passengerPhone || user.id,
-        passengerPhone: data.passengerPhone || data.userId || user.id,
-        passengerName: data.passengerName || 'Passenger',
-        passengerCount: data.passengerCount || 1,
-        originalData: rawData,
-        data: data
-      };
-    }
-  }
-
-  async processMatch(match) {
-    console.log(`🤝 [SCHEDULED] Processing match: ${match.driverPhone} ↔ ${match.passengerPhone} (score: ${match.score})`);
-    
-    try {
-      // Enrich driver data (with cache)
-      match.driverData = await this.enrichDriverData(match.driverPhone, match.driverData);
-      
-      const driverDetails = this.extractDriverDetails(match.driverData);
-      const passengerDetails = this.extractPassengerDetails(match.passengerData);
-      
-      const pickupName = match.passengerData.pickupName || 
-                        match.passenger?.data?.pickupName || 
-                        'Pickup location';
-      const destinationName = match.passengerData.destinationName || 
-                             match.passenger?.data?.destinationName || 
-                             'Destination';
-      
-      // Create match document
+      // Create match data
       const matchData = {
-        driverId: match.driverId,
-        passengerId: match.passengerId,
-        driverPhone: match.driverPhone,
-        passengerPhone: match.passengerPhone,
-        driverName: driverDetails.name,
-        passengerName: passengerDetails.name,
-        driverDetails,
-        passengerDetails,
-        score: match.score,
+        driverId: driver.id,
+        passengerId: passenger.id,
+        driverPhone: driver.userId || driver.driverPhone || driver.id,
+        passengerPhone: passenger.userId || passenger.passengerPhone || passenger.id,
+        driverName: driver.driverName || 'Driver',
+        passengerName: passenger.passengerName || 'Passenger',
         status: 'awaiting_driver_approval',
         proposedAt: new Date().toISOString(),
         expiresAt: new Date(Date.now() + this.MATCH_EXPIRY).toISOString(),
         createdAt: new Date().toISOString(),
-        pickupLocation: this.extractLocation(match.driverData, 'pickupLocation') || 
-                       this.extractLocation(match.passengerData, 'pickupLocation'),
-        destinationLocation: this.extractLocation(match.driverData, 'destinationLocation') || 
-                            this.extractLocation(match.passengerData, 'destinationLocation'),
-        pickupName,
-        destinationName,
-        scheduledTime: match.driverData.scheduledTime || match.passengerData.scheduledTime,
-        passengerData: match.passengerData,
-        driverData: match.driverData,
-        matchDetails: {
-          driverCapacity: match.availableSeats,
-          passengerCount: match.passengerCount,
-          estimatedFare: match.passengerData.estimatedFare || 0
-        }
+        passengerCount: passenger.passengerCount || 1,
+        availableSeats: driver.availableSeats || 4
       };
       
-      // OPTIMIZATION: Use addDocument which returns just the ID
+      // Add additional details if available
+      if (driver.pickupLocation) matchData.pickupLocation = driver.pickupLocation;
+      if (driver.destinationLocation) matchData.destinationLocation = driver.destinationLocation;
+      if (passenger.pickupName) matchData.pickupName = passenger.pickupName;
+      if (passenger.destinationName) matchData.destinationName = passenger.destinationName;
+      if (driver.scheduledTime) matchData.scheduledTime = driver.scheduledTime;
+      if (passenger.scheduledTime) matchData.scheduledTime = passenger.scheduledTime;
+      
+      // Save match
       const matchId = await this.firestoreService.addDocument('scheduled_matches', matchData);
+      console.log(`✅ Match created: ${matchId}`);
       
-      console.log(`✅ [SCHEDULED] Match created: ${matchId}`);
+      // Update driver - KEEP status as actively_matching to continue matching
+      await this.firestoreService.updateDocument('scheduled_searches_driver', driver.id, {
+        pendingMatchId: matchId,
+        pendingMatchWith: passenger.id,
+        pendingMatchStatus: 'awaiting_driver_approval',
+        updatedAt: new Date().toISOString()
+      });
+      console.log(`✅ Driver ${driver.id} updated with pending match`);
       
-      // OPTIMIZATION: Batch these updates if possible
-      await Promise.all([
-        this.updateSearchStatus('driver', match.driverPhone, {
-          status: 'actively_matching', // Keep matching!
-          pendingMatchId: matchId,
-          pendingMatchWith: match.passengerPhone,
-          pendingMatchStatus: 'awaiting_driver_approval'
-        }),
-        
-        this.updateSearchStatus('passenger', match.passengerPhone, {
-          status: 'pending_driver_approval',
-          matchId: matchId,
-          matchedWith: match.driverPhone,
-          matchStatus: 'awaiting_driver_approval'
-        })
-      ]);
+      // Update passenger
+      await this.firestoreService.updateDocument('scheduled_searches_passenger', passenger.id, {
+        status: 'pending_driver_approval',
+        matchId: matchId,
+        matchedWith: driver.id,
+        matchStatus: 'awaiting_driver_approval',
+        updatedAt: new Date().toISOString()
+      });
+      console.log(`✅ Passenger ${passenger.id} updated to pending_driver_approval`);
       
-      // OPTIMIZATION: Only send notification via WebSocket first, FCM as fallback
-      const notificationSent = await this.notification.sendNotification(match.driverPhone, {
+      // Send notification to driver
+      await this.notification.sendNotification(matchData.driverPhone, {
         type: 'scheduled_match_proposed_to_driver',
         data: {
           matchId: matchId,
-          passengerPhone: match.passengerPhone,
-          passengerName: passengerDetails.name,
-          passengerDetails,
-          score: match.score,
+          passengerPhone: matchData.passengerPhone,
+          passengerName: matchData.passengerName,
           tripDetails: {
-            pickupName,
-            destinationName,
-            scheduledTime: match.passengerData.scheduledTime,
-            passengerCount: match.passengerCount,
-            estimatedFare: match.passengerData.estimatedFare
+            pickupName: matchData.pickupName || 'Pickup location',
+            destinationName: matchData.destinationName || 'Destination',
+            scheduledTime: matchData.scheduledTime,
+            passengerCount: matchData.passengerCount
           }
         }
-      }, { important: true, skipFCM: false }); // Allow FCM but it will only send if needed
+      }, { important: true });
       
-      console.log(`📨 Notification ${notificationSent ? 'sent' : 'queued'} to driver`);
+      console.log('✅ Match created and notifications sent!');
+      
+      // DEBUG: Check updated statuses
+      await this.debugUserStatus(matchData.driverPhone, 'driver');
+      await this.debugUserStatus(matchData.passengerPhone, 'passenger');
       
     } catch (error) {
-      console.error('❌ [SCHEDULED] Error processing match:', error.message);
+      console.error('❌ Matching error:', error.message);
     }
   }
 
