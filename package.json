@@ -1,11 +1,12 @@
 {
   "name": "shareway-backend",
   "version": "1.0.0",
-  "description": "ShareWay Ride Sharing Backend",
+  "description": "ShareWay Ride Sharing Backend - Production",
   "main": "src/app.js",
   "scripts": {
     "start": "node src/app.js",
-    "dev": "node src/app.js",
+    "dev": "nodemon src/app.js",
+    "production": "NODE_ENV=production node src/app.js",
     "test": "echo \"No tests specified\" && exit 0"
   },
   "dependencies": {
@@ -16,8 +17,12 @@
     "express": "^4.22.1",
     "firebase-admin": "^11.8.0",
     "helmet": "^8.1.0",
+    "http-proxy": "^1.18.1",
     "morgan": "^1.10.1",
-    "ws": "^8.14.2"
+    "ws": "^8.19.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
   },
   "engines": {
     "node": "18.x"

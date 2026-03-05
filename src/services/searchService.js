@@ -11,11 +11,15 @@ class SearchService {
     this.websocketServer = websocketServer;
     this.processedMatches = new Map();
     this.userMatches = new Map();
+    this.searchCooldowns = new Map(); // For rate limiting
+    this.duplicateDetectionLog = new Map(); // Track duplicate attempts
+    
+    // Start cleanup interval
+    this.startCleanupInterval();
   }
   
-  // ========== ADD THESE CRITICAL METHODS ==========
+  // ========== ADD DRIVER SEARCH WITH DUPLICATE PREVENTION ==========
   
-  // Add driver search with Firestore save
   async addDriverSearch(searchData) {
     try {
       console.log('🚗 SearchService.addDriverSearch called with:');
@@ -23,6 +27,52 @@ class SearchService {
       console.log('  driverPhone:', searchData.driverPhone);
       console.log('  driverPhotoUrl:', searchData.driverPhotoUrl || searchData.driverPhoto);
       console.log('  All keys:', Object.keys(searchData));
+      
+      // ✅ CRITICAL: CHECK FOR DUPLICATE BEFORE PROCESSING
+      const phone = searchData.driverPhone || searchData.userId;
+      const existingSearch = this.getActiveSearchByPhone(phone);
+      
+      if (existingSearch) {
+        const timeSinceLastSearch = Date.now() - existingSearch.lastUpdated;
+        
+        // If last search was less than 10 seconds ago, return existing search
+        if (timeSinceLastSearch < 10000) {
+          console.log(`⏱️ Skipping duplicate driver search for ${phone} (${Math.round(timeSinceLastSearch/1000)}s ago)`);
+          console.log(`🔄 Returning existing search ID: ${existingSearch.searchId}`);
+          this.logDuplicateAttempt(phone, 'driver', timeSinceLastSearch);
+          return existingSearch;
+        }
+        
+        // If it's been more than 10 seconds but less than 2 minutes, update existing
+        if (timeSinceLastSearch < 120000) {
+          console.log(`🔄 Updating existing driver search for ${phone} (${Math.round(timeSinceLastSearch/1000)}s old)`);
+          
+          // Update the existing search
+          const updatedSearch = {
+            ...existingSearch,
+            ...searchData,
+            lastUpdated: Date.now(),
+            // Preserve the original searchId
+            searchId: existingSearch.searchId,
+            // Increment update count
+            updateCount: (existingSearch.updateCount || 0) + 1
+          };
+          
+          activeSearches.set(phone, updatedSearch);
+          
+          // Try to update in Firestore, but don't crash if it fails
+          await this.updateExistingSearchInFirestore(phone, searchData, 'driver');
+          
+          return updatedSearch;
+        }
+        
+        // Otherwise, remove the old search and continue
+        console.log(`🧹 Removing stale driver search for ${phone} (${Math.round(timeSinceLastSearch/1000)}s old)`);
+        this.stopUserSearch(phone, 'stale_replace');
+      }
+      
+      // Check rate limiting
+      this.checkRateLimit(phone);
       
       // Store in memory
       const memorySearch = this.storeSearchInMemory(searchData);
@@ -43,14 +93,17 @@ class SearchService {
         duration: searchData.duration,
         estimatedFare: searchData.estimatedFare,
         rideType: searchData.rideType || 'immediate',
-        searchId: searchData.searchId || `driver_${Date.now()}`,
-        status: 'searching'
+        searchId: memorySearch.searchId,
+        status: 'searching',
+        createdAt: new Date().toISOString(),
+        lastUpdated: new Date().toISOString()
       });
       
       console.log('✅ Driver search saved to Firestore:', {
         documentId: firestoreResult?.documentId,
         driverName: firestoreResult?.driverName,
-        driverPhotoUrl: firestoreResult?.driverPhotoUrl
+        driverPhotoUrl: firestoreResult?.driverPhotoUrl,
+        searchId: memorySearch.searchId
       });
       return memorySearch;
       
@@ -60,7 +113,8 @@ class SearchService {
     }
   }
   
-  // Add passenger search with Firestore save
+  // ========== ADD PASSENGER SEARCH WITH DUPLICATE PREVENTION ==========
+  
   async addPassengerSearch(searchData) {
     try {
       console.log('👤 SearchService.addPassengerSearch called with:');
@@ -68,6 +122,52 @@ class SearchService {
       console.log('  passengerPhone:', searchData.passengerPhone);
       console.log('  passengerPhotoUrl:', searchData.passengerPhotoUrl || searchData.passengerPhoto);
       console.log('  All keys:', Object.keys(searchData));
+      
+      // ✅ CRITICAL: CHECK FOR DUPLICATE BEFORE PROCESSING
+      const phone = searchData.passengerPhone || searchData.userId;
+      const existingSearch = this.getActiveSearchByPhone(phone);
+      
+      if (existingSearch) {
+        const timeSinceLastSearch = Date.now() - existingSearch.lastUpdated;
+        
+        // If last search was less than 10 seconds ago, return existing search
+        if (timeSinceLastSearch < 10000) {
+          console.log(`⏱️ Skipping duplicate passenger search for ${phone} (${Math.round(timeSinceLastSearch/1000)}s ago)`);
+          console.log(`🔄 Returning existing search ID: ${existingSearch.searchId}`);
+          this.logDuplicateAttempt(phone, 'passenger', timeSinceLastSearch);
+          return existingSearch;
+        }
+        
+        // If it's been more than 10 seconds but less than 2 minutes, update existing
+        if (timeSinceLastSearch < 120000) {
+          console.log(`🔄 Updating existing passenger search for ${phone} (${Math.round(timeSinceLastSearch/1000)}s old)`);
+          
+          // Update the existing search
+          const updatedSearch = {
+            ...existingSearch,
+            ...searchData,
+            lastUpdated: Date.now(),
+            // Preserve the original searchId
+            searchId: existingSearch.searchId,
+            // Increment update count
+            updateCount: (existingSearch.updateCount || 0) + 1
+          };
+          
+          activeSearches.set(phone, updatedSearch);
+          
+          // Try to update in Firestore, but don't crash if it fails
+          await this.updateExistingSearchInFirestore(phone, searchData, 'passenger');
+          
+          return updatedSearch;
+        }
+        
+        // Otherwise, remove the old search and continue
+        console.log(`🧹 Removing stale passenger search for ${phone} (${Math.round(timeSinceLastSearch/1000)}s old)`);
+        this.stopUserSearch(phone, 'stale_replace');
+      }
+      
+      // Check rate limiting
+      this.checkRateLimit(phone);
       
       // Store in memory
       const memorySearch = this.storeSearchInMemory(searchData);
@@ -88,14 +188,18 @@ class SearchService {
         duration: searchData.duration,
         estimatedFare: searchData.estimatedFare,
         rideType: searchData.rideType || 'immediate',
-        searchId: searchData.searchId || `passenger_${Date.now()}`,
-        status: 'searching'
+        searchId: memorySearch.searchId,
+        status: 'searching',
+        createdAt: new Date().toISOString(),
+        lastUpdated: new Date().toISOString(),
+        updateCount: 0
       });
       
       console.log('✅ Passenger search saved to Firestore:', {
         documentId: firestoreResult?.documentId,
         passengerName: firestoreResult?.passengerName,
-        passengerPhotoUrl: firestoreResult?.passengerPhotoUrl || 'No photo saved'
+        passengerPhotoUrl: firestoreResult?.passengerPhotoUrl || 'No photo saved',
+        searchId: memorySearch.searchId
       });
       return memorySearch;
       
@@ -105,16 +209,140 @@ class SearchService {
     }
   }
   
-  // ========== EXISTING METHODS (UPDATED) ==========
+  // ========== DUPLICATE PREVENTION HELPER METHODS ==========
   
-  // Store search in memory
+  // Check for active search by phone number
+  getActiveSearchByPhone(phone) {
+    // Check in activeSearches map
+    for (const [userId, search] of activeSearches.entries()) {
+      if ((search.userType === 'passenger' && search.passengerPhone === phone) ||
+          (search.userType === 'driver' && search.driverPhone === phone) ||
+          userId === phone) {
+        return search;
+      }
+    }
+    return null;
+  }
+  
+  // Update existing search in Firestore - SAFE VERSION
+  async updateExistingSearchInFirestore(phone, updatedData, userType) {
+    try {
+      // Firestore updates for existing searches are optional
+      // If the method doesn't exist, we just skip it
+      if (typeof this.firestoreService.updateSearch === 'function') {
+        // Only update if significant changes
+        const significantChanges = ['pickupLocation', 'destinationLocation', 'routePoints', 
+                                   'passengerCount', 'capacity', 'estimatedFare'];
+        const needsFirestoreUpdate = significantChanges.some(field => 
+          updatedData[field] && JSON.stringify(updatedData[field]) !== JSON.stringify({})
+        );
+        
+        if (needsFirestoreUpdate) {
+          await this.firestoreService.updateSearch(phone, {
+            ...updatedData,
+            lastUpdated: new Date().toISOString(),
+            updateCount: (updatedData.updateCount || 0) + 1
+          });
+          console.log(`📝 Updated Firestore search for ${phone} (${userType})`);
+        }
+      } else {
+        // Method doesn't exist, just log and continue
+        console.log(`ℹ️ Firestore update not available for ${phone} (${userType}) - continuing with memory update`);
+      }
+    } catch (error) {
+      // Don't throw error, just log it and continue
+      console.log(`⚠️ Could not update Firestore for ${phone}: ${error.message}`);
+    }
+  }
+  
+  // Rate limiting check
+  checkRateLimit(userId) {
+    const now = Date.now();
+    const lastSearch = this.searchCooldowns.get(userId);
+    
+    if (lastSearch) {
+      const timeSinceLastSearch = now - lastSearch.timestamp;
+      const minInterval = lastSearch.count > 3 ? 30000 : 10000; // Increase interval if spamming
+      
+      if (timeSinceLastSearch < minInterval) {
+        const waitTime = Math.ceil((minInterval - timeSinceLastSearch) / 1000);
+        throw new Error(`Please wait ${waitTime} seconds before searching again`);
+      }
+      
+      // Update count
+      lastSearch.count += 1;
+      lastSearch.timestamp = now;
+      
+      // Reset count after 1 minute
+      if (now - lastSearch.firstSearch > 60000) {
+        lastSearch.count = 1;
+        lastSearch.firstSearch = now;
+      }
+    } else {
+      // First search
+      this.searchCooldowns.set(userId, {
+        timestamp: now,
+        count: 1,
+        firstSearch: now
+      });
+    }
+  }
+  
+  // Log duplicate attempts
+  logDuplicateAttempt(phone, userType, timeSinceLastSearch) {
+    const key = `${phone}_${userType}`;
+    const count = this.duplicateDetectionLog.get(key) || 0;
+    this.duplicateDetectionLog.set(key, count + 1);
+    
+    // Log warning if many duplicates detected
+    if (count >= 5) {
+      console.warn(`🚨 HIGH DUPLICATE RATE: ${phone} (${userType}) has ${count+1} duplicate attempts`);
+    }
+  }
+  
+  // ========== STORE SEARCH IN MEMORY (UPDATED WITH DUPLICATION CHECK) ==========
+  
   storeSearchInMemory(searchData) {
     const { userId, userType, rideType = 'immediate' } = searchData;
     
     if (!userId) throw new Error('userId is required');
     
+    // Check if already exists
+    const existingSearch = activeSearches.get(userId);
+    const now = Date.now();
+    
+    // If exists and recent, update it instead of creating new
+    if (existingSearch && existingSearch.rideType === rideType) {
+      const timeDiff = now - existingSearch.lastUpdated;
+      
+      // Update existing if less than 30 seconds old
+      if (timeDiff < 30000) {
+        console.log(`🔄 Updating existing memory search for ${userId} (${Math.round(timeDiff/1000)}s old)`);
+        
+        const updatedSearch = {
+          ...existingSearch,
+          ...searchData,
+          lastUpdated: now,
+          // Keep original searchId
+          searchId: existingSearch.searchId,
+          // Preserve original creation time
+          createdAt: existingSearch.createdAt,
+          // Increment update count
+          updateCount: (existingSearch.updateCount || 0) + 1
+        };
+        
+        activeSearches.set(userId, updatedSearch);
+        return updatedSearch;
+      }
+    }
+    
     // ✅ Extract photos - supporting both formats
     const { passengerPhoto, passengerPhotoUrl, driverPhoto, driverPhotoUrl } = searchData;
+    
+    // Generate unique search ID
+    const timestamp = Date.now();
+    const randomSuffix = Math.floor(Math.random() * 1000);
+    const searchId = searchData.searchId || `search_${timestamp}_${randomSuffix}`;
     
     // Use photoUrl format if available, fall back to photo format
     const enhancedSearchData = {
@@ -130,6 +358,10 @@ class SearchService {
       // Generic photo field for easier access
       userPhoto: this.getUserPhoto(searchData, userType),
       
+      // Phone numbers for duplicate detection
+      driverPhone: searchData.driverPhone,
+      passengerPhone: searchData.passengerPhone,
+      
       pickupLocation: searchData.pickupLocation || {},
       destinationLocation: searchData.destinationLocation || {},
       pickupName: searchData.pickupName || 'Unknown Pickup',
@@ -143,10 +375,11 @@ class SearchService {
       estimatedFare: searchData.estimatedFare,
       rideType: rideType,
       scheduledTime: searchData.scheduledTime,
-      searchId: searchData.searchId || `${rideType}_${userId}_${Date.now()}`,
+      searchId: searchId,
       status: 'searching',
-      lastUpdated: Date.now(),
-      createdAt: searchData.createdAt || new Date().toISOString()
+      lastUpdated: now,
+      createdAt: searchData.createdAt || new Date().toISOString(),
+      updateCount: 0
     };
     
     activeSearches.set(userId, enhancedSearchData);
@@ -158,9 +391,12 @@ class SearchService {
     
     console.log(`🎯 ${rideType.toUpperCase()} search stored: ${enhancedSearchData.driverName || enhancedSearchData.passengerName}`);
     console.log(`📸 Photo: ${enhancedSearchData.userPhoto || 'No photo'}`);
+    console.log(`🔑 Search ID: ${enhancedSearchData.searchId}`);
     
     return enhancedSearchData;
   }
+  
+  // ========== EXISTING METHODS ==========
   
   // Helper method to get user photo based on user type
   getUserPhoto(searchData, userType) {
@@ -254,7 +490,8 @@ class SearchService {
       'match_found': 'Search stopped - match found!',
       'user_cancelled': 'Search cancelled by user',
       'timeout': 'Search timed out',
-      'system': 'Search stopped by system'
+      'system': 'Search stopped by system',
+      'stale_replace': 'Replaced stale search with new one'
     };
     return messages[reason] || 'Search stopped';
   }
@@ -331,7 +568,8 @@ class SearchService {
           scheduledTime: search.scheduledTime,
           searchId: search.searchId,
           status: search.status,
-          lastUpdated: search.lastUpdated
+          lastUpdated: search.lastUpdated,
+          updateCount: search.updateCount || 0
         };
       });
   }
@@ -356,7 +594,9 @@ class SearchService {
         userType: memorySearch.userType,
         rideType: memorySearch.rideType,
         status: memorySearch.status,
-        searchId: memorySearch.searchId
+        searchId: memorySearch.searchId,
+        lastUpdated: memorySearch.lastUpdated,
+        updateCount: memorySearch.updateCount || 0
       } : { exists: false },
       matches: {
         count: userMatchCount,
@@ -429,6 +669,20 @@ class SearchService {
     return null;
   }
   
+  // ========== CLEANUP AND MAINTENANCE METHODS ==========
+  
+  // Start cleanup interval
+  startCleanupInterval() {
+    // Run cleanup every 30 seconds
+    setInterval(() => {
+      this.cleanupOldData();
+      this.cleanupCooldowns();
+      this.logDuplicateStats();
+    }, 30000);
+    
+    console.log('✅ Started SearchService cleanup interval (30s)');
+  }
+  
   // Clean old data
   cleanupOldData() {
     const now = Date.now();
@@ -453,6 +707,7 @@ class SearchService {
     for (const [userId, search] of activeSearches.entries()) {
       if (search.lastUpdated && search.lastUpdated < oneHourAgo) {
         activeSearches.delete(userId);
+        this.clearSearchTimeout(userId);
         cleanedCount++;
       }
     }
@@ -462,15 +717,68 @@ class SearchService {
     }
   }
   
+  // Clean up cooldown data
+  cleanupCooldowns() {
+    const now = Date.now();
+    const oneHourAgo = now - 3600000;
+    
+    for (const [userId, data] of this.searchCooldowns.entries()) {
+      if (data.timestamp < oneHourAgo) {
+        this.searchCooldowns.delete(userId);
+      }
+    }
+    
+    // Clean duplicate detection log
+    for (const [key, count] of this.duplicateDetectionLog.entries()) {
+      if (count > 100) {
+        // Reset if too high
+        this.duplicateDetectionLog.set(key, 0);
+      }
+    }
+  }
+  
+  // Log duplicate statistics
+  logDuplicateStats() {
+    const totalDuplicates = Array.from(this.duplicateDetectionLog.values())
+      .reduce((sum, count) => sum + count, 0);
+    
+    if (totalDuplicates > 0) {
+      const highDuplicateUsers = Array.from(this.duplicateDetectionLog.entries())
+        .filter(([key, count]) => count > 5)
+        .map(([key, count]) => `${key}: ${count} duplicates`);
+      
+      if (highDuplicateUsers.length > 0) {
+        console.log(`⚠️ Duplicate Detection Stats:`);
+        console.log(`   Total duplicate attempts prevented: ${totalDuplicates}`);
+        console.log(`   High duplicate users: ${highDuplicateUsers.join(', ')}`);
+      }
+    }
+  }
+  
+  // Count searches by phone (for duplicate detection)
+  countSearchesByPhone(phone) {
+    let count = 0;
+    for (const search of activeSearches.values()) {
+      if ((search.userType === 'passenger' && search.passengerPhone === phone) ||
+          (search.userType === 'driver' && search.driverPhone === phone)) {
+        count++;
+      }
+    }
+    return count;
+  }
+  
   // Get statistics
   getStats() {
     const activeSearchArray = Array.from(activeSearches.values());
+    const duplicateCount = Array.from(this.duplicateDetectionLog.values())
+      .reduce((sum, count) => sum + count, 0);
     
     return {
       activeSearches: activeSearches.size,
       searchTimeouts: searchTimeouts.size,
       processedMatches: this.processedMatches.size,
       userMatches: this.userMatches.size,
+      duplicatePreventions: duplicateCount,
       memory: {
         drivers: activeSearchArray.filter(s => s.userType === 'driver').length,
         passengers: activeSearchArray.filter(s => s.userType === 'passenger').length,
@@ -501,9 +809,23 @@ class SearchService {
     
     this.userMatches.clear();
     this.processedMatches.clear();
+    this.searchCooldowns.clear();
+    this.duplicateDetectionLog.clear();
     
     console.log(`🧹 Cleared all searches (${count} active searches removed)`);
     return count;
+  }
+  
+  // Force remove a specific search (for debugging)
+  forceRemoveSearch(userId) {
+    if (activeSearches.has(userId)) {
+      const search = activeSearches.get(userId);
+      activeSearches.delete(userId);
+      this.clearSearchTimeout(userId);
+      console.log(`🧹 Force removed search for ${userId} (${search.searchId})`);
+      return true;
+    }
+    return false;
   }
 }
 

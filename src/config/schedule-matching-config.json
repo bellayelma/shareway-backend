@@ -1,0 +1,237 @@
+{
+  "SYSTEM_MODE": "PROGRESSIVE_MATCHING",
+  "ENABLED": true,
+  "DEBUG_MODE": false,
+  "PROFILES": {
+    "PROGRESSIVE_MATCHING": {
+      "description": "Standard progressive matching with decreasing radius",
+      "matching_strategy": "TIME_BASED_WINDOWS",
+      "window_behavior": "DECREASING_RADIUS",
+      "notification_strategy": "PROGRESSIVE"
+    },
+    "AGGRESSIVE": {
+      "description": "Match as early as possible, wider acceptance",
+      "matching_strategy": "EARLY_MATCHING",
+      "window_behavior": "CONSTANT_RADIUS",
+      "notification_strategy": "IMMEDIATE"
+    },
+    "CONSERVATIVE": {
+      "description": "Only match when very close, high compatibility required",
+      "matching_strategy": "LAST_MINUTE",
+      "window_behavior": "STRICT_RADIUS",
+      "notification_strategy": "MINIMAL"
+    }
+  },
+  "TIME_WINDOWS": {
+    "24h": {
+      "name": "Early Discovery",
+      "hours_before": 24,
+      "check_interval": 60,
+      "radius_km": 20,
+      "max_matches_per_window": 3,
+      "enabled": true,
+      "priority": 1
+    },
+    "12h": {
+      "name": "Confirmation Phase",
+      "hours_before": 12,
+      "check_interval": 30,
+      "radius_km": 10,
+      "max_matches_per_window": 5,
+      "enabled": true,
+      "priority": 2
+    },
+    "6h": {
+      "name": "Finalization",
+      "hours_before": 6,
+      "check_interval": 15,
+      "radius_km": 5,
+      "max_matches_per_window": 8,
+      "enabled": true,
+      "priority": 3
+    },
+    "3h": {
+      "name": "Reminder & Updates",
+      "hours_before": 3,
+      "check_interval": 10,
+      "radius_km": 3,
+      "max_matches_per_window": 10,
+      "enabled": true,
+      "priority": 4
+    },
+    "1h": {
+      "name": "Preparation",
+      "hours_before": 1,
+      "check_interval": 5,
+      "radius_km": 1,
+      "max_matches_per_window": 15,
+      "enabled": true,
+      "priority": 5
+    },
+    "30m": {
+      "name": "Activation",
+      "hours_before": 0.5,
+      "check_interval": 2,
+      "radius_km": 0.5,
+      "max_matches_per_window": 20,
+      "enabled": true,
+      "priority": 6
+    }
+  },
+  "MATCHING_ALGORITHM": {
+    "SCORING_WEIGHTS": {
+      "TIME_COMPATIBILITY": 0.4,
+      "DISTANCE_COMPATIBILITY": 0.3,
+      "ROUTE_COMPATIBILITY": 0.2,
+      "GROUP_SIZE_COMPATIBILITY": 0.1
+    },
+    "THRESHOLDS": {
+      "MIN_TOTAL_SCORE": 60,
+      "MAX_TIME_DIFFERENCE": 30,
+      "DIRECTION_SIMILARITY_MIN": 0.3,
+      "MAX_DETOUR_PERCENTAGE": 0.25
+    },
+    "ROUTE_CALCULATION": {
+      "USE_OSRM_API": false,
+      "FALLBACK_TO_HAVERSINE": true,
+      "CACHE_DURATION": 3600000,
+      "MAX_WAYPOINTS": 10
+    }
+  },
+  "CAPACITY_MANAGEMENT": {
+    "DEFAULT_DRIVER_CAPACITY": 4,
+    "ALLOW_OVERBOOKING": false,
+    "OVERBOOKING_LIMIT": 1,
+    "GROUP_PRIORITIZATION": {
+      "PRIORITIZE_SINGLE_PASSENGERS": true,
+      "PRIORITIZE_SMALL_GROUPS": true,
+      "MAX_GROUP_SPLIT": 2
+    },
+    "MIN_SEATS_FOR_MATCH": 1
+  },
+  "NOTIFICATIONS": {
+    "NOTIFY_ON_MATCH_PROPOSAL": true,
+    "NOTIFY_ON_MATCH_ACCEPTANCE": true,
+    "NOTIFY_ON_MATCH_DECLINE": true,
+    "NOTIFY_ON_SCHEDULE_REMINDER": true,
+    "NOTIFY_ON_ACTIVATION": true,
+    "REMINDER_SCHEDULE": {
+      "24h": true,
+      "12h": true,
+      "6h": true,
+      "3h": true,
+      "1h": true
+    },
+    "PROPOSAL_EXPIRY": {
+      "24h": 720,
+      "12h": 360,
+      "6h": 180,
+      "3h": 60,
+      "1h": 30,
+      "30m": 15
+    }
+  },
+  "GEOGRAPHIC": {
+    "DEFAULT_CITY_CENTER": {
+      "lat": 8.550023,
+      "lng": 39.266712,
+      "name": "Adama City Center"
+    },
+    "MAX_SEARCH_RADIUS_KM": 50,
+    "MIN_VALID_LOCATION_ACCURACY": 100,
+    "ROUTE_REGIONS": [
+      {
+        "name": "Adama Metropolitan",
+        "center": {
+          "lat": 8.550023,
+          "lng": 39.266712
+        },
+        "radius_km": 15
+      },
+      {
+        "name": "Adama to Addis Ababa Corridor",
+        "center": {
+          "lat": 8.790022,
+          "lng": 39.05
+        },
+        "radius_km": 25
+      },
+      {
+        "name": "Adama to Dire Dawa Corridor",
+        "center": {
+          "lat": 9,
+          "lng": 40
+        },
+        "radius_km": 30
+      }
+    ]
+  },
+  "PERFORMANCE": {
+    "BATCH_SIZE": 50,
+    "MAX_CONCURRENT_WINDOWS": 2,
+    "PROCESSING_TIMEOUT": 30000,
+    "CACHE_ENABLED": true,
+    "CACHE_DURATION": 300000,
+    "MAX_CACHE_SIZE": 1000,
+    "USE_COMPOUND_INDEXES": true,
+    "QUERY_LIMIT": 100,
+    "BULK_WRITE_SIZE": 100
+  },
+  "FALLBACK_MECHANISMS": {
+    "ENABLED": true,
+    "ACTIVATE_AFTER_FAILED_CYCLES": 3,
+    "STRATEGIES": {
+      "EXPAND_SEARCH_RADIUS": true,
+      "RADIUS_MULTIPLIER": 1.5,
+      "RELAX_TIME_CONSTRAINTS": true,
+      "MAX_TIME_DIFF_FALLBACK": 60,
+      "RELAX_ROUTE_REQUIREMENTS": true,
+      "MIN_DIRECTION_SIMILARITY": 0.1,
+      "ALLOW_CROSS_REGION": false,
+      "CROSS_REGION_PENALTY": 20
+    },
+    "AUTO_RECOVERY": {
+      "ENABLED": true,
+      "RESET_AFTER_SUCCESSFUL_MATCHES": 10,
+      "GRADUAL_TIGHTENING": true
+    }
+  },
+  "MONITORING": {
+    "ENABLED": true,
+    "LOG_LEVEL": "INFO",
+    "METRICS_COLLECTION": {
+      "MATCH_SUCCESS_RATE": true,
+      "AVERAGE_MATCH_SCORE": true,
+      "WINDOW_PERFORMANCE": true,
+      "USER_SATISFACTION": true
+    },
+    "ALERTS": {
+      "LOW_MATCH_RATE_THRESHOLD": 0.3,
+      "HIGH_FAILURE_RATE_THRESHOLD": 0.5,
+      "SEND_EMAIL_ALERTS": false,
+      "SEND_SLACK_ALERTS": false
+    },
+    "STATS_INTERVAL": 300000
+  },
+  "ADMIN_CONTROLS": {
+    "EMERGENCY_STOP": false,
+    "PAUSE_MATCHING": false,
+    "MAINTENANCE_MODE": false,
+    "RATE_LIMITING": {
+      "ENABLED": true,
+      "REQUESTS_PER_MINUTE": 100,
+      "MATCHES_PER_USER_PER_DAY": 10
+    },
+    "MANUAL_OVERRIDE_ENABLED": true,
+    "FORCE_MATCH_ENABLED": false,
+    "MANUAL_MATCH_EXPIRY": 3600000
+  },
+  "VERSION": {
+    "CONFIG_VERSION": "1.0.0",
+    "SCHEMA_VERSION": 1,
+    "LAST_UPDATED": "2026-02-09T16:29:40.531Z",
+    "COMPATIBLE_SERVICES": [
+      "ScheduleMatchingService-v2.0+"
+    ]
+  }
+}
