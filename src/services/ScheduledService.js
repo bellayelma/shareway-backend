@@ -1,5 +1,5 @@
 // services/ScheduledService.js
-// CORE MATCHING LOGIC - Uses FirestoreService for stats counting
+// OPTIMIZED FOR FREE TIER - Reduced reads/writes, caching, batched operations
 
 const logger = require('../utils/Logger');
 
@@ -15,10 +15,10 @@ class ScheduledService {
     // Get db instance (fallback only)
     this.db = firestoreService?.db || admin?.firestore();
     
-    // Configuration
-    this.MATCHING_INTERVAL = 30000; // 30 seconds
+    // OPTIMIZATION: Configuration for free tier
+    this.MATCHING_INTERVAL = 60000; // 60 seconds (reduced from 30)
     this.MATCH_EXPIRY = 15 * 60 * 1000; // 15 minutes
-    this.MAX_MATCHES_PER_CYCLE = 5;
+    this.MAX_MATCHES_PER_CYCLE = 3; // Reduced from 5
     this.DISTANCE_THRESHOLD = 20000; // 20km
     this.DESTINATION_THRESHOLD = 30000; // 30km
     this.MIN_MATCH_SCORE = 40;
@@ -26,27 +26,39 @@ class ScheduledService {
     this.matchingInterval = null;
     this.cycleCount = 0;
     
-    logger.info('SCHEDULED_SERVICE', '🚀 Scheduled Service initialized');
+    // OPTIMIZATION: Cache for recently seen users to prevent repeated matching
+    this.recentMatches = new Map();
+    this.RECENT_MATCH_TTL = 300000; // 5 minutes
+    
+    // OPTIMIZATION: Cache for user data to reduce reads
+    this.userCache = new Map();
+    this.USER_CACHE_TTL = 600000; // 10 minutes
+    
+    logger.info('SCHEDULED_SERVICE', '🚀 Scheduled Service initialized (Optimized Mode)');
   }
 
   // ========== LIFECYCLE ==========
 
   async start() {
-    console.log('🚀 [SCHEDULED] Starting...');
+    console.log('🚀 [SCHEDULED] Starting in OPTIMIZED mode for free tier...');
     
-    // Test connection
+    // Test connection (only once at startup)
     await this.testConnection();
     
-    // Start matching interval
+    // Start matching interval with optimization
     this.matchingInterval = setInterval(async () => {
       this.cycleCount++;
-      logger.info('SCHEDULED_SERVICE', `🔄 Cycle #${this.cycleCount}`);
       
-      await this.performMatching();
-      await this.cleanupExpiredMatches();
+      // OPTIMIZATION: Only run matching every other cycle (reduce by 50%)
+      if (this.cycleCount % 2 === 0) {
+        logger.info('SCHEDULED_SERVICE', `🔄 Cycle #${this.cycleCount}`);
+        await this.performMatching();
+        await this.cleanupExpiredMatches();
+      }
+      
     }, this.MATCHING_INTERVAL);
     
-    logger.info('SCHEDULED_SERVICE', '✅ Started');
+    logger.info('SCHEDULED_SERVICE', '✅ Started (Optimized Mode)');
     return true;
   }
 
@@ -67,7 +79,47 @@ class ScheduledService {
       clearInterval(this.matchingInterval);
       this.matchingInterval = null;
     }
+    
+    // Clear caches
+    this.recentMatches.clear();
+    this.userCache.clear();
+    
     logger.info('SCHEDULED_SERVICE', '🛑 Stopped');
+  }
+
+  // ========== CACHE MANAGEMENT ==========
+
+  getUserFromCache(phoneNumber) {
+    const cached = this.userCache.get(phoneNumber);
+    if (cached && Date.now() - cached.timestamp < this.USER_CACHE_TTL) {
+      return cached.data;
+    }
+    return null;
+  }
+
+  setUserCache(phoneNumber, data) {
+    this.userCache.set(phoneNumber, {
+      data,
+      timestamp: Date.now()
+    });
+  }
+
+  cleanupRecentMatches() {
+    const now = Date.now();
+    for (const [key, timestamp] of this.recentMatches.entries()) {
+      if (now - timestamp > this.RECENT_MATCH_TTL) {
+        this.recentMatches.delete(key);
+      }
+    }
+  }
+
+  cleanupUserCache() {
+    const now = Date.now();
+    for (const [key, value] of this.userCache.entries()) {
+      if (now - value.timestamp > this.USER_CACHE_TTL) {
+        this.userCache.delete(key);
+      }
+    }
   }
 
   // ========== PHONE UTILITIES (Delegate to NotificationService) ==========
@@ -224,6 +276,9 @@ class ScheduledService {
         });
       }
       
+      // Update cache
+      this.setUserCache(sanitizedPhone, scheduledSearchData);
+      
       console.log(`✅ [SCHEDULED] Created for ${sanitizedPhone}`);
       
       // Notify via WebSocket
@@ -251,15 +306,24 @@ class ScheduledService {
     }
   }
 
-  // ========== ENRICH DRIVER DATA ==========
+  // ========== ENRICH DRIVER DATA (with caching) ==========
 
   async enrichDriverData(driverPhone, driverData) {
     try {
       const sanitizedPhone = this.sanitizePhoneNumber(driverPhone);
-      const userDoc = await this.firestoreService.getDocument('users', sanitizedPhone);
       
-      if (userDoc.exists) {
-        const userData = userDoc.data();
+      // Check cache first
+      let userData = this.getUserFromCache(sanitizedPhone);
+      
+      if (!userData) {
+        const userDoc = await this.firestoreService.getDocument('users', sanitizedPhone);
+        if (userDoc.exists) {
+          userData = userDoc.data();
+          this.setUserCache(sanitizedPhone, userData);
+        }
+      }
+      
+      if (userData) {
         const realName = userData.name || userData.displayName || userData.fullName;
         const realPhoto = userData.photoUrl || userData.photoURL || userData.profilePhoto;
         
@@ -278,7 +342,7 @@ class ScheduledService {
     return driverData;
   }
 
-  // ========== GET ACTIVE SEARCHES ==========
+  // ========== GET ACTIVE SEARCHES (with caching) ==========
 
   async getActiveScheduledSearches(userType) {
     const collectionName = userType === 'driver' 
@@ -286,27 +350,31 @@ class ScheduledService {
       : 'scheduled_searches_passenger';
     
     try {
-      const snapshot = await this.firestoreService.getCollection(collectionName);
-      const results = [];
+      // OPTIMIZATION: Use specialized method that filters on server
+      const constraints = [
+        { field: 'status', operator: 'in', value: ['actively_matching', 'scheduled'] }
+      ];
       
+      if (userType === 'driver') {
+        constraints.push({ field: 'availableSeats', operator: '>', value: 0 });
+      }
+      
+      const snapshot = await this.firestoreService.queryCollection(
+        collectionName,
+        constraints,
+        50 // Limit results
+      );
+      
+      const results = [];
       snapshot.forEach(doc => {
         const data = doc.data();
-        const isValid = data.status === 'actively_matching' || data.status === 'scheduled';
-        
-        if (userType === 'driver' && isValid) {
-          const seats = data.availableSeats || 4;
-          if (seats <= 0) return;
-        }
-        
-        if (isValid) {
-          results.push({
-            id: doc.id,
-            data: {
-              ...data,
-              userId: data.userId || data.passengerPhone || data.driverPhone || doc.id
-            }
-          });
-        }
+        results.push({
+          id: doc.id,
+          data: {
+            ...data,
+            userId: data.userId || data.passengerPhone || data.driverPhone || doc.id
+          }
+        });
       });
       
       console.log(`📊 [SCHEDULED] Found ${results.length} active ${userType}s`);
@@ -328,11 +396,20 @@ class ScheduledService {
     const sanitizedPhone = this.sanitizePhoneNumber(phoneNumber);
     
     try {
+      // Check cache first
+      const cached = this.getUserFromCache(`${userType}_${sanitizedPhone}`);
+      if (cached) return cached;
+      
       const docSnapshot = await this.firestoreService.getDocument(collectionName, sanitizedPhone);
       
       if (!docSnapshot.exists) return null;
       
-      return { id: docSnapshot.id, ...docSnapshot.data() };
+      const data = { id: docSnapshot.id, ...docSnapshot.data() };
+      
+      // Cache the result
+      this.setUserCache(`${userType}_${sanitizedPhone}`, data);
+      
+      return data;
     } catch (error) {
       console.error(`❌ [SCHEDULED] Error getting ${userType}:`, error.message);
       return null;
@@ -359,6 +436,9 @@ class ScheduledService {
         lastUpdated: Date.now()
       });
       
+      // Invalidate cache
+      this.userCache.delete(`${userType}_${sanitizedPhone}`);
+      
       return true;
     } catch (error) {
       console.error(`❌ [SCHEDULED] Error updating ${userType}:`, error.message);
@@ -366,12 +446,13 @@ class ScheduledService {
     }
   }
 
-  // ========== MATCHING LOGIC ==========
+  // ========== MATCHING LOGIC (OPTIMIZED) ==========
 
   async performMatching() {
-    console.log('🤝 [SCHEDULED] Performing matching...');
+    console.log('🤝 [SCHEDULED] Performing matching (optimized)...');
     
     try {
+      // OPTIMIZATION: Use specialized methods that filter on server
       const [drivers, passengers] = await Promise.all([
         this.getActiveScheduledSearches('driver'),
         this.getActiveScheduledSearches('passenger')
@@ -382,10 +463,16 @@ class ScheduledService {
         return;
       }
       
+      // OPTIMIZATION: Limit matches per cycle
       const matches = [];
       const processedPairs = new Set();
       
+      // Clean up old recent matches
+      this.cleanupRecentMatches();
+      
       for (const driver of drivers) {
+        if (matches.length >= this.MAX_MATCHES_PER_CYCLE) break;
+        
         const driverData = driver.data;
         if (!driverData) continue;
         
@@ -398,11 +485,15 @@ class ScheduledService {
         if (availableSeats <= 0) continue;
         
         for (const passenger of passengers) {
+          if (matches.length >= this.MAX_MATCHES_PER_CYCLE) break;
+          
           const passengerData = passenger.data;
           if (!passengerData) continue;
           
           const pairKey = `${driver.id}:${passenger.id}`;
           if (processedPairs.has(pairKey)) continue;
+          if (this.recentMatches.has(pairKey)) continue; // Skip recently matched
+          
           processedPairs.add(pairKey);
           
           if (passengerData.status !== 'actively_matching' && passengerData.status !== 'scheduled') continue;
@@ -414,6 +505,10 @@ class ScheduledService {
           
           if (!passengerTime || !passengerLoc) continue;
           if (passengerCount > availableSeats) continue;
+          
+          // Time difference check (optimization)
+          const timeDiff = Math.abs(driverTime - passengerTime);
+          if (timeDiff > 3600000) continue; // Skip if time difference > 1 hour
           
           // Calculate distances
           const distance = this.calculateDistance(driverLoc, passengerLoc);
@@ -443,6 +538,9 @@ class ScheduledService {
               passengerData,
               timestamp: new Date().toISOString()
             });
+            
+            // Mark as recent match
+            this.recentMatches.set(pairKey, Date.now());
           }
         }
       }
@@ -452,6 +550,7 @@ class ScheduledService {
       // Sort by score and process top matches
       matches.sort((a, b) => b.score - a.score);
       
+      // OPTIMIZATION: Process matches in batch if possible
       for (const match of matches.slice(0, this.MAX_MATCHES_PER_CYCLE)) {
         await this.processMatch(match);
       }
@@ -745,7 +844,7 @@ class ScheduledService {
     }
   }
 
-  // ========== CANCELLATION HANDLERS ==========
+  // ========== CANCELLATION HANDLERS (with batched operations) ==========
 
   async handleDriverCancelAll(driverPhone, reason = 'driver_cancelled_trip') {
     console.log(`🚫 [SCHEDULED] Driver ${driverPhone} cancelling ALL`);
@@ -760,6 +859,7 @@ class ScheduledService {
         return await this.cancelScheduledSearch(driverPhone, 'driver', reason);
       }
       
+      // OPTIMIZATION: Use batched writes
       const batch = this.firestoreService.batch();
       
       // Update each passenger
@@ -773,6 +873,9 @@ class ScheduledService {
           matchId: null
         });
         
+        // Update cache invalidation
+        this.userCache.delete(`passenger_${passengerPhone}`);
+        
         // Update match if exists
         if (passenger.matchId) {
           batch.update('scheduled_matches', passenger.matchId, {
@@ -782,7 +885,7 @@ class ScheduledService {
           });
         }
         
-        // Create cancellation record
+        // Create cancellation record (non-batch operation)
         await this.notification.createCancellationRecord({
           cancellationType: 'driver_cancelled_all',
           cancelledBy: driverPhone,
@@ -817,6 +920,9 @@ class ScheduledService {
         ]
       });
       
+      // Invalidate driver cache
+      this.userCache.delete(`driver_${this.sanitizePhoneNumber(driverPhone)}`);
+      
       await this.firestoreService.commitBatch(batch);
       
       return {
@@ -850,6 +956,7 @@ class ScheduledService {
       const currentSeats = driverDoc.availableSeats || 0;
       const restoredSeats = currentSeats + passengerCount;
       
+      // OPTIMIZATION: Use batched writes
       const batch = this.firestoreService.batch();
       
       // Update driver
@@ -866,6 +973,9 @@ class ScheduledService {
         ]
       });
       
+      // Invalidate driver cache
+      this.userCache.delete(`driver_${sanitizedDriverPhone}`);
+      
       // Update passenger
       const sanitizedPassengerPhone = this.sanitizePhoneNumber(passengerPhone);
       batch.update('scheduled_searches_passenger', sanitizedPassengerPhone, {
@@ -874,6 +984,9 @@ class ScheduledService {
         cancelledByDriver: { driverPhone, driverName: driverDoc.driverName, reason },
         matchId: null
       });
+      
+      // Invalidate passenger cache
+      this.userCache.delete(`passenger_${sanitizedPassengerPhone}`);
       
       // Update match if exists
       if (cancelledPassenger.matchId) {
@@ -946,6 +1059,7 @@ class ScheduledService {
       const currentSeats = driverDoc.availableSeats || 0;
       const restoredSeats = currentSeats + passengerCount;
       
+      // OPTIMIZATION: Use batched writes
       const batch = this.firestoreService.batch();
       
       // Update driver
@@ -962,6 +1076,9 @@ class ScheduledService {
         ]
       });
       
+      // Invalidate driver cache
+      this.userCache.delete(`driver_${sanitizedDriverPhone}`);
+      
       // Update passenger
       const sanitizedPassengerPhone = this.sanitizePhoneNumber(passengerPhone);
       batch.update('scheduled_searches_passenger', sanitizedPassengerPhone, {
@@ -970,6 +1087,9 @@ class ScheduledService {
         cancellationReason: reason,
         matchId: null
       });
+      
+      // Invalidate passenger cache
+      this.userCache.delete(`passenger_${sanitizedPassengerPhone}`);
       
       // Update match if exists
       if (cancelledPassenger.matchId) {
@@ -1205,6 +1325,9 @@ class ScheduledService {
         updatedAt: new Date().toISOString()
       });
       
+      // Invalidate cache
+      this.userCache.delete(`${userType}_${sanitizedPhone}`);
+      
       return { success: true, searchId: sanitizedPhone };
     } catch (error) {
       console.error('❌ [SCHEDULED] Cancel error:', error.message);
@@ -1212,32 +1335,42 @@ class ScheduledService {
     }
   }
 
-  // ========== CLEANUP ==========
+  // ========== CLEANUP (OPTIMIZED) ==========
 
   async cleanupExpiredMatches() {
     try {
-      const now = new Date().toISOString();
+      const expiryTime = new Date(Date.now() - this.MATCH_EXPIRY).toISOString();
       
-      // Use query via firestoreService
+      const constraints = [
+        { field: 'status', operator: 'in', value: ['awaiting_driver_approval', 'awaiting_passenger_approval'] },
+        { field: 'proposedAt', operator: '<', value: expiryTime }
+      ];
+      
       const snapshot = await this.firestoreService.queryCollection(
         'scheduled_matches',
-        [
-          { field: 'status', operator: 'in', value: ['awaiting_driver_approval', 'awaiting_passenger_approval'] },
-          { field: 'expiresAt', operator: '<', value: now }
-        ],
-        50
+        constraints,
+        20 // Limit cleanup
       );
       
+      if (snapshot.size === 0) return 0;
+      
+      // OPTIMIZATION: Use batched writes for cleanup
+      const batch = this.firestoreService.batch();
       let cleaned = 0;
-      for (const doc of snapshot.docs) {
-        await this.firestoreService.updateDocument('scheduled_matches', doc.id, { 
-          status: 'expired', 
-          expiredAt: now 
+      
+      snapshot.forEach(doc => {
+        batch.update('scheduled_matches', doc.id, {
+          status: 'expired',
+          expiredAt: new Date().toISOString()
         });
         cleaned++;
+      });
+      
+      if (cleaned > 0) {
+        await this.firestoreService.commitBatch(batch);
+        console.log(`🧹 [SCHEDULED] Cleaned ${cleaned} expired matches`);
       }
       
-      console.log(`🧹 [SCHEDULED] Cleaned ${cleaned} expired matches`);
       return cleaned;
     } catch (error) {
       console.error('❌ [SCHEDULED] Cleanup error:', error.message);
@@ -1245,7 +1378,7 @@ class ScheduledService {
     }
   }
 
-  // ========== STATUS AND STATS ==========
+  // ========== STATUS AND STATS (OPTIMIZED) ==========
 
   async getScheduledSearchStatus(phoneNumber) {
     try {
@@ -1272,10 +1405,11 @@ class ScheduledService {
 
   async getStats() {
     try {
+      // OPTIMIZATION: Use approximate counts instead of full collection scans
       const counts = await Promise.all([
-        this.getCollectionCount('scheduled_searches_driver'),
-        this.getCollectionCount('scheduled_searches_passenger'),
-        this.getCollectionCount('scheduled_matches')
+        this.firestoreService.getApproximateCollectionSize('scheduled_searches_driver'),
+        this.firestoreService.getApproximateCollectionSize('scheduled_searches_passenger'),
+        this.firestoreService.getApproximateCollectionSize('scheduled_matches')
       ]);
       
       return {
@@ -1285,21 +1419,16 @@ class ScheduledService {
           driverSearches: counts[0],
           passengerSearches: counts[1],
           matches: counts[2],
+          cacheSize: {
+            recentMatches: this.recentMatches.size,
+            userCache: this.userCache.size
+          },
           timestamp: new Date().toISOString()
         }
       };
     } catch (error) {
       console.error('❌ [SCHEDULED] Stats error:', error.message);
       return { success: false, error: error.message };
-    }
-  }
-
-  async getCollectionCount(collectionName) {
-    try {
-      const snapshot = await this.firestoreService.getCollection(collectionName, 1000);
-      return snapshot.size;
-    } catch {
-      return 0;
     }
   }
 }

@@ -1,7 +1,8 @@
-// services/firestoreService.js - UPDATED FOR SCHEDULED SERVICE COMPATIBILITY
+// services/firestoreService.js - COMPLETE VERSION WITH ALL METHODS
 const { COLLECTIONS, TIMEOUTS, BATCH_WRITE_LIMIT } = require('../config/constants');
 const cache = require('../utils/cache');
 const helpers = require('../utils/helpers');
+const logger = require('../utils/Logger');
 
 class FirestoreService {
   constructor(db, admin) {
@@ -14,6 +15,10 @@ class FirestoreService {
     this.isProcessing = false;
     this.processorInterval = null;
     
+    // In-memory cache for reducing reads
+    this.memoryCache = new Map();
+    this.CACHE_TTL = 60000; // 1 minute cache
+    
     this.stats = {
       reads: 0,
       writes: 0,
@@ -24,7 +29,13 @@ class FirestoreService {
       locationUpdates: 0,
       matchingWrites: 0,
       queueFlushErrors: 0,
-      retriedOperations: 0
+      retriedOperations: 0,
+      queueSize: 0,
+      isProcessing: false,
+      cacheStats: {
+        size: 0,
+        ttlCount: 0
+      }
     };
     
     // Start background processors
@@ -47,64 +58,125 @@ class FirestoreService {
     return this.normalizePhoneNumber(phoneNumber);
   }
   
-  // ========== BASIC CRUD METHODS FOR SCHEDULED SERVICE ==========
-  
-  async addDocument(collection, data) {
-    try {
-      this.stats.writes++;
-      this.stats.immediateWrites++;
-      
-      const docRef = this.db.collection(collection).doc();
-      await docRef.set(data);
-      
-      console.log(`✅ [FIRESTORE] Added document to ${collection}: ${docRef.id}`);
-      return { id: docRef.id, ...data };
-    } catch (error) {
-      console.error(`❌ [FIRESTORE] Error adding document:`, error);
-      throw error;
-    }
-  }
+  // ========== SINGLE DOCUMENT OPERATIONS ==========
 
-  async addDocumentWithId(collection, docId, data) {
+  async getDocument(collection, documentId) {
     try {
-      this.stats.writes++;
-      this.stats.immediateWrites++;
+      // Check cache first
+      const cacheKey = `${collection}:${documentId}`;
+      const cached = this.memoryCache.get(cacheKey);
       
-      const docRef = this.db.collection(collection).doc(docId);
-      await docRef.set(data);
+      if (cached && Date.now() - cached.timestamp < this.CACHE_TTL) {
+        this.stats.cacheHits++;
+        return cached.data;
+      }
       
-      console.log(`✅ [FIRESTORE] Added document to ${collection} with ID: ${docId}`);
-      return { id: docId, ...data };
-    } catch (error) {
-      console.error(`❌ [FIRESTORE] Error adding document with ID:`, error);
-      throw error;
-    }
-  }
-
-  async getCollection(collection, options = {}) {
-    try {
+      const docRef = this.db.collection(collection).doc(documentId);
+      const doc = await docRef.get();
+      
       this.stats.reads++;
       
+      // Cache the result
+      if (doc.exists) {
+        const result = { id: doc.id, ...doc.data() };
+        this.memoryCache.set(cacheKey, {
+          data: result,
+          timestamp: Date.now()
+        });
+        this.stats.cacheStats.size = this.memoryCache.size;
+        return result;
+      }
+      
+      return null;
+    } catch (error) {
+      logger.error('FIRESTORE', `Error getting document ${collection}/${documentId}:`, error);
+      throw error;
+    }
+  }
+
+  async setDocument(collection, documentId, data, options = {}) {
+    try {
+      const docRef = this.db.collection(collection).doc(documentId);
+      await docRef.set(data, options);
+      
+      this.stats.writes++;
+      this.stats.immediateWrites++;
+      
+      // Clear cache for this document
+      const cacheKey = `${collection}:${documentId}`;
+      this.memoryCache.delete(cacheKey);
+      
+      console.log(`✅ [FIRESTORE] Set document ${collection}/${documentId}`);
+      return documentId;
+    } catch (error) {
+      logger.error('FIRESTORE', `Error setting document ${collection}/${documentId}:`, error);
+      throw error;
+    }
+  }
+
+  async updateDocument(collection, documentId, data) {
+    try {
+      const docRef = this.db.collection(collection).doc(documentId);
+      await docRef.update(data);
+      
+      this.stats.writes++;
+      this.stats.immediateWrites++;
+      
+      // Clear cache for this document
+      const cacheKey = `${collection}:${documentId}`;
+      this.memoryCache.delete(cacheKey);
+      
+      console.log(`✅ [FIRESTORE] Updated document ${collection}/${documentId}`);
+      return { id: documentId, ...data };
+    } catch (error) {
+      logger.error('FIRESTORE', `Error updating document ${collection}/${documentId}:`, error);
+      throw error;
+    }
+  }
+
+  async deleteDocument(collection, documentId) {
+    try {
+      const docRef = this.db.collection(collection).doc(documentId);
+      await docRef.delete();
+      
+      this.stats.writes++;
+      this.stats.immediateWrites++;
+      
+      // Clear cache for this document
+      const cacheKey = `${collection}:${documentId}`;
+      this.memoryCache.delete(cacheKey);
+      
+      console.log(`✅ [FIRESTORE] Deleted document ${collection}/${documentId}`);
+      return true;
+    } catch (error) {
+      logger.error('FIRESTORE', `Error deleting document ${collection}/${documentId}:`, error);
+      throw error;
+    }
+  }
+
+  async documentExists(collection, documentId) {
+    try {
+      const doc = await this.getDocument(collection, documentId);
+      return doc !== null;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  // ========== COLLECTION OPERATIONS ==========
+
+  async getCollection(collection, limit = null) {
+    try {
       let query = this.db.collection(collection);
       
-      // Apply where clauses
-      if (options.where && Array.isArray(options.where)) {
-        options.where.forEach(condition => {
-          query = query.where(condition.field, condition.op, condition.value);
-        });
-      }
-      
-      // Apply limit
-      if (options.limit) {
-        query = query.limit(options.limit);
-      }
-      
-      // Apply orderBy
-      if (options.orderBy) {
-        query = query.orderBy(options.orderBy.field, options.orderBy.direction || 'asc');
+      if (limit) {
+        query = query.limit(limit);
       }
       
       const snapshot = await query.get();
+      
+      this.stats.reads += snapshot.size;
+      
       const results = snapshot.docs.map(doc => ({
         id: doc.id,
         ...doc.data()
@@ -113,65 +185,226 @@ class FirestoreService {
       console.log(`✅ [FIRESTORE] Read ${results.length} documents from ${collection}`);
       return results;
     } catch (error) {
-      console.error(`❌ [FIRESTORE] Error reading collection:`, error);
-      return [];
-    }
-  }
-
-  async getDocument(collection, docId) {
-    try {
-      this.stats.reads++;
-      
-      const doc = await this.db.collection(collection).doc(docId).get();
-      
-      if (!doc.exists) {
-        return null;
-      }
-      
-      return { id: doc.id, ...doc.data() };
-    } catch (error) {
-      console.error(`❌ [FIRESTORE] Error reading document:`, error);
+      logger.error('FIRESTORE', `Error getting collection ${collection}:`, error);
       throw error;
     }
   }
 
-  async updateDocument(collection, docId, data) {
+  async addDocument(collection, data) {
     try {
+      const docRef = this.db.collection(collection).doc();
+      await docRef.set({
+        ...data,
+        createdAt: new Date().toISOString()
+      });
+      
       this.stats.writes++;
       this.stats.immediateWrites++;
       
-      await this.db.collection(collection).doc(docId).update(data);
+      console.log(`✅ [FIRESTORE] Added document to ${collection}: ${docRef.id}`);
+      return { id: docRef.id, ...data };
+    } catch (error) {
+      logger.error('FIRESTORE', `Error adding document to ${collection}:`, error);
+      throw error;
+    }
+  }
+
+  async addDocumentWithId(collection, docId, data) {
+    try {
+      const docRef = this.db.collection(collection).doc(docId);
+      await docRef.set(data);
       
-      console.log(`✅ [FIRESTORE] Updated document ${docId} in ${collection}`);
+      this.stats.writes++;
+      this.stats.immediateWrites++;
+      
+      console.log(`✅ [FIRESTORE] Added document to ${collection} with ID: ${docId}`);
       return { id: docId, ...data };
     } catch (error) {
-      console.error(`❌ [FIRESTORE] Error updating document:`, error);
+      logger.error('FIRESTORE', `Error adding document with ID to ${collection}:`, error);
       throw error;
     }
   }
 
-  async deleteDocument(collection, docId) {
+  // ========== QUERY OPERATIONS ==========
+
+  async queryCollection(collection, constraints = [], limit = null) {
     try {
-      this.stats.writes++;
-      this.stats.immediateWrites++;
+      let query = this.db.collection(collection);
       
-      await this.db.collection(collection).doc(docId).delete();
+      for (const constraint of constraints) {
+        const { field, operator, value } = constraint;
+        
+        if (operator === 'orderBy') {
+          query = query.orderBy(field, value || 'asc');
+        } else if (operator === 'limit') {
+          query = query.limit(value);
+        } else {
+          query = query.where(field, operator, value);
+        }
+      }
       
-      console.log(`✅ [FIRESTORE] Deleted document ${docId} from ${collection}`);
+      if (limit) {
+        query = query.limit(limit);
+      }
+      
+      const snapshot = await query.get();
+      
+      this.stats.reads += snapshot.size;
+      
+      const results = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+      
+      console.log(`✅ [FIRESTORE] Query returned ${results.length} documents from ${collection}`);
+      return results;
+    } catch (error) {
+      logger.error('FIRESTORE', `Error querying collection ${collection}:`, error);
+      throw error;
+    }
+  }
+
+  // ========== BATCH OPERATIONS ==========
+
+  batch() {
+    const batch = this.db.batch();
+    const firestore = this.db;
+    let operationCount = 0;
+    
+    const wrappedBatch = {
+      _batch: batch,
+      _firestore: firestore,
+      _count: 0,
+      
+      set(collection, documentId, data, options = {}) {
+        const ref = this._firestore.collection(collection).doc(documentId);
+        this._batch.set(ref, data, options);
+        this._count++;
+        return this;
+      },
+      
+      update(collection, documentId, data) {
+        const ref = this._firestore.collection(collection).doc(documentId);
+        this._batch.update(ref, data);
+        this._count++;
+        return this;
+      },
+      
+      delete(collection, documentId) {
+        const ref = this._firestore.collection(collection).doc(documentId);
+        this._batch.delete(ref);
+        this._count++;
+        return this;
+      },
+      
+      getCount() {
+        return this._count;
+      }
+    };
+    
+    return wrappedBatch;
+  }
+
+  async commitBatch(batch) {
+    try {
+      await batch._batch.commit();
+      
+      this.stats.batchWrites++;
+      this.stats.writes += batch.getCount();
+      
+      console.log(`✅ [FIRESTORE] Committed batch with ${batch.getCount()} operations`);
       return true;
     } catch (error) {
-      console.error(`❌ [FIRESTORE] Error deleting document:`, error);
+      logger.error('FIRESTORE', 'Error committing batch:', error);
       throw error;
     }
   }
 
-  // Simple wrapper for your existing save methods
-  async saveScheduledDocument(userType, userId, data) {
-    if (userType === 'driver') {
-      return await this.saveScheduledDriverSearch(data);
-    } else {
-      return await this.saveScheduledPassengerSearch(data);
+  // ========== OPTIMIZED METHODS WITH CACHING ==========
+
+  async getDocumentWithCache(collection, docId, ttl = this.CACHE_TTL) {
+    const cacheKey = `${collection}_${docId}`;
+    const cached = cache.get(cacheKey);
+    
+    if (cached) {
+      this.stats.cacheHits++;
+      return cached;
     }
+    
+    const doc = await this.getDocument(collection, docId);
+    if (doc) {
+      cache.set(cacheKey, doc, ttl);
+    }
+    
+    return doc;
+  }
+
+  /**
+   * Get documents with in-memory caching to reduce reads
+   */
+  async getDocumentsWithCache(collection, documentIds) {
+    const results = [];
+    const uncachedIds = [];
+    
+    // Check cache first
+    for (const id of documentIds) {
+      const cacheKey = `${collection}:${id}`;
+      const cached = this.memoryCache.get(cacheKey);
+      
+      if (cached && Date.now() - cached.timestamp < this.CACHE_TTL) {
+        this.stats.cacheHits++;
+        results.push(cached.data);
+      } else {
+        uncachedIds.push(id);
+      }
+    }
+    
+    // Fetch uncached documents in batch
+    if (uncachedIds.length > 0) {
+      const docRefs = uncachedIds.map(id => this.db.collection(collection).doc(id));
+      const snapshot = await this.db.getAll(...docRefs);
+      
+      this.stats.reads += snapshot.length;
+      
+      snapshot.forEach(doc => {
+        if (doc.exists) {
+          const result = { id: doc.id, ...doc.data() };
+          const cacheKey = `${collection}:${doc.id}`;
+          this.memoryCache.set(cacheKey, {
+            data: result,
+            timestamp: Date.now()
+          });
+          results.push(result);
+        }
+      });
+    }
+    
+    return results;
+  }
+
+  /**
+   * Get only active matching documents (optimized query)
+   */
+  async getActiveMatchingDocuments(userType) {
+    const collection = userType === 'driver' 
+      ? 'scheduled_searches_driver' 
+      : 'scheduled_searches_passenger';
+    
+    const constraints = [
+      { field: 'data.status', operator: 'in', value: ['actively_matching', 'scheduled'] }
+    ];
+    
+    const results = await this.queryCollection(collection, constraints);
+    
+    // Filter drivers with no seats
+    if (userType === 'driver') {
+      return results.filter(doc => {
+        const seats = doc.data?.availableSeats || 4;
+        return seats > 0;
+      });
+    }
+    
+    return results;
   }
 
   // ========== DATA NORMALIZATION FOR SCHEDULED SERVICE ==========
@@ -268,7 +501,7 @@ class FirestoreService {
     };
   }
   
-  // ========== UPDATED: SAVE SCHEDULED DRIVER ==========
+  // ========== SCHEDULED DRIVER OPERATIONS ==========
   
   async saveScheduledDriverSearch(driverData, options = {}) {
     try {
@@ -370,12 +603,12 @@ class FirestoreService {
       return { ...firestoreData, documentId: driverDocId };
       
     } catch (error) {
-      console.error('❌ [SCHEDULED] Error saving scheduled driver:', error);
+      logger.error('SCHEDULED', 'Error saving scheduled driver:', error);
       throw error;
     }
   }
   
-  // ========== UPDATED: SAVE SCHEDULED PASSENGER ==========
+  // ========== SCHEDULED PASSENGER OPERATIONS ==========
   
   async saveScheduledPassengerSearch(passengerData, options = {}) {
     try {
@@ -458,12 +691,12 @@ class FirestoreService {
       return { ...firestoreData, documentId: passengerDocId };
       
     } catch (error) {
-      console.error('❌ [SCHEDULED] Error saving scheduled passenger:', error);
+      logger.error('SCHEDULED', 'Error saving scheduled passenger:', error);
       throw error;
     }
   }
   
-  // ========== UPDATED: ADD PASSENGER TO SCHEDULED DRIVER ==========
+  // ========== PASSENGER FIELD MANAGEMENT ==========
   
   async addPassengerToScheduledDriverField(driverId, passengerData, passengerField, matchId, matchScore, options = {}) {
     try {
@@ -591,325 +824,10 @@ class FirestoreService {
       };
       
     } catch (error) {
-      console.error(`❌ [SCHEDULED] Error adding passenger to scheduled driver:`, error);
+      logger.error('SCHEDULED', 'Error adding passenger to scheduled driver:', error);
       return { success: false, error: error.message };
     }
   }
-  
-  // ========== GET ALL SCHEDULED DRIVERS ==========
-  
-  async getAllScheduledDrivers() {
-    try {
-      const cacheKey = 'all_scheduled_drivers';
-      const cached = cache.get(cacheKey);
-      
-      if (cached) {
-        this.stats.cacheHits++;
-        return cached;
-      }
-      
-      console.log('🔍 [SCHEDULED] Getting all scheduled drivers');
-      
-      const snapshot = await this.db.collection('scheduled_searches_driver')
-        .where('data.status', 'in', ['scheduled', 'matched', 'partially_accepted', 'active'])
-        .limit(50)
-        .get();
-      
-      const drivers = [];
-      snapshot.forEach(doc => {
-        const firestoreData = doc.data();
-        const driverData = firestoreData.data || {};
-        drivers.push({
-          id: doc.id,
-          ...firestoreData, // Keep the type+data structure
-          normalized: this.normalizeScheduledDriverData(firestoreData)
-        });
-      });
-      
-      console.log(`✅ [SCHEDULED] Found ${drivers.length} scheduled drivers`);
-      
-      cache.set(cacheKey, drivers, 30000); // Cache for 30 seconds
-      return drivers;
-      
-    } catch (error) {
-      console.error('❌ [SCHEDULED] Error in getAllScheduledDrivers:', error);
-      return [];
-    }
-  }
-  
-  // ========== GET ALL SCHEDULED PASSENGERS ==========
-  
-  async getAllScheduledPassengers() {
-    try {
-      const cacheKey = 'all_scheduled_passengers';
-      const cached = cache.get(cacheKey);
-      
-      if (cached) {
-        this.stats.cacheHits++;
-        return cached;
-      }
-      
-      console.log('🔍 [SCHEDULED] Getting all scheduled passengers');
-      
-      const snapshot = await this.db.collection('scheduled_searches_passenger')
-        .where('data.status', 'in', ['scheduled', 'matched', 'active'])
-        .limit(100)
-        .get();
-      
-      const passengers = [];
-      snapshot.forEach(doc => {
-        const firestoreData = doc.data();
-        const passengerData = firestoreData.data || {};
-        passengers.push({
-          id: doc.id,
-          ...firestoreData, // Keep the type+data structure
-          normalized: this.normalizeScheduledPassengerData(firestoreData)
-        });
-      });
-      
-      console.log(`✅ [SCHEDULED] Found ${passengers.length} scheduled passengers`);
-      
-      cache.set(cacheKey, passengers, 30000); // Cache for 30 seconds
-      return passengers;
-      
-    } catch (error) {
-      console.error('❌ [SCHEDULED] Error in getAllScheduledPassengers:', error);
-      return [];
-    }
-  }
-  
-  // ========== UPDATE SCHEDULED MATCH ==========
-  
-  async updateScheduledMatch(matchId, matchData, options = {}) {
-    try {
-      console.log(`📝 [SCHEDULED] Updating match ${matchId}`);
-      
-      const forceImmediate = options.immediate || this.isMatchingServiceCall;
-      
-      if (forceImmediate) {
-        this.stats.immediateWrites++;
-        this.stats.matchingWrites++;
-        
-        await this.db.collection('scheduled_matches')
-          .doc(matchId)
-          .set(matchData, { merge: true });
-        
-        console.log(`⚡ [SCHEDULED] Match updated IMMEDIATELY: ${matchId}`);
-      } else {
-        this.queueWrite('scheduled_matches', matchId, matchData, 'set');
-      }
-      
-      return { success: true, matchId };
-      
-    } catch (error) {
-      console.error(`❌ [SCHEDULED] Error updating match:`, error);
-      return { success: false, error: error.message };
-    }
-  }
-  
-  // ========== GET SCHEDULED DRIVER ==========
-  
-  async getScheduledDriver(phoneNumber) {
-    try {
-      const driverDocId = this.getDocumentIdFromPhone(phoneNumber);
-      if (!driverDocId) return null;
-      
-      const cacheKey = `scheduled_driver_${driverDocId}`;
-      const cached = cache.get(cacheKey);
-      
-      if (cached) {
-        this.stats.cacheHits++;
-        return cached;
-      }
-      
-      console.log('🔍 [SCHEDULED] Getting scheduled driver:', driverDocId);
-      
-      const doc = await this.db.collection('scheduled_searches_driver')
-        .doc(driverDocId)
-        .get();
-      
-      this.stats.reads++;
-      
-      if (!doc.exists) {
-        cache.set(cacheKey, null, 30000);
-        return null;
-      }
-      
-      const firestoreData = doc.data();
-      const normalized = this.normalizeScheduledDriverData(firestoreData);
-      
-      const result = {
-        id: doc.id,
-        ...firestoreData,
-        normalized
-      };
-      
-      cache.set(cacheKey, result, 30000);
-      return result;
-      
-    } catch (error) {
-      console.error(`❌ [SCHEDULED] Error getting scheduled driver:`, error);
-      return null;
-    }
-  }
-  
-  // ========== GET SCHEDULED PASSENGER ==========
-  
-  async getScheduledPassenger(phoneNumber) {
-    try {
-      const passengerDocId = this.getDocumentIdFromPhone(phoneNumber);
-      if (!passengerDocId) return null;
-      
-      const cacheKey = `scheduled_passenger_${passengerDocId}`;
-      const cached = cache.get(cacheKey);
-      
-      if (cached) {
-        this.stats.cacheHits++;
-        return cached;
-      }
-      
-      console.log('🔍 [SCHEDULED] Getting scheduled passenger:', passengerDocId);
-      
-      const doc = await this.db.collection('scheduled_searches_passenger')
-        .doc(passengerDocId)
-        .get();
-      
-      this.stats.reads++;
-      
-      if (!doc.exists) {
-        cache.set(cacheKey, null, 30000);
-        return null;
-      }
-      
-      const firestoreData = doc.data();
-      const normalized = this.normalizeScheduledPassengerData(firestoreData);
-      
-      const result = {
-        id: doc.id,
-        ...firestoreData,
-        normalized
-      };
-      
-      cache.set(cacheKey, result, 30000);
-      return result;
-      
-    } catch (error) {
-      console.error(`❌ [SCHEDULED] Error getting scheduled passenger:`, error);
-      return null;
-    }
-  }
-  
-  // ========== UPDATE SCHEDULED PASSENGER STATUS ==========
-  
-  async updateScheduledPassengerStatus(passengerPhone, updates, options = {}) {
-    try {
-      const passengerDocId = this.getDocumentIdFromPhone(passengerPhone);
-      if (!passengerDocId) throw new Error('Invalid passenger phone');
-      
-      console.log(`📝 [SCHEDULED] Updating passenger status: ${passengerDocId}`);
-      
-      cache.del(`scheduled_passenger_${passengerDocId}`);
-      cache.del('scheduled_searches_all');
-      
-      const docRef = this.db.collection('scheduled_searches_passenger')
-        .doc(passengerDocId);
-      
-      const doc = await docRef.get();
-      
-      if (!doc.exists) {
-        throw new Error(`Scheduled passenger ${passengerDocId} not found`);
-      }
-      
-      const existingData = doc.data();
-      const currentData = existingData.data || {};
-      
-      // Build update in SCHEDULED SERVICE FORMAT
-      const updateData = {
-        type: 'SCHEDULE_SEARCH',
-        data: {
-          ...currentData,
-          ...updates,
-          updatedAt: new Date().toISOString(),
-          lastUpdated: Date.now()
-        }
-      };
-      
-      const forceImmediate = options.immediate || this.isMatchingServiceCall;
-      
-      if (forceImmediate) {
-        this.stats.immediateWrites++;
-        this.stats.matchingWrites++;
-        
-        await docRef.update(updateData);
-        console.log(`⚡ [SCHEDULED] Passenger status updated IMMEDIATELY: ${passengerDocId}`);
-      } else {
-        this.queueWrite('scheduled_searches_passenger', passengerDocId, updateData, 'set');
-      }
-      
-      return true;
-      
-    } catch (error) {
-      console.error(`❌ [SCHEDULED] Error updating scheduled passenger:`, error.message);
-      throw error;
-    }
-  }
-  
-  // ========== UPDATE SCHEDULED DRIVER STATUS ==========
-  
-  async updateScheduledDriverStatus(driverPhone, updates, options = {}) {
-    try {
-      const driverDocId = this.getDocumentIdFromPhone(driverPhone);
-      if (!driverDocId) throw new Error('Invalid driver phone');
-      
-      console.log(`📝 [SCHEDULED] Updating driver status: ${driverDocId}`);
-      
-      cache.del(`scheduled_driver_${driverDocId}`);
-      cache.del('scheduled_searches_all');
-      
-      const docRef = this.db.collection('scheduled_searches_driver')
-        .doc(driverDocId);
-      
-      const doc = await docRef.get();
-      
-      if (!doc.exists) {
-        throw new Error(`Scheduled driver ${driverDocId} not found`);
-      }
-      
-      const existingData = doc.data();
-      const currentData = existingData.data || {};
-      
-      // Build update in SCHEDULED SERVICE FORMAT
-      const updateData = {
-        type: 'CREATE_SCHEDULED_SEARCH',
-        data: {
-          ...currentData,
-          ...updates,
-          updatedAt: new Date().toISOString(),
-          lastUpdated: Date.now()
-        }
-      };
-      
-      const forceImmediate = options.immediate || this.isMatchingServiceCall;
-      
-      if (forceImmediate) {
-        this.stats.immediateWrites++;
-        this.stats.matchingWrites++;
-        
-        await docRef.update(updateData);
-        console.log(`⚡ [SCHEDULED] Driver status updated IMMEDIATELY: ${driverDocId}`);
-      } else {
-        this.queueWrite('scheduled_searches_driver', driverDocId, updateData, 'set');
-      }
-      
-      return true;
-      
-    } catch (error) {
-      console.error(`❌ [SCHEDULED] Error updating scheduled driver:`, error.message);
-      throw error;
-    }
-  }
-  
-  // ========== REMOVE PASSENGER FROM SCHEDULED DRIVER ==========
   
   async removePassengerFromScheduledDriverField(driverId, passengerField, options = {}) {
     try {
@@ -999,12 +917,10 @@ class FirestoreService {
       return true;
       
     } catch (error) {
-      console.error(`❌ [SCHEDULED] Error removing passenger from scheduled driver:`, error);
+      logger.error('SCHEDULED', 'Error removing passenger from scheduled driver:', error);
       return false;
     }
   }
-  
-  // ========== MULTI-PASSENGER FIELD HELPERS ==========
   
   getPassengerFields(driverData) {
     const capacity = driverData.capacity || 4;
@@ -1059,114 +975,310 @@ class FirestoreService {
     return null;
   }
   
-  // ========== ADDED: CRITICAL MISSING METHODS ==========
+  // ========== GETTER METHODS FOR SCHEDULED DATA ==========
   
-  /**
-   * Set a document with full control over merge options
-   */
-  async setDocument(collection, documentId, data, options = {}) {
+  async getScheduledDriver(phoneNumber) {
     try {
-      const docRef = this.db.collection(collection).doc(documentId);
-      await docRef.set(data, options);
-      this.stats.writes++;
-      this.stats.immediateWrites++;
+      const driverDocId = this.getDocumentIdFromPhone(phoneNumber);
+      if (!driverDocId) return null;
       
-      console.log(`✅ [FIRESTORE] Set document ${collection}/${documentId}`);
-      return documentId;
+      const cacheKey = `scheduled_driver_${driverDocId}`;
+      const cached = cache.get(cacheKey);
+      
+      if (cached) {
+        this.stats.cacheHits++;
+        return cached;
+      }
+      
+      console.log('🔍 [SCHEDULED] Getting scheduled driver:', driverDocId);
+      
+      const doc = await this.db.collection('scheduled_searches_driver')
+        .doc(driverDocId)
+        .get();
+      
+      this.stats.reads++;
+      
+      if (!doc.exists) {
+        cache.set(cacheKey, null, 30000);
+        return null;
+      }
+      
+      const firestoreData = doc.data();
+      const normalized = this.normalizeScheduledDriverData(firestoreData);
+      
+      const result = {
+        id: doc.id,
+        ...firestoreData,
+        normalized
+      };
+      
+      cache.set(cacheKey, result, 30000);
+      return result;
+      
     } catch (error) {
-      console.error(`❌ Error setting document ${collection}/${documentId}:`, error);
-      throw error;
+      logger.error('SCHEDULED', 'Error getting scheduled driver:', error);
+      return null;
     }
   }
-
-  /**
-   * Query collection with constraints (where, orderBy, limit)
-   */
-  async queryCollection(collection, constraints = [], limit = null) {
+  
+  async getScheduledPassenger(phoneNumber) {
     try {
-      let query = this.db.collection(collection);
+      const passengerDocId = this.getDocumentIdFromPhone(phoneNumber);
+      if (!passengerDocId) return null;
       
-      for (const constraint of constraints) {
-        const { field, operator, value } = constraint;
-        if (operator === 'orderBy') {
-          query = query.orderBy(field, value || 'asc');
-        } else {
-          query = query.where(field, operator, value);
+      const cacheKey = `scheduled_passenger_${passengerDocId}`;
+      const cached = cache.get(cacheKey);
+      
+      if (cached) {
+        this.stats.cacheHits++;
+        return cached;
+      }
+      
+      console.log('🔍 [SCHEDULED] Getting scheduled passenger:', passengerDocId);
+      
+      const doc = await this.db.collection('scheduled_searches_passenger')
+        .doc(passengerDocId)
+        .get();
+      
+      this.stats.reads++;
+      
+      if (!doc.exists) {
+        cache.set(cacheKey, null, 30000);
+        return null;
+      }
+      
+      const firestoreData = doc.data();
+      const normalized = this.normalizeScheduledPassengerData(firestoreData);
+      
+      const result = {
+        id: doc.id,
+        ...firestoreData,
+        normalized
+      };
+      
+      cache.set(cacheKey, result, 30000);
+      return result;
+      
+    } catch (error) {
+      logger.error('SCHEDULED', 'Error getting scheduled passenger:', error);
+      return null;
+    }
+  }
+  
+  async getAllScheduledDrivers() {
+    try {
+      const cacheKey = 'all_scheduled_drivers';
+      const cached = cache.get(cacheKey);
+      
+      if (cached) {
+        this.stats.cacheHits++;
+        return cached;
+      }
+      
+      console.log('🔍 [SCHEDULED] Getting all scheduled drivers');
+      
+      const snapshot = await this.db.collection('scheduled_searches_driver')
+        .where('data.status', 'in', ['scheduled', 'matched', 'partially_accepted', 'active'])
+        .limit(50)
+        .get();
+      
+      const drivers = [];
+      snapshot.forEach(doc => {
+        const firestoreData = doc.data();
+        const driverData = firestoreData.data || {};
+        drivers.push({
+          id: doc.id,
+          ...firestoreData,
+          normalized: this.normalizeScheduledDriverData(firestoreData)
+        });
+      });
+      
+      console.log(`✅ [SCHEDULED] Found ${drivers.length} scheduled drivers`);
+      
+      cache.set(cacheKey, drivers, 30000);
+      return drivers;
+      
+    } catch (error) {
+      logger.error('SCHEDULED', 'Error in getAllScheduledDrivers:', error);
+      return [];
+    }
+  }
+  
+  async getAllScheduledPassengers() {
+    try {
+      const cacheKey = 'all_scheduled_passengers';
+      const cached = cache.get(cacheKey);
+      
+      if (cached) {
+        this.stats.cacheHits++;
+        return cached;
+      }
+      
+      console.log('🔍 [SCHEDULED] Getting all scheduled passengers');
+      
+      const snapshot = await this.db.collection('scheduled_searches_passenger')
+        .where('data.status', 'in', ['scheduled', 'matched', 'active'])
+        .limit(100)
+        .get();
+      
+      const passengers = [];
+      snapshot.forEach(doc => {
+        const firestoreData = doc.data();
+        const passengerData = firestoreData.data || {};
+        passengers.push({
+          id: doc.id,
+          ...firestoreData,
+          normalized: this.normalizeScheduledPassengerData(firestoreData)
+        });
+      });
+      
+      console.log(`✅ [SCHEDULED] Found ${passengers.length} scheduled passengers`);
+      
+      cache.set(cacheKey, passengers, 30000);
+      return passengers;
+      
+    } catch (error) {
+      logger.error('SCHEDULED', 'Error in getAllScheduledPassengers:', error);
+      return [];
+    }
+  }
+  
+  // ========== UPDATE STATUS METHODS ==========
+  
+  async updateScheduledPassengerStatus(passengerPhone, updates, options = {}) {
+    try {
+      const passengerDocId = this.getDocumentIdFromPhone(passengerPhone);
+      if (!passengerDocId) throw new Error('Invalid passenger phone');
+      
+      console.log(`📝 [SCHEDULED] Updating passenger status: ${passengerDocId}`);
+      
+      cache.del(`scheduled_passenger_${passengerDocId}`);
+      cache.del('scheduled_searches_all');
+      
+      const docRef = this.db.collection('scheduled_searches_passenger')
+        .doc(passengerDocId);
+      
+      const doc = await docRef.get();
+      
+      if (!doc.exists) {
+        throw new Error(`Scheduled passenger ${passengerDocId} not found`);
+      }
+      
+      const existingData = doc.data();
+      const currentData = existingData.data || {};
+      
+      // Build update in SCHEDULED SERVICE FORMAT
+      const updateData = {
+        type: 'SCHEDULE_SEARCH',
+        data: {
+          ...currentData,
+          ...updates,
+          updatedAt: new Date().toISOString(),
+          lastUpdated: Date.now()
         }
+      };
+      
+      const forceImmediate = options.immediate || this.isMatchingServiceCall;
+      
+      if (forceImmediate) {
+        this.stats.immediateWrites++;
+        this.stats.matchingWrites++;
+        
+        await docRef.update(updateData);
+        console.log(`⚡ [SCHEDULED] Passenger status updated IMMEDIATELY: ${passengerDocId}`);
+      } else {
+        this.queueWrite('scheduled_searches_passenger', passengerDocId, updateData, 'set');
       }
       
-      if (limit) {
-        query = query.limit(limit);
-      }
-      
-      const snapshot = await query.get();
-      this.stats.reads += snapshot.size;
-      
-      console.log(`✅ [FIRESTORE] Queried ${collection} with ${snapshot.size} results`);
-      return snapshot;
-    } catch (error) {
-      console.error(`❌ Error querying collection ${collection}:`, error);
-      throw error;
-    }
-  }
-
-  /**
-   * Create a new batch write operation
-   */
-  batch() {
-    const batch = this.db.batch();
-    let count = 0;
-    
-    return {
-      _batch: batch,
-      _firestore: this.db,
-      _count: count,
-      
-      set(collection, documentId, data, options = {}) {
-        const ref = this._firestore.collection(collection).doc(documentId);
-        this._batch.set(ref, data, options);
-        this._count++;
-        return this;
-      },
-      
-      update(collection, documentId, data) {
-        const ref = this._firestore.collection(collection).doc(documentId);
-        this._batch.update(ref, data);
-        this._count++;
-        return this;
-      },
-      
-      delete(collection, documentId) {
-        const ref = this._firestore.collection(collection).doc(documentId);
-        this._batch.delete(ref);
-        this._count++;
-        return this;
-      },
-      
-      getCount() {
-        return this._count;
-      }
-    };
-  }
-
-  /**
-   * Commit a batch operation
-   */
-  async commitBatch(batch) {
-    try {
-      await batch._batch.commit();
-      this.stats.batchWrites++;
-      this.stats.writes += batch.getCount();
-      
-      console.log(`✅ [FIRESTORE] Committed batch with ${batch.getCount()} operations`);
       return true;
+      
     } catch (error) {
-      console.error('❌ Error committing batch:', error);
+      logger.error('SCHEDULED', 'Error updating scheduled passenger:', error.message);
       throw error;
     }
   }
   
-  // ========== ORIGINAL ACTIVE SEARCH METHODS (KEEP FOR BACKWARD COMPATIBILITY) ==========
+  async updateScheduledDriverStatus(driverPhone, updates, options = {}) {
+    try {
+      const driverDocId = this.getDocumentIdFromPhone(driverPhone);
+      if (!driverDocId) throw new Error('Invalid driver phone');
+      
+      console.log(`📝 [SCHEDULED] Updating driver status: ${driverDocId}`);
+      
+      cache.del(`scheduled_driver_${driverDocId}`);
+      cache.del('scheduled_searches_all');
+      
+      const docRef = this.db.collection('scheduled_searches_driver')
+        .doc(driverDocId);
+      
+      const doc = await docRef.get();
+      
+      if (!doc.exists) {
+        throw new Error(`Scheduled driver ${driverDocId} not found`);
+      }
+      
+      const existingData = doc.data();
+      const currentData = existingData.data || {};
+      
+      // Build update in SCHEDULED SERVICE FORMAT
+      const updateData = {
+        type: 'CREATE_SCHEDULED_SEARCH',
+        data: {
+          ...currentData,
+          ...updates,
+          updatedAt: new Date().toISOString(),
+          lastUpdated: Date.now()
+        }
+      };
+      
+      const forceImmediate = options.immediate || this.isMatchingServiceCall;
+      
+      if (forceImmediate) {
+        this.stats.immediateWrites++;
+        this.stats.matchingWrites++;
+        
+        await docRef.update(updateData);
+        console.log(`⚡ [SCHEDULED] Driver status updated IMMEDIATELY: ${driverDocId}`);
+      } else {
+        this.queueWrite('scheduled_searches_driver', driverDocId, updateData, 'set');
+      }
+      
+      return true;
+      
+    } catch (error) {
+      logger.error('SCHEDULED', 'Error updating scheduled driver:', error.message);
+      throw error;
+    }
+  }
+  
+  async updateScheduledMatch(matchId, matchData, options = {}) {
+    try {
+      console.log(`📝 [SCHEDULED] Updating match ${matchId}`);
+      
+      const forceImmediate = options.immediate || this.isMatchingServiceCall;
+      
+      if (forceImmediate) {
+        this.stats.immediateWrites++;
+        this.stats.matchingWrites++;
+        
+        await this.db.collection('scheduled_matches')
+          .doc(matchId)
+          .set(matchData, { merge: true });
+        
+        console.log(`⚡ [SCHEDULED] Match updated IMMEDIATELY: ${matchId}`);
+      } else {
+        this.queueWrite('scheduled_matches', matchId, matchData, 'set');
+      }
+      
+      return { success: true, matchId };
+      
+    } catch (error) {
+      logger.error('SCHEDULED', 'Error updating match:', error);
+      return { success: false, error: error.message };
+    }
+  }
+  
+  // ========== ORIGINAL ACTIVE SEARCH METHODS ==========
   
   async saveDriverSearch(driverData, options = {}) {
     try {
@@ -1213,7 +1325,7 @@ class FirestoreService {
         destinationName: driverData.destinationName || 'Unknown Destination',
         routePoints: driverData.routePoints || [],
         capacity: capacity,
-        ...passengerFields, // Add empty passenger fields
+        ...passengerFields,
         currentPassengers: 0,
         availableSeats: capacity,
         matchId: null,
@@ -1249,7 +1361,7 @@ class FirestoreService {
       return { ...searchData, documentId: driverDocId };
       
     } catch (error) {
-      console.error('❌ Error saving driver:', error);
+      logger.error('FIRESTORE', 'Error saving driver:', error);
       throw error;
     }
   }
@@ -1313,168 +1425,9 @@ class FirestoreService {
       return { ...searchData, documentId: passengerDocId };
       
     } catch (error) {
-      console.error('❌ Error saving passenger:', error);
+      logger.error('FIRESTORE', 'Error saving passenger:', error);
       throw error;
     }
-  }
-  
-  // ========== BATCH WRITING SYSTEM ==========
-  
-  queueWrite(collection, docId, data, operation = 'set', retryCount = 0) {
-    const writeItem = {
-      collection,
-      docId,
-      data,
-      operation,
-      timestamp: Date.now(),
-      priority: operation === 'update' ? 1 : 0,
-      retryCount: retryCount,
-      lastRetry: 0
-    };
-    
-    this.writeQueue.push(writeItem);
-    
-    this.writeQueue.sort((a, b) => {
-      if (b.priority !== a.priority) return b.priority - a.priority;
-      if (a.retryCount !== b.retryCount) return a.retryCount - b.retryCount;
-      return a.timestamp - b.timestamp;
-    });
-    
-    // Trigger flush if queue is getting large
-    if (this.writeQueue.length >= Math.min(this.batchLimit, 100)) {
-      setImmediate(() => this.safeFlushWrites());
-    }
-    
-    this.stats.writes++;
-    return true;
-  }
-  
-  async safeFlushWrites() {
-    if (this.isProcessing || this.writeQueue.length === 0) return;
-    
-    this.isProcessing = true;
-    try {
-      await this.flushWrites();
-    } catch (error) {
-      console.error('❌ Error in safeFlushWrites:', error);
-    } finally {
-      this.isProcessing = false;
-    }
-  }
-  
-  async flushWrites() {
-    if (this.writeQueue.length === 0) return;
-    
-    let toProcess = [];
-    
-    try {
-      const batch = this.db.batch();
-      const operations = [];
-      
-      // Process in smaller batches to avoid timeouts
-      const batchSize = Math.min(this.batchLimit, 200); // Max 200 ops per batch
-      toProcess = this.writeQueue.splice(0, batchSize);
-      
-      console.log(`🔄 Flushing ${toProcess.length} write operations (queue: ${this.writeQueue.length} remaining)`);
-      
-      for (const op of toProcess) {
-        try {
-          const docRef = this.db.collection(op.collection).doc(op.docId);
-          
-          if (op.operation === 'set') {
-            batch.set(docRef, op.data, { merge: true });
-          } else if (op.operation === 'update') {
-            batch.update(docRef, op.data);
-          } else if (op.operation === 'delete') {
-            batch.delete(docRef);
-          }
-          
-          operations.push(op);
-        } catch (opError) {
-          console.error(`❌ Error processing operation for ${op.collection}/${op.docId}:`, opError.message);
-          // Keep the operation in queue for retry
-          this.writeQueue.unshift(op);
-        }
-      }
-      
-      // Only commit if there are operations
-      if (operations.length > 0) {
-        const commitPromise = batch.commit();
-        
-        // Add timeout to batch commit
-        const timeoutPromise = new Promise((_, reject) => {
-          setTimeout(() => reject(new Error('Batch commit timeout')), 10000); // 10 second timeout
-        });
-        
-        await Promise.race([commitPromise, timeoutPromise]);
-        this.stats.batchWrites += operations.length;
-        console.log(`✅ Successfully committed ${operations.length} write operations`);
-      }
-      
-    } catch (error) {
-      console.error('❌ Batch write failed:', error.message);
-      this.stats.queueFlushErrors++;
-      
-      // Requeue failed operations
-      if (toProcess.length > 0) {
-        // Filter out operations that had individual errors
-        const failedOps = toProcess.filter(op => {
-          // Check if this operation was already re-queued
-          return !this.writeQueue.some(q => 
-            q.collection === op.collection && 
-            q.docId === op.docId && 
-            q.timestamp === op.timestamp
-          );
-        });
-        
-        if (failedOps.length > 0) {
-          // Add exponential backoff delay
-          const now = Date.now();
-          for (const op of failedOps) {
-            op.retryCount = (op.retryCount || 0) + 1;
-            op.lastRetry = now;
-            
-            if (op.retryCount < 5) { // Max 5 retries
-              this.stats.retriedOperations++;
-              // Add delay based on retry count (exponential backoff)
-              const delay = Math.min(60000, 1000 * Math.pow(2, op.retryCount));
-              setTimeout(() => {
-                this.writeQueue.unshift(op);
-              }, delay);
-            } else {
-              console.error(`❌ Max retries exceeded for ${op.collection}/${op.docId}`);
-            }
-          }
-        }
-      }
-      
-      // Wait before retrying
-      setTimeout(() => this.safeFlushWrites(), 5000);
-    }
-  }
-  
-  // ========== GETTER METHODS ==========
-  
-  async getWithCache(collection, docId, cacheKey = null, ttl = TIMEOUTS.CACHE_TTL) {
-    const key = cacheKey || `${collection}_${docId}`;
-    const cached = cache.get(key);
-    if (cached) {
-      this.stats.cacheHits++;
-      return cached;
-    }
-    
-    const doc = await this.db.collection(collection).doc(docId).get();
-    this.stats.reads++;
-    
-    if (!doc.exists) {
-      cache.set(key, null, ttl);
-      return null;
-    }
-    
-    const data = { id: doc.id, ...doc.data() };
-    cache.set(key, data, ttl);
-    
-    return data;
   }
   
   async getDriverSearch(phoneNumber) {
@@ -1489,7 +1442,7 @@ class FirestoreService {
         30000
       );
     } catch (error) {
-      console.error(`❌ Error getting driver:`, error);
+      logger.error('FIRESTORE', 'Error getting driver:', error);
       return null;
     }
   }
@@ -1506,7 +1459,7 @@ class FirestoreService {
         30000
       );
     } catch (error) {
-      console.error(`❌ Error getting passenger:`, error);
+      logger.error('FIRESTORE', 'Error getting passenger:', error);
       return null;
     }
   }
@@ -1539,7 +1492,7 @@ class FirestoreService {
       return true;
       
     } catch (error) {
-      console.error(`❌ Error updating driver:`, error.message);
+      logger.error('FIRESTORE', 'Error updating driver:', error.message);
       throw error;
     }
   }
@@ -1572,9 +1525,196 @@ class FirestoreService {
       return true;
       
     } catch (error) {
-      console.error(`❌ Error updating passenger:`, error.message);
+      logger.error('FIRESTORE', 'Error updating passenger:', error.message);
       throw error;
     }
+  }
+  
+  async getWithCache(collection, docId, cacheKey = null, ttl = TIMEOUTS.CACHE_TTL) {
+    const key = cacheKey || `${collection}_${docId}`;
+    const cached = cache.get(key);
+    if (cached) {
+      this.stats.cacheHits++;
+      return cached;
+    }
+    
+    const doc = await this.db.collection(collection).doc(docId).get();
+    this.stats.reads++;
+    
+    if (!doc.exists) {
+      cache.set(key, null, ttl);
+      return null;
+    }
+    
+    const data = { id: doc.id, ...doc.data() };
+    cache.set(key, data, ttl);
+    
+    return data;
+  }
+  
+  // ========== BATCH WRITING SYSTEM ==========
+  
+  queueWrite(collection, docId, data, operation = 'set', retryCount = 0) {
+    const writeItem = {
+      collection,
+      docId,
+      data,
+      operation,
+      timestamp: Date.now(),
+      priority: operation === 'update' ? 1 : 0,
+      retryCount: retryCount,
+      lastRetry: 0
+    };
+    
+    this.writeQueue.push(writeItem);
+    
+    this.writeQueue.sort((a, b) => {
+      if (b.priority !== a.priority) return b.priority - a.priority;
+      if (a.retryCount !== b.retryCount) return a.retryCount - b.retryCount;
+      return a.timestamp - b.timestamp;
+    });
+    
+    // Update stats
+    this.stats.queueSize = this.writeQueue.length;
+    
+    // Trigger flush if queue is getting large
+    if (this.writeQueue.length >= Math.min(this.batchLimit, 100)) {
+      setImmediate(() => this.safeFlushWrites());
+    }
+    
+    this.stats.writes++;
+    return true;
+  }
+  
+  async safeFlushWrites() {
+    if (this.isProcessing || this.writeQueue.length === 0) return;
+    
+    this.isProcessing = true;
+    this.stats.isProcessing = true;
+    
+    try {
+      await this.flushWrites();
+    } catch (error) {
+      logger.error('FIRESTORE', 'Error in safeFlushWrites:', error);
+    } finally {
+      this.isProcessing = false;
+      this.stats.isProcessing = false;
+      this.stats.queueSize = this.writeQueue.length;
+    }
+  }
+  
+  async flushWrites() {
+    if (this.writeQueue.length === 0) return;
+    
+    let toProcess = [];
+    
+    try {
+      const batch = this.db.batch();
+      const operations = [];
+      
+      // Process in smaller batches to avoid timeouts
+      const batchSize = Math.min(this.batchLimit, 200);
+      toProcess = this.writeQueue.splice(0, batchSize);
+      
+      console.log(`🔄 Flushing ${toProcess.length} write operations (queue: ${this.writeQueue.length} remaining)`);
+      
+      for (const op of toProcess) {
+        try {
+          const docRef = this.db.collection(op.collection).doc(op.docId);
+          
+          if (op.operation === 'set') {
+            batch.set(docRef, op.data, { merge: true });
+          } else if (op.operation === 'update') {
+            batch.update(docRef, op.data);
+          } else if (op.operation === 'delete') {
+            batch.delete(docRef);
+          }
+          
+          operations.push(op);
+          
+          // Clear cache for this document
+          const cacheKey = `${op.collection}:${op.docId}`;
+          this.memoryCache.delete(cacheKey);
+          cache.del(`${op.collection}_${op.docId}`);
+          
+        } catch (opError) {
+          logger.error('FIRESTORE', `Error processing operation for ${op.collection}/${op.docId}:`, opError.message);
+          // Keep the operation in queue for retry
+          this.writeQueue.unshift(op);
+        }
+      }
+      
+      // Only commit if there are operations
+      if (operations.length > 0) {
+        const commitPromise = batch.commit();
+        
+        // Add timeout to batch commit
+        const timeoutPromise = new Promise((_, reject) => {
+          setTimeout(() => reject(new Error('Batch commit timeout')), 10000);
+        });
+        
+        await Promise.race([commitPromise, timeoutPromise]);
+        this.stats.batchWrites += operations.length;
+        console.log(`✅ Successfully committed ${operations.length} write operations`);
+      }
+      
+    } catch (error) {
+      logger.error('FIRESTORE', 'Batch write failed:', error.message);
+      this.stats.queueFlushErrors++;
+      
+      // Requeue failed operations
+      if (toProcess.length > 0) {
+        // Filter out operations that had individual errors
+        const failedOps = toProcess.filter(op => {
+          return !this.writeQueue.some(q => 
+            q.collection === op.collection && 
+            q.docId === op.docId && 
+            q.timestamp === op.timestamp
+          );
+        });
+        
+        if (failedOps.length > 0) {
+          // Add exponential backoff delay
+          const now = Date.now();
+          for (const op of failedOps) {
+            op.retryCount = (op.retryCount || 0) + 1;
+            op.lastRetry = now;
+            
+            if (op.retryCount < 5) {
+              this.stats.retriedOperations++;
+              // Add delay based on retry count (exponential backoff)
+              const delay = Math.min(60000, 1000 * Math.pow(2, op.retryCount));
+              setTimeout(() => {
+                this.writeQueue.unshift(op);
+                this.stats.queueSize = this.writeQueue.length;
+              }, delay);
+            } else {
+              logger.error('FIRESTORE', `Max retries exceeded for ${op.collection}/${op.docId}`);
+            }
+          }
+        }
+      }
+      
+      // Wait before retrying
+      setTimeout(() => this.safeFlushWrites(), 5000);
+    }
+    
+    this.stats.queueSize = this.writeQueue.length;
+  }
+  
+  // ========== CACHE MANAGEMENT ==========
+
+  clearCache() {
+    this.memoryCache.clear();
+    cache.clear(); // Clear the external cache too
+    this.stats.cacheStats.size = 0;
+    console.log('🧹 [FIRESTORE] All caches cleared');
+  }
+
+  clearMemoryCache() {
+    this.memoryCache.clear();
+    this.stats.cacheStats.size = 0;
+    console.log('🧹 [FIRESTORE] Memory cache cleared');
   }
   
   // ========== STATS AND MONITORING ==========
@@ -1603,9 +1743,28 @@ class FirestoreService {
           this.writeQueue = this.writeQueue.filter(item => 
             now - item.timestamp <= 300000
           );
+          this.stats.queueSize = this.writeQueue.length;
         }
       }
     }, 60000);
+    
+    // Memory cache cleanup
+    setInterval(() => {
+      const now = Date.now();
+      let clearedCount = 0;
+      
+      for (const [key, value] of this.memoryCache.entries()) {
+        if (now - value.timestamp > this.CACHE_TTL) {
+          this.memoryCache.delete(key);
+          clearedCount++;
+        }
+      }
+      
+      if (clearedCount > 0) {
+        console.log(`🧹 [FIRESTORE] Cleaned ${clearedCount} expired cache entries`);
+        this.stats.cacheStats.size = this.memoryCache.size;
+      }
+    }, 30000);
     
     // Stats logging
     setInterval(() => {
@@ -1621,7 +1780,31 @@ class FirestoreService {
       ...this.stats,
       queueSize: this.writeQueue.length,
       isProcessing: this.isProcessing,
-      cacheStats: cache.stats ? cache.stats() : { size: 'N/A' }
+      cacheStats: {
+        ...this.stats.cacheStats,
+        size: this.memoryCache.size
+      }
+    };
+  }
+  
+  resetStats() {
+    this.stats = {
+      reads: 0,
+      writes: 0,
+      cacheHits: 0,
+      batchWrites: 0,
+      immediateWrites: 0,
+      listenersActive: 0,
+      locationUpdates: 0,
+      matchingWrites: 0,
+      queueFlushErrors: 0,
+      retriedOperations: 0,
+      queueSize: this.writeQueue.length,
+      isProcessing: this.isProcessing,
+      cacheStats: {
+        size: this.memoryCache.size,
+        ttlCount: 0
+      }
     };
   }
   
@@ -1633,7 +1816,9 @@ class FirestoreService {
       this.processorInterval = null;
     }
     
+    // Clear all queues and caches
     this.writeQueue = [];
+    this.memoryCache.clear();
     this.isProcessing = false;
     
     console.log('🧹 Firestore Service cleaned up');
@@ -1642,6 +1827,7 @@ class FirestoreService {
   emergencyClearQueue() {
     const queueSize = this.writeQueue.length;
     this.writeQueue = [];
+    this.stats.queueSize = 0;
     console.log(`🚨 Emergency queue clear: ${queueSize} operations removed`);
     return queueSize;
   }
