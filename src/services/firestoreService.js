@@ -1059,6 +1059,113 @@ class FirestoreService {
     return null;
   }
   
+  // ========== ADDED: CRITICAL MISSING METHODS ==========
+  
+  /**
+   * Set a document with full control over merge options
+   */
+  async setDocument(collection, documentId, data, options = {}) {
+    try {
+      const docRef = this.db.collection(collection).doc(documentId);
+      await docRef.set(data, options);
+      this.stats.writes++;
+      this.stats.immediateWrites++;
+      
+      console.log(`✅ [FIRESTORE] Set document ${collection}/${documentId}`);
+      return documentId;
+    } catch (error) {
+      console.error(`❌ Error setting document ${collection}/${documentId}:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Query collection with constraints (where, orderBy, limit)
+   */
+  async queryCollection(collection, constraints = [], limit = null) {
+    try {
+      let query = this.db.collection(collection);
+      
+      for (const constraint of constraints) {
+        const { field, operator, value } = constraint;
+        if (operator === 'orderBy') {
+          query = query.orderBy(field, value || 'asc');
+        } else {
+          query = query.where(field, operator, value);
+        }
+      }
+      
+      if (limit) {
+        query = query.limit(limit);
+      }
+      
+      const snapshot = await query.get();
+      this.stats.reads += snapshot.size;
+      
+      console.log(`✅ [FIRESTORE] Queried ${collection} with ${snapshot.size} results`);
+      return snapshot;
+    } catch (error) {
+      console.error(`❌ Error querying collection ${collection}:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Create a new batch write operation
+   */
+  batch() {
+    const batch = this.db.batch();
+    let count = 0;
+    
+    return {
+      _batch: batch,
+      _firestore: this.db,
+      _count: count,
+      
+      set(collection, documentId, data, options = {}) {
+        const ref = this._firestore.collection(collection).doc(documentId);
+        this._batch.set(ref, data, options);
+        this._count++;
+        return this;
+      },
+      
+      update(collection, documentId, data) {
+        const ref = this._firestore.collection(collection).doc(documentId);
+        this._batch.update(ref, data);
+        this._count++;
+        return this;
+      },
+      
+      delete(collection, documentId) {
+        const ref = this._firestore.collection(collection).doc(documentId);
+        this._batch.delete(ref);
+        this._count++;
+        return this;
+      },
+      
+      getCount() {
+        return this._count;
+      }
+    };
+  }
+
+  /**
+   * Commit a batch operation
+   */
+  async commitBatch(batch) {
+    try {
+      await batch._batch.commit();
+      this.stats.batchWrites++;
+      this.stats.writes += batch.getCount();
+      
+      console.log(`✅ [FIRESTORE] Committed batch with ${batch.getCount()} operations`);
+      return true;
+    } catch (error) {
+      console.error('❌ Error committing batch:', error);
+      throw error;
+    }
+  }
+  
   // ========== ORIGINAL ACTIVE SEARCH METHODS (KEEP FOR BACKWARD COMPATIBILITY) ==========
   
   async saveDriverSearch(driverData, options = {}) {
