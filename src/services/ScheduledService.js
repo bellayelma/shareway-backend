@@ -3,7 +3,8 @@
 // WITH REAL-TIME TRIGGER MATCHING AND STATUS DEBUGGING
 // ADDED: Timeout for expired pending matches (15 min)
 // ADDED: Ultra optimized matching - quick count check first, zero CPU when no users
-// FIXED: Enhanced error handling and debugging for match creation
+// FIXED: Correct data extraction for Flutter's nested data structure
+// FIXED: Passenger name now correctly extracted from passengerInfo.name
 
 const logger = require('../utils/Logger');
 
@@ -211,6 +212,7 @@ class ScheduledService {
   }
 
   // ========== CREATE SCHEDULED SEARCH ==========
+  // FIXED: Correctly extracts passenger name from nested data structure
 
   async handleCreateScheduledSearch(data, userId, userType) {
     console.log(`📝 [SCHEDULED] Create for ${userType}: ${userId}`);
@@ -226,10 +228,14 @@ class ScheduledService {
         ? 'scheduled_searches_driver' 
         : 'scheduled_searches_passenger';
       
+      // ===== FIX: Handle nested data structure from Flutter =====
+      // Flutter sends data with { type, data } structure
+      const sourceData = data.data || data; // Extract from nested "data" if present
+      
       // Parse scheduled time
-      let scheduledTime = data.scheduledTime || data.departureTime;
+      let scheduledTime = sourceData.scheduledTime || sourceData.departureTime;
       if (userType === 'passenger') {
-        scheduledTime = data.rideDetails?.scheduledTime || scheduledTime;
+        scheduledTime = sourceData.rideDetails?.scheduledTime || scheduledTime;
       }
       
       if (!scheduledTime) throw new Error('Scheduled time required');
@@ -246,7 +252,7 @@ class ScheduledService {
         userId,
         sanitizedUserId: sanitizedPhone,
         userType,
-        status: 'actively_matching', // FORCE this value
+        status: 'actively_matching',
         scheduledTime: timeString,
         scheduledTimestamp,
         createdAt: new Date().toISOString(),
@@ -258,72 +264,102 @@ class ScheduledService {
       if (userType === 'driver') {
         scheduledSearchData = {
           ...scheduledSearchData,
-          availableSeats: data.availableSeats || data.capacity || 4,
-          initialSeats: data.availableSeats || data.capacity || 4,
-          driverName: data.driverName || data.name || 'Driver',
+          availableSeats: sourceData.availableSeats || sourceData.capacity || 4,
+          initialSeats: sourceData.availableSeats || sourceData.capacity || 4,
+          driverName: sourceData.driverName || sourceData.name || 'Driver',
           driverPhone: userId,
-          pickupLocation: data.pickupLocation || null,
-          destinationLocation: data.destinationLocation || null,
-          pickupName: data.pickupName || 'Pickup location',
-          destinationName: data.destinationName || 'Destination',
-          vehicleType: data.vehicleType || 'Car',
-          vehicleModel: data.vehicleModel || 'Standard',
-          vehicleColor: data.vehicleColor || 'Not specified',
-          licensePlate: data.licensePlate || 'Not specified',
-          profilePhoto: data.profilePhoto || data.driverPhoto || null,
-          rating: data.rating || data.driverRating || 5.0,
+          pickupLocation: sourceData.pickupLocation || null,
+          destinationLocation: sourceData.destinationLocation || null,
+          pickupName: sourceData.pickupName || 'Pickup location',
+          destinationName: sourceData.destinationName || 'Destination',
+          vehicleType: sourceData.vehicleType || 'Car',
+          vehicleModel: sourceData.vehicleModel || 'Standard',
+          vehicleColor: sourceData.vehicleColor || 'Not specified',
+          licensePlate: sourceData.licensePlate || 'Not specified',
+          profilePhoto: sourceData.profilePhoto || sourceData.driverPhoto || null,
+          rating: sourceData.rating || sourceData.driverRating || 5.0,
           acceptedPassengers: [],
           rejectedMatches: [],
           cancelledPassengersHistory: [],
           totalAcceptedPassengers: 0,
           vehicleInfo: {
-            type: data.vehicleType || 'Car',
-            model: data.vehicleModel || 'Standard',
-            color: data.vehicleColor || 'Not specified',
-            plate: data.licensePlate || 'Not specified',
-            capacity: data.availableSeats || data.capacity || 4,
-            driverName: data.driverName || 'Driver',
+            type: sourceData.vehicleType || 'Car',
+            model: sourceData.vehicleModel || 'Standard',
+            color: sourceData.vehicleColor || 'Not specified',
+            plate: sourceData.licensePlate || 'Not specified',
+            capacity: sourceData.availableSeats || sourceData.capacity || 4,
+            driverName: sourceData.driverName || 'Driver',
             driverPhone: userId,
-            driverRating: data.rating || 5.0,
-            driverPhotoUrl: data.profilePhoto || data.driverPhoto || null
+            driverRating: sourceData.rating || 5.0,
+            driverPhotoUrl: sourceData.profilePhoto || sourceData.driverPhoto || null
           }
         };
         
         // Enrich with user profile
         scheduledSearchData = await this.enrichDriverData(userId, scheduledSearchData);
         
-      } else { // passenger
+      } else { // passenger - FIXED EXTRACTION HERE
+        // ===== FIX: Correctly extract passenger info from nested structure =====
+        // The name is in passengerInfo.name from Flutter
+        const passengerSource = sourceData.passengerInfo || 
+                               sourceData.passenger || 
+                               {};
+        
+        // Extract photo from multiple possible locations
+        const extractedPhoto = passengerSource.photoUrl || 
+                              sourceData.passengerPhotoUrl || 
+                              passengerSource.photoUrl ||
+                              null;
+        
+        // ✅ FIX: Get the actual name from passengerInfo.name
+        const extractedName = passengerSource.name || 
+                             sourceData.passengerName || 
+                             'Passenger';
+        
+        console.log(`👤 [SCHEDULED] Extracted passenger name: ${extractedName}`);
+        console.log(`📸 [SCHEDULED] Extracted passenger photo: ${extractedPhoto ? 'Yes' : 'No'}`);
+        
         const passengerInfo = {
-          name: data.passenger?.name || data.passengerName || 'Passenger',
-          phone: data.passenger?.phone || userId,
-          rating: data.rating || 5.0,
-          photoUrl: data.passenger?.photoUrl || data.passengerPhotoUrl || null
+          name: extractedName,
+          phone: passengerSource.phone || userId,
+          rating: passengerSource.rating || sourceData.rating || 5.0,
+          totalRides: passengerSource.totalRides || sourceData.totalRides || 0,
+          completedRides: passengerSource.completedRides || sourceData.completedRides || 0,
+          isVerified: passengerSource.isVerified || sourceData.isVerified || false,
+          photoUrl: extractedPhoto
         };
         
         scheduledSearchData = {
           ...scheduledSearchData,
           passengerInfo,
-          passengerName: passengerInfo.name,
+          passengerName: extractedName, // Set at root level too
           passengerPhone: userId,
-          passengerPhotoUrl: passengerInfo.photoUrl,
-          passengerCount: data.passengerCount || 1,
-          pickupLocation: data.pickupLocation || null,
-          destinationLocation: data.destinationLocation || null,
-          pickupName: data.pickupName || 'Pickup location',
-          destinationName: data.destinationName || 'Destination',
-          luggageCount: data.luggageCount || 0,
-          specialRequests: data.specialRequests || '',
-          paymentMethod: data.paymentMethod || 'cash',
-          estimatedFare: data.estimatedFare || 0,
+          passengerPhotoUrl: extractedPhoto,
+          passengerCount: sourceData.passengerCount || 1,
+          pickupLocation: sourceData.pickupLocation || null,
+          destinationLocation: sourceData.destinationLocation || null,
+          pickupName: sourceData.pickupName || 'Pickup location',
+          destinationName: sourceData.destinationName || 'Destination',
+          luggageCount: sourceData.luggageCount || 0,
+          specialRequests: sourceData.specialRequests || '',
+          paymentMethod: sourceData.paymentMethod || 'cash',
+          estimatedFare: sourceData.estimatedFare || 0,
+          estimatedDistance: sourceData.estimatedDistance || 0,
           matchHistory: [],
+          rating: sourceData.rating || 5.0,
+          profilePhoto: extractedPhoto || sourceData.profilePhoto || null,
           rideDetails: {
             scheduledTime: timeString,
             scheduledTimestamp,
-            pickupName: data.pickupName || 'Pickup location',
-            destinationName: data.destinationName || 'Destination',
-            pickupLocation: data.pickupLocation || null,
-            destinationLocation: data.destinationLocation || null,
-            passengerCount: data.passengerCount || 1,
+            pickupName: sourceData.pickupName || 'Pickup location',
+            destinationName: sourceData.destinationName || 'Destination',
+            pickupLocation: sourceData.pickupLocation || null,
+            destinationLocation: sourceData.destinationLocation || null,
+            passengerCount: sourceData.passengerCount || 1,
+            estimatedFare: sourceData.estimatedFare || 0,
+            estimatedDistance: sourceData.estimatedDistance || 0,
+            paymentMethod: sourceData.paymentMethod || 'cash',
+            specialRequests: sourceData.specialRequests || '',
             passenger: passengerInfo
           }
         };
@@ -793,9 +829,10 @@ class ScheduledService {
       
       console.log(`🔍 [DEBUG] Driver phone: ${driverPhone}, Passenger phone: ${passengerPhone}`);
       
-      // Extract names
+      // Extract names - passenger name should now be correct from saved data
       const driverName = driver.driverName || driver.name || 'Driver';
-      const passengerName = passenger.passengerName || passenger.name || 'Passenger';
+      const passengerName = passenger.passengerName || passenger.name || 
+                           passenger.passengerInfo?.name || 'Passenger';
       
       console.log(`🔍 [DEBUG] Driver name: ${driverName}, Passenger name: ${passengerName}`);
       
@@ -1507,7 +1544,7 @@ class ScheduledService {
   extractPassengerDetails(data) {
     const source = data.data || data;
     return {
-      name: source.passengerName || 'Passenger',
+      name: source.passengerName || source.passengerInfo?.name || 'Passenger',
       phone: source.passengerPhone || source.userId,
       passengerCount: source.passengerCount || 1,
       profilePhoto: source.passengerPhotoUrl || source.passengerInfo?.photoUrl || null,
