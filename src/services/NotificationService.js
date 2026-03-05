@@ -1,6 +1,6 @@
 // services/NotificationService.js
-// COMPLETE FIXED VERSION with DEDUPLICATION
-// Prevents duplicate messages to the same user
+// COMPLETE FIXED VERSION with FCM SIZE OPTIMIZATION
+// Prevents "Android message is too big" errors
 
 const logger = require('../utils/Logger');
 const crypto = require('crypto');
@@ -658,7 +658,7 @@ class NotificationService {
     }
   }
 
-  // ========== FCM SENDING WITH DEDUPLICATION ==========
+  // ========== FCM SENDING WITH DEDUPLICATION AND SIZE OPTIMIZATION ==========
 
   /**
    * Send data-only FCM notification with deduplication
@@ -690,6 +690,8 @@ class NotificationService {
       }
       
       token = tokenResult.token;
+      
+      // ✅ USE THE OPTIMIZED CONVERTER
       const fcmData = this.convertToDataOnlyFCM(notification);
       
       // Add deduplication info to message
@@ -879,51 +881,135 @@ class NotificationService {
     };
   }
 
-  // ========== CONVERT TO DATA-ONLY FCM ==========
+  // ========== FIXED: CONVERT TO DATA-ONLY FCM WITH SIZE LIMITING ==========
 
   /**
-   * Convert notification to data-only FCM format
+   * Convert notification to data-only FCM format with size optimization
+   * Prevents "Android message is too big" errors
    */
   convertToDataOnlyFCM(notification) {
     const type = notification.type || 'unknown';
     const data = notification.data || notification;
     
+    console.log(`📦 [FCM] Creating compact payload for type: ${type}`);
+    
+    // START WITH MINIMAL PAYLOAD - only essential fields
     const dataPayload = {
       type: type,
-      priority: 'high',
       timestamp: Date.now().toString(),
       click_action: 'FLUTTER_NOTIFICATION_CLICK',
       screen: this.getNotificationScreen(type),
     };
     
-    // Flatten data for FCM (all values must be strings)
-    const flatten = (obj, prefix = '') => {
-      const result = {};
-      for (const key in obj) {
-        if (!obj.hasOwnProperty(key)) continue;
+    // ONLY add essential fields based on notification type
+    if (type.includes('scheduled_match_proposed_to_driver')) {
+      // For driver match proposals - only what's absolutely needed
+      dataPayload.matchId = data.matchId || '';
+      dataPayload.passengerName = data.passengerName || 'Passenger';
+      dataPayload.passengerCount = String(data.passengerCount || 1);
+      dataPayload.score = String(data.score || '');
+      
+      // CRITICAL: Stringify large objects instead of flattening
+      if (data.passengerDetails) {
+        // Only keep essential passenger fields
+        const essentialPassenger = {
+          name: data.passengerDetails.name || 'Passenger',
+          phone: data.passengerDetails.phone || '',
+          photoUrl: data.passengerDetails.profilePhoto || ''
+        };
+        dataPayload.passengerDetails = JSON.stringify(essentialPassenger);
+      }
+      
+      if (data.tripDetails) {
+        // Only keep essential trip fields
+        const essentialTrip = {
+          pickup: data.tripDetails.pickupName || '',
+          destination: data.tripDetails.destinationName || '',
+          time: data.tripDetails.scheduledTime || ''
+        };
+        dataPayload.tripDetails = JSON.stringify(essentialTrip);
+      }
+    }
+    else if (type.includes('scheduled_match_confirmed')) {
+      // For match confirmations
+      dataPayload.matchId = data.matchId || '';
+      dataPayload.confirmedBy = data.confirmedBy || '';
+      
+      if (data.driverDetails) {
+        const essentialDriver = {
+          name: data.driverDetails.name || 'Driver',
+          phone: data.driverDetails.phone || '',
+          photoUrl: data.driverDetails.photoUrl || '',
+          vehicleInfo: data.driverDetails.vehicleInfo ? {
+            type: data.driverDetails.vehicleInfo.type || 'Car',
+            plate: data.driverDetails.vehicleInfo.plate || '',
+            color: data.driverDetails.vehicleInfo.color || ''
+          } : {}
+        };
+        dataPayload.driverDetails = JSON.stringify(essentialDriver);
+      }
+      
+      if (data.passengerDetails) {
+        const essentialPassenger = {
+          name: data.passengerDetails.name || 'Passenger',
+          phone: data.passengerDetails.phone || ''
+        };
+        dataPayload.passengerDetails = JSON.stringify(essentialPassenger);
+      }
+    }
+    else if (type.includes('DRIVER_CANCELLED_ALL') || type.includes('DRIVER_CANCELLED_YOUR_RIDE') || 
+             type.includes('PASSENGER_CANCELLED_RIDE') || type.includes('PASSENGER_CANCELLATION_CONFIRMED')) {
+      // For cancellations - minimal data
+      dataPayload.matchId = data.matchId || '';
+      dataPayload.reason = data.reason || '';
+      dataPayload.message = data.message || '';
+      dataPayload.cancelledBy = data.cancelledBy || '';
+      
+      if (data.driverName) dataPayload.driverName = data.driverName;
+      if (data.passengerName) dataPayload.passengerName = data.passengerName;
+    }
+    else {
+      // For other notification types - just add essential primitive fields
+      for (const [key, value] of Object.entries(data)) {
+        if (value === null || value === undefined) continue;
         
-        const value = obj[key];
-        const newKey = prefix ? `${prefix}_${key}` : key;
-        
-        if (value === null || value === undefined) {
-          result[newKey] = '';
-        } else if (typeof value === 'object') {
-          if (value instanceof Date) {
-            result[newKey] = value.toISOString();
-          } else if (Array.isArray(value)) {
-            result[newKey] = JSON.stringify(value);
-          } else {
-            Object.assign(result, flatten(value, newKey));
-          }
-        } else {
-          result[newKey] = String(value);
+        // Only include primitive values and short strings
+        if (typeof value !== 'object' && String(value).length < 100) {
+          dataPayload[key] = String(value);
         }
       }
-      return result;
-    };
+    }
     
-    Object.assign(dataPayload, flatten(data));
+    // SAFETY CHECK: Ensure total size is under 4KB
+    const payloadSize = JSON.stringify(dataPayload).length;
     
+    if (payloadSize > 3500) {
+      console.warn(`⚠️ [FCM] Payload too large (${payloadSize} bytes), stripping non-essentials`);
+      
+      // Remove non-essential fields if still too large
+      delete dataPayload.passengerDetails;
+      delete dataPayload.tripDetails;
+      delete dataPayload.driverDetails;
+      delete dataPayload.vehicleInfo;
+      
+      // Keep only absolute essentials
+      const minimalPayload = {
+        type: dataPayload.type,
+        matchId: dataPayload.matchId || '',
+        timestamp: dataPayload.timestamp
+      };
+      
+      // Add back essential fields if they exist
+      if (dataPayload.passengerName) minimalPayload.passengerName = dataPayload.passengerName;
+      if (dataPayload.driverName) minimalPayload.driverName = dataPayload.driverName;
+      if (dataPayload.reason) minimalPayload.reason = dataPayload.reason;
+      
+      const finalSize = JSON.stringify(minimalPayload).length;
+      console.log(`✅ [FCM] Reduced to ${finalSize} bytes`);
+      return { data: minimalPayload };
+    }
+    
+    console.log(`✅ [FCM] Payload size: ${payloadSize} bytes`);
     return { data: dataPayload };
   }
 
