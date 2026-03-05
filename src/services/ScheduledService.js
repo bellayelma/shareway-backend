@@ -3,6 +3,7 @@
 // WITH REAL-TIME TRIGGER MATCHING AND STATUS DEBUGGING
 // ADDED: Timeout for expired pending matches (15 min)
 // ADDED: Ultra optimized matching - quick count check first, zero CPU when no users
+// FIXED: Enhanced error handling and debugging for match creation
 
 const logger = require('../utils/Logger');
 
@@ -677,16 +678,30 @@ class ScheduledService {
       
       console.log(`📊 Found ${drivers.length} drivers, ${passengers.length} passengers ready to match`);
       
+      if (drivers.length === 0 || passengers.length === 0) {
+        console.log('⚠️ No users after query - possible race condition');
+        return;
+      }
+      
       // ✅ STEP 4: MATCH EVERYONE - no filters, match all pairs
       let matchesCreated = 0;
       
+      console.log(`🔍 Starting match loop with ${drivers.length} drivers and ${passengers.length} passengers`);
+      
       for (const driver of drivers) {
+        console.log(`🔍 Processing driver: ${driver.id || 'unknown'}`);
+        
         for (const passenger of passengers) {
-          // Skip if already matched in this cycle
-          const pairKey = `${driver.id}:${passenger.id}`;
-          if (this.recentMatches.has(pairKey)) continue;
+          console.log(`🔍 Processing passenger: ${passenger.id || 'unknown'}`);
           
-          console.log(`🤝 Creating match: ${driver.id} ↔ ${passenger.id}`);
+          // Skip if already matched in this cycle
+          const pairKey = `${driver.id || '?'}:${passenger.id || '?'}`;
+          if (this.recentMatches.has(pairKey)) {
+            console.log(`⏭️ Skipping already matched pair: ${pairKey}`);
+            continue;
+          }
+          
+          console.log(`🤝 Creating match: ${driver.id || '?'} ↔ ${passenger.id || '?'}`);
           
           // Create match
           const matchId = await this.createMatch(driver, passenger);
@@ -694,10 +709,16 @@ class ScheduledService {
           if (matchId) {
             matchesCreated++;
             this.recentMatches.set(pairKey, Date.now());
+            console.log(`✅ Match created successfully: ${matchId}`);
+          } else {
+            console.log(`❌ Failed to create match for ${driver.id || '?'} ↔ ${passenger.id || '?'}`);
           }
           
           // Limit matches per cycle to prevent overload
-          if (matchesCreated >= this.MAX_MATCHES_PER_CYCLE) break;
+          if (matchesCreated >= this.MAX_MATCHES_PER_CYCLE) {
+            console.log(`🔍 Reached max matches per cycle (${this.MAX_MATCHES_PER_CYCLE})`);
+            break;
+          }
         }
         if (matchesCreated >= this.MAX_MATCHES_PER_CYCLE) break;
       }
@@ -706,6 +727,7 @@ class ScheduledService {
       
     } catch (error) {
       console.error('❌ Matching error:', error.message);
+      console.error('❌ Error stack:', error.stack);
     }
   }
 
@@ -730,75 +752,163 @@ class ScheduledService {
   }
 
   /**
-   * Create a match between driver and passenger
+   * Create a match between driver and passenger - WITH EXTREME DEBUGGING
    */
   async createMatch(driver, passenger) {
+    console.log('🔍 [DEBUG] ===== CREATE MATCH START =====');
+    console.log('🔍 [DEBUG] Driver object:', JSON.stringify(driver, null, 2).substring(0, 500));
+    console.log('🔍 [DEBUG] Passenger object:', JSON.stringify(passenger, null, 2).substring(0, 500));
+    
     try {
+      // Validate required fields
+      if (!driver) {
+        console.error('❌ [DEBUG] Driver is null or undefined');
+        return null;
+      }
+      
+      if (!passenger) {
+        console.error('❌ [DEBUG] Passenger is null or undefined');
+        return null;
+      }
+      
+      // Extract IDs carefully
+      const driverId = driver.id || driver.driverId;
+      const passengerId = passenger.id || passenger.passengerId;
+      
+      if (!driverId) {
+        console.error('❌ [DEBUG] Driver ID missing. Driver keys:', Object.keys(driver));
+        return null;
+      }
+      
+      if (!passengerId) {
+        console.error('❌ [DEBUG] Passenger ID missing. Passenger keys:', Object.keys(passenger));
+        return null;
+      }
+      
+      console.log(`🔍 [DEBUG] Driver ID: ${driverId}, Passenger ID: ${passengerId}`);
+      
+      // Extract phone numbers carefully
+      const driverPhone = driver.userId || driver.driverPhone || driver.phone || driverId;
+      const passengerPhone = passenger.userId || passenger.passengerPhone || passenger.phone || passengerId;
+      
+      console.log(`🔍 [DEBUG] Driver phone: ${driverPhone}, Passenger phone: ${passengerPhone}`);
+      
+      // Extract names
+      const driverName = driver.driverName || driver.name || 'Driver';
+      const passengerName = passenger.passengerName || passenger.name || 'Passenger';
+      
+      console.log(`🔍 [DEBUG] Driver name: ${driverName}, Passenger name: ${passengerName}`);
+      
+      // Extract counts
+      const passengerCount = passenger.passengerCount || 1;
+      const availableSeats = driver.availableSeats || 4;
+      
+      console.log(`🔍 [DEBUG] Passenger count: ${passengerCount}, Available seats: ${availableSeats}`);
+      
       // Prepare match data
       const matchData = {
-        driverId: driver.id,
-        passengerId: passenger.id,
-        driverPhone: driver.userId || driver.driverPhone || driver.id,
-        passengerPhone: passenger.userId || passenger.passengerPhone || passenger.id,
-        driverName: driver.driverName || 'Driver',
-        passengerName: passenger.passengerName || 'Passenger',
+        driverId: driverId,
+        passengerId: passengerId,
+        driverPhone: driverPhone,
+        passengerPhone: passengerPhone,
+        driverName: driverName,
+        passengerName: passengerName,
         status: 'awaiting_driver_approval',
         proposedAt: new Date().toISOString(),
         expiresAt: new Date(Date.now() + this.MATCH_EXPIRY).toISOString(),
         createdAt: new Date().toISOString(),
-        passengerCount: passenger.passengerCount || 1,
-        availableSeats: driver.availableSeats || 4
+        passengerCount: passengerCount,
+        availableSeats: availableSeats
       };
       
+      console.log('🔍 [DEBUG] Match data prepared:', JSON.stringify(matchData, null, 2));
+      
       // Add location data if available
-      if (driver.pickupLocation) matchData.pickupLocation = driver.pickupLocation;
-      if (driver.destinationLocation) matchData.destinationLocation = driver.destinationLocation;
-      if (passenger.pickupName) matchData.pickupName = passenger.pickupName;
-      if (passenger.destinationName) matchData.destinationName = passenger.destinationName;
-      if (driver.scheduledTime) matchData.scheduledTime = driver.scheduledTime;
-      if (passenger.scheduledTime) matchData.scheduledTime = passenger.scheduledTime;
+      if (driver.pickupLocation) {
+        matchData.pickupLocation = driver.pickupLocation;
+        console.log('🔍 [DEBUG] Added pickup location from driver');
+      }
+      
+      if (driver.destinationLocation) {
+        matchData.destinationLocation = driver.destinationLocation;
+        console.log('🔍 [DEBUG] Added destination location from driver');
+      }
+      
+      if (passenger.pickupName) {
+        matchData.pickupName = passenger.pickupName;
+        console.log('🔍 [DEBUG] Added pickup name from passenger');
+      }
+      
+      if (passenger.destinationName) {
+        matchData.destinationName = passenger.destinationName;
+        console.log('🔍 [DEBUG] Added destination name from passenger');
+      }
+      
+      if (driver.scheduledTime) {
+        matchData.scheduledTime = driver.scheduledTime;
+        console.log('🔍 [DEBUG] Added scheduled time from driver');
+      }
+      
+      if (passenger.scheduledTime) {
+        matchData.scheduledTime = passenger.scheduledTime;
+        console.log('🔍 [DEBUG] Added scheduled time from passenger');
+      }
+      
+      console.log('🔍 [DEBUG] Attempting to save match to Firestore...');
       
       // Save match
       const matchId = await this.firestoreService.addDocument('scheduled_matches', matchData);
       
+      console.log(`🔍 [DEBUG] Match saved with ID: ${matchId}`);
+      
       // Update driver
-      await this.firestoreService.updateDocument('scheduled_searches_driver', driver.id, {
+      console.log('🔍 [DEBUG] Updating driver document...');
+      await this.firestoreService.updateDocument('scheduled_searches_driver', driverId, {
         pendingMatchId: matchId,
-        pendingMatchWith: passenger.id,
+        pendingMatchWith: passengerId,
         pendingMatchStatus: 'awaiting_driver_approval',
         updatedAt: new Date().toISOString()
       });
+      console.log('🔍 [DEBUG] Driver updated successfully');
       
       // Update passenger
-      await this.firestoreService.updateDocument('scheduled_searches_passenger', passenger.id, {
+      console.log('🔍 [DEBUG] Updating passenger document...');
+      await this.firestoreService.updateDocument('scheduled_searches_passenger', passengerId, {
         status: 'pending_driver_approval',
         matchId: matchId,
-        matchedWith: driver.id,
+        matchedWith: driverId,
         matchStatus: 'awaiting_driver_approval',
         updatedAt: new Date().toISOString()
       });
+      console.log('🔍 [DEBUG] Passenger updated successfully');
       
-      // Send notification to driver
-      await this.notification.sendNotification(matchData.driverPhone, {
+      // Send notification
+      console.log('🔍 [DEBUG] Sending notification to driver...');
+      await this.notification.sendNotification(driverPhone, {
         type: 'scheduled_match_proposed_to_driver',
         data: {
           matchId: matchId,
-          passengerPhone: matchData.passengerPhone,
-          passengerName: matchData.passengerName,
+          passengerPhone: passengerPhone,
+          passengerName: passengerName,
           tripDetails: {
             pickupName: matchData.pickupName || 'Pickup location',
             destinationName: matchData.destinationName || 'Destination',
             scheduledTime: matchData.scheduledTime,
-            passengerCount: matchData.passengerCount
+            passengerCount: passengerCount
           }
         }
       }, { important: true });
+      console.log('🔍 [DEBUG] Notification sent');
       
-      console.log(`✅ Match created: ${matchId}`);
+      console.log(`✅ Match created successfully: ${matchId}`);
+      console.log('🔍 [DEBUG] ===== CREATE MATCH END (SUCCESS) =====');
+      
       return matchId;
       
     } catch (error) {
-      console.error('❌ Error creating match:', error.message);
+      console.error('❌ [DEBUG] Error in createMatch:', error.message);
+      console.error('❌ [DEBUG] Error stack:', error.stack);
+      console.error('❌ [DEBUG] ===== CREATE MATCH END (FAILURE) =====');
       return null;
     }
   }
