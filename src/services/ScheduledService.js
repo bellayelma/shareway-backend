@@ -342,44 +342,13 @@ class ScheduledService {
     return driverData;
   }
 
-  // ========== GET ACTIVE SEARCHES (with caching) ==========
+  // ========== GET ACTIVE SEARCHES (OPTIMIZED) ==========
 
   async getActiveScheduledSearches(userType) {
-    const collectionName = userType === 'driver' 
-      ? 'scheduled_searches_driver' 
-      : 'scheduled_searches_passenger';
-    
     try {
-      // OPTIMIZATION: Use specialized method that filters on server
-      const constraints = [
-        { field: 'status', operator: 'in', value: ['actively_matching', 'scheduled'] }
-      ];
-      
-      if (userType === 'driver') {
-        constraints.push({ field: 'availableSeats', operator: '>', value: 0 });
-      }
-      
-      const snapshot = await this.firestoreService.queryCollection(
-        collectionName,
-        constraints,
-        50 // Limit results
-      );
-      
-      const results = [];
-      snapshot.forEach(doc => {
-        const data = doc.data();
-        results.push({
-          id: doc.id,
-          data: {
-            ...data,
-            userId: data.userId || data.passengerPhone || data.driverPhone || doc.id
-          }
-        });
-      });
-      
-      console.log(`📊 [SCHEDULED] Found ${results.length} active ${userType}s`);
+      // Use the optimized method from firestoreService
+      const results = await this.firestoreService.getActiveMatchingDocuments(userType);
       return results;
-      
     } catch (error) {
       console.error(`❌ [SCHEDULED] Error getting ${userType}s:`, error.message);
       return [];

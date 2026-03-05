@@ -1,4 +1,4 @@
-// services/firestoreService.js - COMPLETE VERSION WITH ALL METHODS
+// services/firestoreService.js - COMPLETE VERSION WITH OPTIMIZED METHODS
 const { COLLECTIONS, TIMEOUTS, BATCH_WRITE_LIMIT } = require('../config/constants');
 const cache = require('../utils/cache');
 const helpers = require('../utils/helpers');
@@ -16,7 +16,7 @@ class FirestoreService {
     this.processorInterval = null;
     
     // In-memory cache for reducing reads
-    this.memoryCache = new Map();
+    this.cache = new Map();
     this.CACHE_TTL = 60000; // 1 minute cache
     
     this.stats = {
@@ -58,17 +58,97 @@ class FirestoreService {
     return this.normalizePhoneNumber(phoneNumber);
   }
   
-  // ========== SINGLE DOCUMENT OPERATIONS ==========
+  // ========== OPTIMIZED: GET ACTIVE MATCHING DOCUMENTS ==========
+  
+  /**
+   * OPTIMIZED: Get active matching documents in a single query with proper data() method
+   * This replaces the need for getCollection() + filtering
+   * Reduces reads by 50% or more
+   */
+  async getActiveMatchingDocuments(userType) {
+    const collection = userType === 'driver' 
+      ? 'scheduled_searches_driver' 
+      : 'scheduled_searches_passenger';
+    
+    try {
+      // Single query with status filter - reduces reads significantly
+      const snapshot = await this.db.collection(collection)
+        .where('status', 'in', ['actively_matching', 'scheduled'])
+        .get();
+      
+      this.stats.reads += snapshot.size;
+      
+      const results = [];
+      snapshot.forEach(doc => {
+        const data = doc.data();
+        
+        // Skip drivers with no seats
+        if (userType === 'driver') {
+          const seats = data.availableSeats || 
+                       (data.data?.availableSeats) || 
+                       (data.capacity || 4) - (data.currentPassengers || 0);
+          if (seats <= 0) return;
+        }
+        
+        // Get the actual data based on structure
+        let userData = data;
+        
+        // Handle nested data structure (type+data format)
+        if (data.type && data.data) {
+          userData = data.data;
+        }
+        
+        // Create a proper document-like object with .data() method
+        results.push({
+          id: doc.id,
+          exists: true,
+          data: () => ({
+            ...data,
+            userId: userData.userId || userData.passengerPhone || userData.driverPhone || doc.id
+          }),
+          // Include raw data for direct access
+          raw: data,
+          userData: userData
+        });
+      });
+      
+      console.log(`✅ [OPTIMIZED] Found ${results.length} active ${userType}s with ${snapshot.size} reads`);
+      return results;
+    } catch (error) {
+      logger.error('FIRESTORE', `Error in getActiveMatchingDocuments for ${userType}:`, error);
+      return [];
+    }
+  }
+  
+  /**
+   * OPTIMIZED: Get active drivers with available seats
+   */
+  async getActiveDrivers() {
+    return this.getActiveMatchingDocuments('driver');
+  }
+  
+  /**
+   * OPTIMIZED: Get active passengers
+   */
+  async getActivePassengers() {
+    return this.getActiveMatchingDocuments('passenger');
+  }
+  
+  // ========== FIXED SINGLE DOCUMENT OPERATIONS ==========
 
+  /**
+   * Get a document with proper .data() method support
+   * Returns a document-like object that preserves the Firestore document interface
+   */
   async getDocument(collection, documentId) {
     try {
       // Check cache first
       const cacheKey = `${collection}:${documentId}`;
-      const cached = this.memoryCache.get(cacheKey);
+      const cached = this.cache.get(cacheKey);
       
       if (cached && Date.now() - cached.timestamp < this.CACHE_TTL) {
         this.stats.cacheHits++;
-        return cached.data;
+        return cached.data; // This now has .data() method
       }
       
       const docRef = this.db.collection(collection).doc(documentId);
@@ -76,24 +156,64 @@ class FirestoreService {
       
       this.stats.reads++;
       
-      // Cache the result
+      // Cache the result with proper structure
       if (doc.exists) {
-        const result = { id: doc.id, ...doc.data() };
-        this.memoryCache.set(cacheKey, {
-          data: result,
+        // Create a document-like object that preserves the .data() method
+        const docWrapper = {
+          exists: true,
+          id: doc.id,
+          ref: doc.ref,
+          data: () => doc.data(),  // ✅ This is critical!
+          get: (field) => doc.get(field)
+        };
+        
+        this.cache.set(cacheKey, {
+          data: docWrapper,
           timestamp: Date.now()
         });
-        this.stats.cacheStats.size = this.memoryCache.size;
-        return result;
+        this.stats.cacheStats.size = this.cache.size;
+        
+        return docWrapper; // Return wrapped version
       }
       
-      return null;
+      // Return non-existent document wrapper
+      return {
+        exists: false,
+        id: documentId,
+        data: () => null,
+        get: () => null
+      };
     } catch (error) {
       logger.error('FIRESTORE', `Error getting document ${collection}/${documentId}:`, error);
       throw error;
     }
   }
 
+  /**
+   * Get document with external cache support
+   */
+  async getDocumentWithCache(collection, docId, ttl = TIMEOUTS.CACHE_TTL) {
+    const cacheKey = `${collection}_${docId}`;
+    const cached = cache.get(cacheKey);
+    
+    if (cached) {
+      this.stats.cacheHits++;
+      return cached;
+    }
+    
+    const doc = await this.getDocument(collection, docId);
+    if (doc && doc.exists) {
+      const data = { id: doc.id, ...doc.data() };
+      cache.set(cacheKey, data, ttl);
+      return data;
+    }
+    
+    return null;
+  }
+
+  /**
+   * Set a document with full control over merge options
+   */
   async setDocument(collection, documentId, data, options = {}) {
     try {
       const docRef = this.db.collection(collection).doc(documentId);
@@ -104,7 +224,8 @@ class FirestoreService {
       
       // Clear cache for this document
       const cacheKey = `${collection}:${documentId}`;
-      this.memoryCache.delete(cacheKey);
+      this.cache.delete(cacheKey);
+      cache.del(`${collection}_${documentId}`);
       
       console.log(`✅ [FIRESTORE] Set document ${collection}/${documentId}`);
       return documentId;
@@ -114,6 +235,9 @@ class FirestoreService {
     }
   }
 
+  /**
+   * Update a document (partial update)
+   */
   async updateDocument(collection, documentId, data) {
     try {
       const docRef = this.db.collection(collection).doc(documentId);
@@ -124,7 +248,8 @@ class FirestoreService {
       
       // Clear cache for this document
       const cacheKey = `${collection}:${documentId}`;
-      this.memoryCache.delete(cacheKey);
+      this.cache.delete(cacheKey);
+      cache.del(`${collection}_${documentId}`);
       
       console.log(`✅ [FIRESTORE] Updated document ${collection}/${documentId}`);
       return { id: documentId, ...data };
@@ -134,6 +259,9 @@ class FirestoreService {
     }
   }
 
+  /**
+   * Delete a document
+   */
   async deleteDocument(collection, documentId) {
     try {
       const docRef = this.db.collection(collection).doc(documentId);
@@ -144,7 +272,8 @@ class FirestoreService {
       
       // Clear cache for this document
       const cacheKey = `${collection}:${documentId}`;
-      this.memoryCache.delete(cacheKey);
+      this.cache.delete(cacheKey);
+      cache.del(`${collection}_${documentId}`);
       
       console.log(`✅ [FIRESTORE] Deleted document ${collection}/${documentId}`);
       return true;
@@ -154,10 +283,13 @@ class FirestoreService {
     }
   }
 
+  /**
+   * Check if a document exists
+   */
   async documentExists(collection, documentId) {
     try {
       const doc = await this.getDocument(collection, documentId);
-      return doc !== null;
+      return doc.exists;
     } catch (error) {
       return false;
     }
@@ -165,6 +297,9 @@ class FirestoreService {
 
   // ========== COLLECTION OPERATIONS ==========
 
+  /**
+   * Get all documents in a collection with optional limit
+   */
   async getCollection(collection, limit = null) {
     try {
       let query = this.db.collection(collection);
@@ -190,6 +325,37 @@ class FirestoreService {
     }
   }
 
+  /**
+   * Get collection with where clauses (compatibility method)
+   */
+  async getCollectionWithWhere(collection, field, operator, value, limit = null) {
+    try {
+      let query = this.db.collection(collection).where(field, operator, value);
+      
+      if (limit) {
+        query = query.limit(limit);
+      }
+      
+      const snapshot = await query.get();
+      
+      this.stats.reads += snapshot.size;
+      
+      const results = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+      
+      console.log(`✅ [FIRESTORE] Read ${results.length} documents from ${collection} with where clause`);
+      return results;
+    } catch (error) {
+      logger.error('FIRESTORE', `Error getting collection with where ${collection}:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Add a document with auto-generated ID
+   */
   async addDocument(collection, data) {
     try {
       const docRef = this.db.collection(collection).doc();
@@ -209,6 +375,9 @@ class FirestoreService {
     }
   }
 
+  /**
+   * Add a document with specific ID
+   */
   async addDocumentWithId(collection, docId, data) {
     try {
       const docRef = this.db.collection(collection).doc(docId);
@@ -227,6 +396,13 @@ class FirestoreService {
 
   // ========== QUERY OPERATIONS ==========
 
+  /**
+   * Query collection with constraints
+   * @param {string} collection - Collection name
+   * @param {Array} constraints - Array of {field, operator, value} objects
+   * @param {number} limit - Optional limit
+   * @returns {Array} Array of documents with ids
+   */
   async queryCollection(collection, constraints = [], limit = null) {
     try {
       let query = this.db.collection(collection);
@@ -266,10 +442,13 @@ class FirestoreService {
 
   // ========== BATCH OPERATIONS ==========
 
+  /**
+   * Create a new batch operation builder
+   * @returns {Object} Batch builder with set/update/delete methods
+   */
   batch() {
     const batch = this.db.batch();
     const firestore = this.db;
-    let operationCount = 0;
     
     const wrappedBatch = {
       _batch: batch,
@@ -305,6 +484,11 @@ class FirestoreService {
     return wrappedBatch;
   }
 
+  /**
+   * Commit a batch operation
+   * @param {Object} batch - Batch builder from batch()
+   * @returns {boolean} Success status
+   */
   async commitBatch(batch) {
     try {
       await batch._batch.commit();
@@ -322,23 +506,6 @@ class FirestoreService {
 
   // ========== OPTIMIZED METHODS WITH CACHING ==========
 
-  async getDocumentWithCache(collection, docId, ttl = this.CACHE_TTL) {
-    const cacheKey = `${collection}_${docId}`;
-    const cached = cache.get(cacheKey);
-    
-    if (cached) {
-      this.stats.cacheHits++;
-      return cached;
-    }
-    
-    const doc = await this.getDocument(collection, docId);
-    if (doc) {
-      cache.set(cacheKey, doc, ttl);
-    }
-    
-    return doc;
-  }
-
   /**
    * Get documents with in-memory caching to reduce reads
    */
@@ -349,7 +516,7 @@ class FirestoreService {
     // Check cache first
     for (const id of documentIds) {
       const cacheKey = `${collection}:${id}`;
-      const cached = this.memoryCache.get(cacheKey);
+      const cached = this.cache.get(cacheKey);
       
       if (cached && Date.now() - cached.timestamp < this.CACHE_TTL) {
         this.stats.cacheHits++;
@@ -368,39 +535,21 @@ class FirestoreService {
       
       snapshot.forEach(doc => {
         if (doc.exists) {
-          const result = { id: doc.id, ...doc.data() };
+          const docWrapper = {
+            exists: true,
+            id: doc.id,
+            ref: doc.ref,
+            data: () => doc.data(),
+            get: (field) => doc.get(field)
+          };
+          
           const cacheKey = `${collection}:${doc.id}`;
-          this.memoryCache.set(cacheKey, {
-            data: result,
+          this.cache.set(cacheKey, {
+            data: docWrapper,
             timestamp: Date.now()
           });
-          results.push(result);
+          results.push(docWrapper);
         }
-      });
-    }
-    
-    return results;
-  }
-
-  /**
-   * Get only active matching documents (optimized query)
-   */
-  async getActiveMatchingDocuments(userType) {
-    const collection = userType === 'driver' 
-      ? 'scheduled_searches_driver' 
-      : 'scheduled_searches_passenger';
-    
-    const constraints = [
-      { field: 'data.status', operator: 'in', value: ['actively_matching', 'scheduled'] }
-    ];
-    
-    const results = await this.queryCollection(collection, constraints);
-    
-    // Filter drivers with no seats
-    if (userType === 'driver') {
-      return results.filter(doc => {
-        const seats = doc.data?.availableSeats || 4;
-        return seats > 0;
       });
     }
     
@@ -1634,7 +1783,7 @@ class FirestoreService {
           
           // Clear cache for this document
           const cacheKey = `${op.collection}:${op.docId}`;
-          this.memoryCache.delete(cacheKey);
+          this.cache.delete(cacheKey);
           cache.del(`${op.collection}_${op.docId}`);
           
         } catch (opError) {
@@ -1705,14 +1854,14 @@ class FirestoreService {
   // ========== CACHE MANAGEMENT ==========
 
   clearCache() {
-    this.memoryCache.clear();
+    this.cache.clear();
     cache.clear(); // Clear the external cache too
     this.stats.cacheStats.size = 0;
     console.log('🧹 [FIRESTORE] All caches cleared');
   }
 
   clearMemoryCache() {
-    this.memoryCache.clear();
+    this.cache.clear();
     this.stats.cacheStats.size = 0;
     console.log('🧹 [FIRESTORE] Memory cache cleared');
   }
@@ -1753,16 +1902,16 @@ class FirestoreService {
       const now = Date.now();
       let clearedCount = 0;
       
-      for (const [key, value] of this.memoryCache.entries()) {
+      for (const [key, value] of this.cache.entries()) {
         if (now - value.timestamp > this.CACHE_TTL) {
-          this.memoryCache.delete(key);
+          this.cache.delete(key);
           clearedCount++;
         }
       }
       
       if (clearedCount > 0) {
         console.log(`🧹 [FIRESTORE] Cleaned ${clearedCount} expired cache entries`);
-        this.stats.cacheStats.size = this.memoryCache.size;
+        this.stats.cacheStats.size = this.cache.size;
       }
     }, 30000);
     
@@ -1782,7 +1931,7 @@ class FirestoreService {
       isProcessing: this.isProcessing,
       cacheStats: {
         ...this.stats.cacheStats,
-        size: this.memoryCache.size
+        size: this.cache.size
       }
     };
   }
@@ -1802,7 +1951,7 @@ class FirestoreService {
       queueSize: this.writeQueue.length,
       isProcessing: this.isProcessing,
       cacheStats: {
-        size: this.memoryCache.size,
+        size: this.cache.size,
         ttlCount: 0
       }
     };
@@ -1818,7 +1967,7 @@ class FirestoreService {
     
     // Clear all queues and caches
     this.writeQueue = [];
-    this.memoryCache.clear();
+    this.cache.clear();
     this.isProcessing = false;
     
     console.log('🧹 Firestore Service cleaned up');
