@@ -1,6 +1,6 @@
 // services/NotificationService.js
-// COMPLETE FIXED VERSION with FCM SIZE OPTIMIZATION
-// Prevents "Android message is too big" errors
+// COMPLETE FIXED VERSION with FCM SIZE OPTIMIZATION and STRING TYPE ENFORCEMENT
+// Prevents "Android message is too big" AND "data must only contain string values" errors
 
 const logger = require('../utils/Logger');
 const crypto = require('crypto');
@@ -694,14 +694,28 @@ class NotificationService {
       // ✅ USE THE OPTIMIZED CONVERTER
       const fcmData = this.convertToDataOnlyFCM(notification);
       
+      // ✅ ENSURE ALL VALUES ARE STRINGS (critical fix)
+      const validatedData = {};
+      for (const [key, value] of Object.entries(fcmData.data)) {
+        if (value === null || value === undefined) {
+          validatedData[key] = '';
+        } else if (typeof value === 'object') {
+          // If it's still an object, stringify it
+          validatedData[key] = JSON.stringify(value);
+        } else {
+          // Convert everything to string
+          validatedData[key] = String(value);
+        }
+      }
+      
       // Add deduplication info to message
-      fcmData.data._messageId = msgId;
-      fcmData.data._sentAt = Date.now().toString();
+      validatedData._messageId = String(msgId);
+      validatedData._sentAt = String(Date.now());
       
       // FCM v1 message - NO notification block
       const message = {
         token: token,
-        data: fcmData.data,
+        data: validatedData, // Use validated data with all strings
         android: {
           priority: 'high',
           ttl: 86400, // 24 hours
@@ -881,11 +895,11 @@ class NotificationService {
     };
   }
 
-  // ========== FIXED: CONVERT TO DATA-ONLY FCM WITH SIZE LIMITING ==========
+  // ========== FIXED: CONVERT TO DATA-ONLY FCM WITH SIZE LIMITING AND STRING ENFORCEMENT ==========
 
   /**
    * Convert notification to data-only FCM format with size optimization
-   * Prevents "Android message is too big" errors
+   * Prevents "Android message is too big" AND "data must only contain string values" errors
    */
   convertToDataOnlyFCM(notification) {
     const type = notification.type || 'unknown';
@@ -895,27 +909,27 @@ class NotificationService {
     
     // START WITH MINIMAL PAYLOAD - only essential fields
     const dataPayload = {
-      type: type,
-      timestamp: Date.now().toString(),
+      type: String(type),
+      timestamp: String(Date.now()),
       click_action: 'FLUTTER_NOTIFICATION_CLICK',
-      screen: this.getNotificationScreen(type),
+      screen: String(this.getNotificationScreen(type)),
     };
     
     // ONLY add essential fields based on notification type
     if (type.includes('scheduled_match_proposed_to_driver')) {
       // For driver match proposals - only what's absolutely needed
-      dataPayload.matchId = data.matchId || '';
-      dataPayload.passengerName = data.passengerName || 'Passenger';
+      dataPayload.matchId = String(data.matchId || '');
+      dataPayload.passengerName = String(data.passengerName || 'Passenger');
       dataPayload.passengerCount = String(data.passengerCount || 1);
       dataPayload.score = String(data.score || '');
       
       // CRITICAL: Stringify large objects instead of flattening
       if (data.passengerDetails) {
-        // Only keep essential passenger fields
+        // Only keep essential passenger fields and ensure all are strings
         const essentialPassenger = {
-          name: data.passengerDetails.name || 'Passenger',
-          phone: data.passengerDetails.phone || '',
-          photoUrl: data.passengerDetails.profilePhoto || ''
+          name: String(data.passengerDetails.name || 'Passenger'),
+          phone: String(data.passengerDetails.phone || ''),
+          photoUrl: String(data.passengerDetails.profilePhoto || '')
         };
         dataPayload.passengerDetails = JSON.stringify(essentialPassenger);
       }
@@ -923,27 +937,27 @@ class NotificationService {
       if (data.tripDetails) {
         // Only keep essential trip fields
         const essentialTrip = {
-          pickup: data.tripDetails.pickupName || '',
-          destination: data.tripDetails.destinationName || '',
-          time: data.tripDetails.scheduledTime || ''
+          pickup: String(data.tripDetails.pickupName || ''),
+          destination: String(data.tripDetails.destinationName || ''),
+          time: String(data.tripDetails.scheduledTime || '')
         };
         dataPayload.tripDetails = JSON.stringify(essentialTrip);
       }
     }
     else if (type.includes('scheduled_match_confirmed')) {
       // For match confirmations
-      dataPayload.matchId = data.matchId || '';
-      dataPayload.confirmedBy = data.confirmedBy || '';
+      dataPayload.matchId = String(data.matchId || '');
+      dataPayload.confirmedBy = String(data.confirmedBy || '');
       
       if (data.driverDetails) {
         const essentialDriver = {
-          name: data.driverDetails.name || 'Driver',
-          phone: data.driverDetails.phone || '',
-          photoUrl: data.driverDetails.photoUrl || '',
+          name: String(data.driverDetails.name || 'Driver'),
+          phone: String(data.driverDetails.phone || ''),
+          photoUrl: String(data.driverDetails.photoUrl || ''),
           vehicleInfo: data.driverDetails.vehicleInfo ? {
-            type: data.driverDetails.vehicleInfo.type || 'Car',
-            plate: data.driverDetails.vehicleInfo.plate || '',
-            color: data.driverDetails.vehicleInfo.color || ''
+            type: String(data.driverDetails.vehicleInfo.type || 'Car'),
+            plate: String(data.driverDetails.vehicleInfo.plate || ''),
+            color: String(data.driverDetails.vehicleInfo.color || '')
           } : {}
         };
         dataPayload.driverDetails = JSON.stringify(essentialDriver);
@@ -951,8 +965,8 @@ class NotificationService {
       
       if (data.passengerDetails) {
         const essentialPassenger = {
-          name: data.passengerDetails.name || 'Passenger',
-          phone: data.passengerDetails.phone || ''
+          name: String(data.passengerDetails.name || 'Passenger'),
+          phone: String(data.passengerDetails.phone || '')
         };
         dataPayload.passengerDetails = JSON.stringify(essentialPassenger);
       }
@@ -960,13 +974,13 @@ class NotificationService {
     else if (type.includes('DRIVER_CANCELLED_ALL') || type.includes('DRIVER_CANCELLED_YOUR_RIDE') || 
              type.includes('PASSENGER_CANCELLED_RIDE') || type.includes('PASSENGER_CANCELLATION_CONFIRMED')) {
       // For cancellations - minimal data
-      dataPayload.matchId = data.matchId || '';
-      dataPayload.reason = data.reason || '';
-      dataPayload.message = data.message || '';
-      dataPayload.cancelledBy = data.cancelledBy || '';
+      dataPayload.matchId = String(data.matchId || '');
+      dataPayload.reason = String(data.reason || '');
+      dataPayload.message = String(data.message || '');
+      dataPayload.cancelledBy = String(data.cancelledBy || '');
       
-      if (data.driverName) dataPayload.driverName = data.driverName;
-      if (data.passengerName) dataPayload.passengerName = data.passengerName;
+      if (data.driverName) dataPayload.driverName = String(data.driverName);
+      if (data.passengerName) dataPayload.passengerName = String(data.passengerName);
     }
     else {
       // For other notification types - just add essential primitive fields
@@ -977,6 +991,16 @@ class NotificationService {
         if (typeof value !== 'object' && String(value).length < 100) {
           dataPayload[key] = String(value);
         }
+      }
+    }
+    
+    // ✅ FINAL PASS: Ensure ALL values are strings
+    for (const [key, value] of Object.entries(dataPayload)) {
+      if (value === null || value === undefined) {
+        dataPayload[key] = '';
+      } else if (typeof value !== 'string') {
+        // Convert anything that's still not a string
+        dataPayload[key] = JSON.stringify(value);
       }
     }
     
@@ -992,17 +1016,17 @@ class NotificationService {
       delete dataPayload.driverDetails;
       delete dataPayload.vehicleInfo;
       
-      // Keep only absolute essentials
+      // Keep only absolute essentials - all converted to strings
       const minimalPayload = {
-        type: dataPayload.type,
-        matchId: dataPayload.matchId || '',
-        timestamp: dataPayload.timestamp
+        type: String(dataPayload.type || ''),
+        matchId: String(dataPayload.matchId || ''),
+        timestamp: String(dataPayload.timestamp || Date.now())
       };
       
       // Add back essential fields if they exist
-      if (dataPayload.passengerName) minimalPayload.passengerName = dataPayload.passengerName;
-      if (dataPayload.driverName) minimalPayload.driverName = dataPayload.driverName;
-      if (dataPayload.reason) minimalPayload.reason = dataPayload.reason;
+      if (dataPayload.passengerName) minimalPayload.passengerName = String(dataPayload.passengerName);
+      if (dataPayload.driverName) minimalPayload.driverName = String(dataPayload.driverName);
+      if (dataPayload.reason) minimalPayload.reason = String(dataPayload.reason);
       
       const finalSize = JSON.stringify(minimalPayload).length;
       console.log(`✅ [FCM] Reduced to ${finalSize} bytes`);

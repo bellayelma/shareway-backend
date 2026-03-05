@@ -1,6 +1,7 @@
-// app.js - COMPLETE VERSION WITH ALL THREE SERVICES PROPERLY INITIALIZED TOGETHER
+// app.js - COMPLETE VERSION WITH RIDE HISTORY AND CLEANUP SERVICES
 // MODULAR FCM ROUTES, GROUP RIDE ENDPOINTS, DRIVER CANCELLATION ENDPOINTS,
-// PASSENGER CANCELLATION ENDPOINTS, AND WEBSOCKET FCM TOKEN REGISTRATION
+// PASSENGER CANCELLATION ENDPOINTS, WEBSOCKET FCM TOKEN REGISTRATION,
+// RIDE HISTORY, AND AUTOMATIC CLEANUP
 
 const express = require('express');
 const cors = require('cors');
@@ -29,7 +30,7 @@ try {
 }
 
 const enableLogModules = () => {
-  ['INFO', 'SCHEDULED', 'STARTUP', 'SERVICE', 'CONNECTION', 'ENDPOINT', 'ERRORS', 'DEBUG', 'FCM', 'NOTIFICATIONS']
+  ['INFO', 'SCHEDULED', 'STARTUP', 'SERVICE', 'CONNECTION', 'ENDPOINT', 'ERRORS', 'DEBUG', 'FCM', 'NOTIFICATIONS', 'RIDES', 'CLEANUP']
     .forEach(module => logger.enableModule(module, true));
 };
 enableLogModules();
@@ -40,6 +41,8 @@ let scheduledWebsocketServer = null;
 let firestoreService = null;
 let scheduledService = null;
 let notificationService = null;
+let rideHistoryService = null;    // NEW: Ride History Service
+let cleanupService = null;        // NEW: Cleanup Service
 
 // ==================== UTILITY FUNCTIONS ====================
 
@@ -73,6 +76,7 @@ class BaseWebSocketServer {
     this.firestoreService = services.firestoreService;
     this.scheduledService = services.scheduledService;
     this.notificationService = services.notificationService;
+    this.rideHistoryService = services.rideHistoryService; // NEW
     this.db = services.firestoreService?.db;
     this.admin = services.firestoreService?.admin;
     this.options = options;
@@ -198,8 +202,13 @@ class BaseWebSocketServer {
       'UPDATE_USER_PROFILE': () => this.handleProfileRequest(connectionKey, message, 'update'),
       
       // ========== FCM TOKEN REGISTRATION ==========
-      'REGISTER_FCM_TOKEN': () => this.handleFCMTokenRegistration(connectionKey, message, userInfo)
-      // ============================================
+      'REGISTER_FCM_TOKEN': () => this.handleFCMTokenRegistration(connectionKey, message, userInfo),
+      
+      // ========== RIDE HISTORY WEBSOCKET HANDLERS ==========
+      'GET_RIDE_HISTORY': () => this.handleGetRideHistory(connectionKey, message, userInfo),
+      'GET_RIDE_DETAILS': () => this.handleGetRideDetails(connectionKey, message, userInfo),
+      'GET_RIDE_STATS': () => this.handleGetRideStats(connectionKey, message, userInfo),
+      'ADD_RIDE_FEEDBACK': () => this.handleAddRideFeedback(connectionKey, message, userInfo)
     };
     
     // ==================== ADD SCHEDULED MATCH HANDLERS TO BOTH SERVERS ====================
@@ -228,6 +237,168 @@ class BaseWebSocketServer {
       this.sendToUser(connectionKey, {
         type: 'MESSAGE_RECEIVED',
         data: { originalType: message.type, timestamp: Date.now() }
+      });
+    }
+  }
+  
+  // ==================== RIDE HISTORY WEBSOCKET HANDLERS ====================
+  
+  async handleGetRideHistory(connectionKey, message, userInfo) {
+    console.log(`📜 [WEBSOCKET] Getting ride history for ${connectionKey}`);
+    
+    try {
+      if (!this.rideHistoryService) {
+        console.log(`❌ [WEBSOCKET] RideHistoryService not available`);
+        this.sendToUser(connectionKey, {
+          type: 'ERROR',
+          data: { message: 'Ride history service unavailable' }
+        });
+        return;
+      }
+      
+      const data = message.data || message;
+      const userType = data.userType || userInfo.role;
+      const options = data.options || {};
+      
+      console.log(`📜 User type: ${userType}, Options:`, options);
+      
+      let result;
+      if (userType === 'driver') {
+        result = await this.rideHistoryService.getDriverRides(connectionKey, options);
+      } else {
+        result = await this.rideHistoryService.getPassengerRides(connectionKey, options);
+      }
+      
+      this.sendToUser(connectionKey, {
+        type: 'RIDE_HISTORY_RESPONSE',
+        data: result
+      });
+      
+    } catch (error) {
+      console.error(`❌ [WEBSOCKET] Ride history error:`, error);
+      this.sendToUser(connectionKey, {
+        type: 'ERROR',
+        data: { message: 'Failed to get ride history', error: error.message }
+      });
+    }
+  }
+  
+  async handleGetRideDetails(connectionKey, message, userInfo) {
+    console.log(`🔍 [WEBSOCKET] Getting ride details`);
+    
+    try {
+      if (!this.rideHistoryService) {
+        this.sendToUser(connectionKey, {
+          type: 'ERROR',
+          data: { message: 'Ride history service unavailable' }
+        });
+        return;
+      }
+      
+      const data = message.data || message;
+      const { rideId } = data;
+      
+      if (!rideId) {
+        this.sendToUser(connectionKey, {
+          type: 'ERROR',
+          data: { message: 'rideId required' }
+        });
+        return;
+      }
+      
+      const ride = await this.rideHistoryService.getRideDetails(rideId);
+      
+      this.sendToUser(connectionKey, {
+        type: 'RIDE_DETAILS_RESPONSE',
+        data: {
+          success: true,
+          ride,
+          rideId
+        }
+      });
+      
+    } catch (error) {
+      console.error(`❌ [WEBSOCKET] Ride details error:`, error);
+      this.sendToUser(connectionKey, {
+        type: 'ERROR',
+        data: { message: 'Failed to get ride details', error: error.message }
+      });
+    }
+  }
+  
+  async handleGetRideStats(connectionKey, message, userInfo) {
+    console.log(`📊 [WEBSOCKET] Getting ride stats for ${connectionKey}`);
+    
+    try {
+      if (!this.rideHistoryService) {
+        this.sendToUser(connectionKey, {
+          type: 'ERROR',
+          data: { message: 'Ride history service unavailable' }
+        });
+        return;
+      }
+      
+      const data = message.data || message;
+      const userType = data.userType || userInfo.role;
+      
+      const stats = await this.rideHistoryService.getUserRideStats(connectionKey, userType);
+      
+      this.sendToUser(connectionKey, {
+        type: 'RIDE_STATS_RESPONSE',
+        data: stats
+      });
+      
+    } catch (error) {
+      console.error(`❌ [WEBSOCKET] Ride stats error:`, error);
+      this.sendToUser(connectionKey, {
+        type: 'ERROR',
+        data: { message: 'Failed to get ride stats', error: error.message }
+      });
+    }
+  }
+  
+  async handleAddRideFeedback(connectionKey, message, userInfo) {
+    console.log(`⭐ [WEBSOCKET] Adding ride feedback`);
+    
+    try {
+      if (!this.rideHistoryService) {
+        this.sendToUser(connectionKey, {
+          type: 'ERROR',
+          data: { message: 'Ride history service unavailable' }
+        });
+        return;
+      }
+      
+      const data = message.data || message;
+      const { rideId, rating, review } = data;
+      const userType = data.userType || userInfo.role;
+      
+      if (!rideId || !rating) {
+        this.sendToUser(connectionKey, {
+          type: 'ERROR',
+          data: { message: 'rideId and rating required' }
+        });
+        return;
+      }
+      
+      const result = await this.rideHistoryService.addRideFeedback(
+        rideId,
+        connectionKey,
+        userType,
+        rating,
+        review
+      );
+      
+      this.sendToUser(connectionKey, {
+        type: 'FEEDBACK_ADDED_RESPONSE',
+        data: result
+      });
+      
+    } catch (error) {
+      console.error(`❌ [WEBSOCKET] Add feedback error:`, error);
+      this.sendToUser(connectionKey, {
+        type: 'ERROR',
+        data: { message: 'Failed to add feedback', error: error.message }
       });
     }
   }
@@ -854,6 +1025,11 @@ class BaseWebSocketServer {
     this.notificationService = service;
     logger.info(this.options.logPrefix, 'Linked with NotificationService');
   }
+  
+  setupRideHistoryIntegration(service) {
+    this.rideHistoryService = service;
+    logger.info(this.options.logPrefix, 'Linked with RideHistoryService');
+  }
 }
 
 // ==================== WEB SOCKET SERVERS ====================
@@ -908,8 +1084,10 @@ const server = http.createServer(app);
  * 1. FirestoreService (no dependencies)
  * 2. NotificationService (depends on FirestoreService)
  * 3. WebSocket Servers (depends on FirestoreService)
- * 4. ScheduledService (depends on all above)
- * 5. Link everything together
+ * 4. RideHistoryService (depends on FirestoreService)
+ * 5. ScheduledService (depends on all above)
+ * 6. CleanupService (depends on FirestoreService and RideHistoryService)
+ * 7. Link everything together
  */
 async function initializeAllServices() {
   logger.info('STARTUP', '🚀 Initializing Backend - All Services Together');
@@ -976,7 +1154,7 @@ async function initializeAllServices() {
     firestoreService.startBatchProcessor();
     logger.info('SERVICE', '✅ FirestoreService created and started');
     
-    // ========== STEP 3: Create NotificationService (depends on FirestoreService) ==========
+    // ========== STEP 3: Create NotificationService ==========
     logger.info('SERVICE', 'Creating NotificationService...');
     
     let NotificationServiceClass;
@@ -1062,7 +1240,7 @@ async function initializeAllServices() {
     
     const services = {
       firestoreService,
-      notificationService, // Pass notification service to websockets
+      notificationService,
       admin
     };
     
@@ -1090,7 +1268,81 @@ async function initializeAllServices() {
       logger.info('CONNECTION', '✅ Updated NotificationService with WebSocket reference');
     }
     
-    // ========== STEP 5: Create ScheduledService (depends on all above) ==========
+    // ========== STEP 5: Create RideHistoryService ==========
+    logger.info('SERVICE', 'Creating RideHistoryService...');
+    
+    let RideHistoryServiceClass;
+    let rideHistoryServiceLoaded = false;
+    
+    const rideHistoryPaths = [
+      './services/RideHistoryService',
+      './services/rideHistoryService',
+      '../services/RideHistoryService',
+      path.join(__dirname, 'services', 'RideHistoryService')
+    ];
+    
+    for (const servicePath of rideHistoryPaths) {
+      try {
+        logger.debug('DEBUG', `Trying to load RideHistoryService from: ${servicePath}`);
+        delete require.cache[require.resolve(servicePath)];
+        RideHistoryServiceClass = require(servicePath);
+        logger.info('SERVICE', `✅ RideHistoryService loaded from: ${servicePath}`);
+        rideHistoryServiceLoaded = true;
+        break;
+      } catch (error) {
+        logger.debug('DEBUG', `Failed to load from ${servicePath}: ${error.message}`);
+      }
+    }
+    
+    if (!rideHistoryServiceLoaded) {
+      logger.warn('SERVICE', 'RideHistoryService not found, creating minimal version');
+      RideHistoryServiceClass = class MinimalRideHistoryService {
+        constructor(firestoreService, admin) {
+          this.firestoreService = firestoreService;
+          this.admin = admin;
+          logger.info('MINIMAL_RIDE', 'Minimal RideHistoryService created');
+        }
+        
+        async createRideFromMatch(matchId, matchData, driverData, passengerData) {
+          logger.info('MINIMAL_RIDE', 'Creating ride from match:', matchId);
+          return { rideId: `RIDE_${Date.now()}`, success: true };
+        }
+        
+        async getPassengerRides(phoneNumber, options) {
+          return { success: true, rides: [], pagination: { total: 0, returned: 0, hasMore: false } };
+        }
+        
+        async getDriverRides(phoneNumber, options) {
+          return { success: true, rides: [], pagination: { total: 0, returned: 0, hasMore: false } };
+        }
+        
+        async getRideDetails(rideId) {
+          return null;
+        }
+        
+        async getUserRideStats(phoneNumber, userType) {
+          return { success: true, stats: {} };
+        }
+        
+        async addRideFeedback(rideId, userPhone, userType, rating, review) {
+          return { success: true };
+        }
+      };
+    }
+    
+    // Create RideHistoryService instance
+    rideHistoryService = new RideHistoryServiceClass(firestoreService, admin);
+    logger.info('SERVICE', '✅ RideHistoryService created');
+    
+    // Update websocket servers with ride history service
+    if (legacyWebsocketServer) {
+      legacyWebsocketServer.setupRideHistoryIntegration(rideHistoryService);
+    }
+    if (scheduledWebsocketServer) {
+      scheduledWebsocketServer.setupRideHistoryIntegration(rideHistoryService);
+    }
+    
+    // ========== STEP 6: Create ScheduledService ==========
     logger.info('SERVICE', 'Creating ScheduledService...');
     
     let ScheduledServiceClass;
@@ -1233,13 +1485,78 @@ async function initializeAllServices() {
       }
     }
     
-    // ========== STEP 6: Start ScheduledService ==========
+    // ========== STEP 7: Inject RideHistoryService into ScheduledService ==========
+    if (scheduledService && rideHistoryService) {
+      scheduledService.rideHistory = rideHistoryService;
+      logger.info('CONNECTION', '✅ Injected RideHistoryService into ScheduledService');
+    }
+    
+    // ========== STEP 8: Create CleanupService ==========
+    logger.info('SERVICE', 'Creating CleanupService...');
+    
+    let CleanupServiceClass;
+    let cleanupServiceLoaded = false;
+    
+    const cleanupPaths = [
+      './services/CleanupService',
+      './services/cleanupService',
+      '../services/CleanupService',
+      path.join(__dirname, 'services', 'CleanupService')
+    ];
+    
+    for (const servicePath of cleanupPaths) {
+      try {
+        logger.debug('DEBUG', `Trying to load CleanupService from: ${servicePath}`);
+        delete require.cache[require.resolve(servicePath)];
+        CleanupServiceClass = require(servicePath);
+        logger.info('SERVICE', `✅ CleanupService loaded from: ${servicePath}`);
+        cleanupServiceLoaded = true;
+        break;
+      } catch (error) {
+        logger.debug('DEBUG', `Failed to load from ${servicePath}: ${error.message}`);
+      }
+    }
+    
+    if (!cleanupServiceLoaded) {
+      logger.warn('SERVICE', 'CleanupService not found, creating minimal version');
+      CleanupServiceClass = class MinimalCleanupService {
+        constructor(firestoreService, admin) {
+          this.firestoreService = firestoreService;
+          this.admin = admin;
+          logger.info('MINIMAL_CLEANUP', 'Minimal CleanupService created');
+        }
+        
+        start() {
+          logger.info('MINIMAL_CLEANUP', 'Cleanup service started (minimal)');
+        }
+        
+        stop() {
+          logger.info('MINIMAL_CLEANUP', 'Cleanup service stopped');
+        }
+        
+        async performCleanup() {
+          return { tempMatches: 0, completedRides: 0, cancelledRides: 0, oldSearches: 0 };
+        }
+      };
+    }
+    
+    // Create CleanupService instance
+    cleanupService = new CleanupServiceClass(firestoreService, admin);
+    logger.info('SERVICE', '✅ CleanupService created');
+    
+    // ========== STEP 9: Start ScheduledService ==========
     if (scheduledService && typeof scheduledService.start === 'function') {
       await scheduledService.start();
       logger.info('SERVICE', '✅ ScheduledService started');
     }
     
-    // ========== STEP 7: Link everything together ==========
+    // ========== STEP 10: Start CleanupService ==========
+    if (cleanupService && typeof cleanupService.start === 'function') {
+      cleanupService.start();
+      logger.info('SERVICE', '✅ CleanupService started (runs daily at 3 AM)');
+    }
+    
+    // ========== STEP 11: Link everything together ==========
     if (scheduledService) {
       // Link websocket servers with scheduled service
       if (legacyWebsocketServer) {
@@ -1260,13 +1577,15 @@ async function initializeAllServices() {
       }
     }
     
-    // ========== STEP 8: Setup WebSocket upgrade handler ==========
+    // ========== STEP 12: Setup WebSocket upgrade handler ==========
     setupUnifiedWebSocketUpgradeHandler();
     
-    // ========== STEP 9: Test all services ==========
+    // ========== STEP 13: Test all services ==========
     await testAllServices();
     
     logger.info('STARTUP', '🎉 All services initialized and linked successfully!');
+    logger.info('STARTUP', '📊 Ride History Service: Active');
+    logger.info('STARTUP', '🧹 Cleanup Service: Active (runs daily at 3 AM)');
     return true;
     
   } catch (error) {
@@ -1311,7 +1630,9 @@ async function testAllServices() {
     { name: 'Notification Service', test: () => !!notificationService },
     { name: 'Legacy WebSocket', test: () => !!legacyWebsocketServer },
     { name: 'Scheduled WebSocket', test: () => !!scheduledWebsocketServer },
-    { name: 'Scheduled Service', test: () => !!scheduledService }
+    { name: 'Scheduled Service', test: () => !!scheduledService },
+    { name: 'Ride History Service', test: () => !!rideHistoryService },
+    { name: 'Cleanup Service', test: () => !!cleanupService }
   ];
   
   tests.forEach(({ name, test }) => {
@@ -1358,6 +1679,36 @@ async function testAllServices() {
       logger.debug('TEST', `${exists ? '✅' : '❌'} ScheduledService.${method}()`);
     });
   }
+  
+  if (rideHistoryService) {
+    const methodTests = [
+      'createRideFromMatch',
+      'getPassengerRides',
+      'getDriverRides',
+      'getRideDetails',
+      'getUserRideStats',
+      'addRideFeedback'
+    ];
+    
+    methodTests.forEach(method => {
+      const exists = typeof rideHistoryService[method] === 'function';
+      logger.debug('TEST', `${exists ? '✅' : '❌'} RideHistoryService.${method}()`);
+    });
+  }
+  
+  if (cleanupService) {
+    const methodTests = [
+      'start',
+      'stop',
+      'performCleanup',
+      'cleanupUserData'
+    ];
+    
+    methodTests.forEach(method => {
+      const exists = typeof cleanupService[method] === 'function';
+      logger.debug('TEST', `${exists ? '✅' : '❌'} CleanupService.${method}()`);
+    });
+  }
 }
 
 // ==================== IMPORT ROUTES ====================
@@ -1379,11 +1730,47 @@ try {
   });
 }
 
+// Import Ride History Routes
+let rideHistoryRoutes;
+try {
+  const rideHistoryRoutesModule = require('./routes/rideHistoryRoutes');
+  rideHistoryRoutes = rideHistoryRoutesModule(rideHistoryService);
+  logger.info('ROUTES', '✅ Ride History routes loaded');
+} catch (error) {
+  logger.error('ROUTES', `Failed to load Ride History routes: ${error.message}`);
+  rideHistoryRoutes = express.Router();
+  rideHistoryRoutes.get('/passenger/:phone', (req, res) => {
+    res.json({ success: true, rides: [], message: 'Ride history endpoint (fallback)' });
+  });
+}
+
+// Import Cleanup Routes
+let cleanupRoutes;
+try {
+  const cleanupRoutesModule = require('./routes/cleanupRoutes');
+  cleanupRoutes = cleanupRoutesModule(cleanupService);
+  logger.info('ROUTES', '✅ Cleanup routes loaded');
+} catch (error) {
+  logger.error('ROUTES', `Failed to load Cleanup routes: ${error.message}`);
+  cleanupRoutes = express.Router();
+  cleanupRoutes.post('/trigger', (req, res) => {
+    res.json({ success: true, message: 'Cleanup trigger endpoint (fallback)' });
+  });
+}
+
 // ==================== MOUNT ROUTES ====================
 
 // Mount FCM routes
 app.use('/api/fcm', fcmRoutes);
 logger.info('ROUTES', '✅ FCM routes mounted at /api/fcm');
+
+// Mount Ride History routes
+app.use('/api/rides', rideHistoryRoutes);
+logger.info('ROUTES', '✅ Ride History routes mounted at /api/rides');
+
+// Mount Cleanup routes (admin only)
+app.use('/api/admin/cleanup', cleanupRoutes);
+logger.info('ROUTES', '✅ Cleanup routes mounted at /api/admin/cleanup');
 
 // ==================== HTTP ROUTES ====================
 
@@ -1417,6 +1804,8 @@ app.get('/api/health', (req, res) => {
       firestore: !!firestoreService,
       notificationService: !!notificationService,
       scheduledService: !!scheduledService,
+      rideHistoryService: !!rideHistoryService,
+      cleanupService: !!cleanupService,
       legacyWebsocket: !!legacyWebsocketServer,
       scheduledWebsocket: !!scheduledWebsocketServer
     },
@@ -1430,6 +1819,8 @@ app.get('/api/health', (req, res) => {
       triggerMatching: 'POST /api/test/trigger-matching',
       serviceDebug: '/api/test/service-debug',
       fcm: '/api/fcm/*',
+      rides: '/api/rides/*',
+      admin: '/api/admin/*',
       
       // GROUP RIDE ENDPOINTS
       driverPassengers: 'GET /api/driver/passengers/:phone',
@@ -2278,6 +2669,14 @@ app.get('/api/test/service-debug', (req, res) => {
         type: scheduledService ? scheduledService.constructor.name : 'none',
         started: scheduledService?._started || false
       },
+      rideHistoryService: {
+        exists: !!rideHistoryService,
+        type: rideHistoryService ? rideHistoryService.constructor.name : 'none'
+      },
+      cleanupService: {
+        exists: !!cleanupService,
+        type: cleanupService ? cleanupService.constructor.name : 'none'
+      },
       websocketServers: {
         legacy: {
           exists: !!legacyWebsocketServer,
@@ -2295,7 +2694,11 @@ app.get('/api/test/service-debug', (req, res) => {
       notification: notificationService ? Object.getOwnPropertyNames(Object.getPrototypeOf(notificationService))
         .filter(name => typeof notificationService[name] === 'function' && name !== 'constructor') : [],
       scheduled: scheduledService ? Object.getOwnPropertyNames(Object.getPrototypeOf(scheduledService))
-        .filter(name => typeof scheduledService[name] === 'function' && name !== 'constructor') : []
+        .filter(name => typeof scheduledService[name] === 'function' && name !== 'constructor') : [],
+      rideHistory: rideHistoryService ? Object.getOwnPropertyNames(Object.getPrototypeOf(rideHistoryService))
+        .filter(name => typeof rideHistoryService[name] === 'function' && name !== 'constructor') : [],
+      cleanup: cleanupService ? Object.getOwnPropertyNames(Object.getPrototypeOf(cleanupService))
+        .filter(name => typeof cleanupService[name] === 'function' && name !== 'constructor') : []
     },
     timestamp: new Date().toISOString()
   };
@@ -2316,6 +2719,8 @@ app.get('/api/test', (req, res) => {
       login: 'POST /api/auth/login',
       register: 'POST /api/auth/register',
       fcm: '/api/fcm/*',
+      rides: '/api/rides/*',
+      admin: '/api/admin/*',
       
       // GROUP RIDE ENDPOINTS
       driverPassengers: 'GET /api/driver/passengers/:phone',
@@ -2367,6 +2772,8 @@ if (require.main === module) {
       logger.info('STARTUP', `🔌 Scheduled WS: ws://localhost:${PORT}/ws-scheduled`);
       logger.info('STARTUP', `🌐 Flutter Web: http://localhost:8082`);
       logger.info('STARTUP', `📱 FCM Routes: /api/fcm/*`);
+      logger.info('STARTUP', `📊 Ride History Routes: /api/rides/*`);
+      logger.info('STARTUP', `🧹 Admin Routes: /api/admin/*`);
       logger.info('STARTUP', '✅ All services initialized and linked');
       
       // Show service status
@@ -2374,6 +2781,8 @@ if (require.main === module) {
       logger.info('STATUS', `FirestoreService: ${firestoreService?.constructor?.name || 'Not found'}`);
       logger.info('STATUS', `NotificationService: ${notificationService?.constructor?.name || 'Not found'}`);
       logger.info('STATUS', `ScheduledService: ${scheduledService?.constructor?.name || 'Not found'}`);
+      logger.info('STATUS', `RideHistoryService: ${rideHistoryService?.constructor?.name || 'Not found'}`);
+      logger.info('STATUS', `CleanupService: ${cleanupService?.constructor?.name || 'Not found'}`);
       logger.info('STATUS', `Legacy WebSocket: ${legacyWebsocketServer?.constructor?.name || 'Not found'}`);
       logger.info('STATUS', `Scheduled WebSocket: ${scheduledWebsocketServer?.constructor?.name || 'Not found'}`);
       
@@ -2386,6 +2795,8 @@ if (require.main === module) {
       logger.info('STATUS', `Send notification: ${!!notificationService?.sendNotification}`);
       logger.info('STATUS', `Driver cancel all: ${!!scheduledService?.handleDriverCancelAll}`);
       logger.info('STATUS', `Passenger cancel: ${!!scheduledService?.handlePassengerCancelSchedule}`);
+      logger.info('STATUS', `Ride history: ${!!rideHistoryService?.getPassengerRides}`);
+      logger.info('STATUS', `Cleanup service: ${!!cleanupService?.performCleanup}`);
     });
   }).catch(error => {
     logger.error('STARTUP', `❌ Failed to initialize: ${error.message}`);
@@ -2399,6 +2810,15 @@ process.on('SIGINT', async () => {
   logger.info('SHUTDOWN', 'Shutting down...');
   
   // Stop services in reverse order
+  if (cleanupService && typeof cleanupService.stop === 'function') {
+    try {
+      cleanupService.stop();
+      logger.info('SHUTDOWN', '✅ CleanupService stopped');
+    } catch (error) {
+      logger.error('SHUTDOWN', `CleanupService stop error: ${error.message}`);
+    }
+  }
+  
   if (scheduledService && typeof scheduledService.stop === 'function') {
     try {
       await scheduledService.stop();
@@ -2438,5 +2858,7 @@ module.exports = {
   scheduledWebsocketServer,
   scheduledService,
   notificationService,
+  rideHistoryService,
+  cleanupService,
   firestoreService
 };

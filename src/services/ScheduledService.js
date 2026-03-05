@@ -1,21 +1,25 @@
 // services/ScheduledService.js
 // ULTRA OPTIMIZED - Matches all users, minimal CPU/RAM, minimal Firestore reads/writes
 // WITH REAL-TIME TRIGGER MATCHING AND STATUS DEBUGGING
+// WITH RIDE HISTORY INTEGRATION
+// WITH EXPIRED PENDING MATCHES CLEANUP
 
 const logger = require('../utils/Logger');
 
 class ScheduledService {
-  constructor(firestoreService, websocketServer, admin, notificationService) {
+  constructor(firestoreService, websocketServer, admin, notificationService, rideHistoryService) {
     console.log('🚀 [SCHEDULED] Initializing ULTRA OPTIMIZED version with REAL-TIME triggers and STATUS FIXES...');
     
     this.firestoreService = firestoreService;
     this.websocketServer = websocketServer;
     this.admin = admin;
     this.notification = notificationService;
+    this.rideHistory = rideHistoryService; // New: Ride history service
     
     // OPTIMIZATION: Extremely conservative settings for free tier
     this.MATCHING_INTERVAL = 120000; // 120 seconds (2 minutes) - reduces reads by 75%
     this.MATCH_EXPIRY = 30 * 60 * 1000; // 30 minutes - longer expiry reduces rewrites
+    this.PENDING_EXPIRY = 15 * 60 * 1000; // 15 minutes - timeout for pending approvals
     this.MAX_MATCHES_PER_CYCLE = 5; // Still process up to 5 matches
     
     // THRESHOLDS - Set very high to match everyone
@@ -49,7 +53,7 @@ class ScheduledService {
 
   async start() {
     console.log('🚀 [SCHEDULED] Starting ULTRA OPTIMIZED mode - Will match ALL users regardless of location/time');
-    console.log('📊 Settings: Interval=120s, Cache TTL=15min, Match expiry=30min');
+    console.log('📊 Settings: Interval=120s, Cache TTL=15min, Match expiry=30min, Pending expiry=15min');
     
     // Test connection once
     await this.testConnection();
@@ -61,6 +65,9 @@ class ScheduledService {
       // Run matching every cycle (but cycles are 2 minutes apart)
       logger.info('SCHEDULED_SERVICE', `🔄 Cycle #${this.cycleCount}`);
       const startTime = Date.now();
+      
+      // ✅ FIRST: Clean up expired pending matches
+      await this.checkExpiredPendingMatches();
       
       await this.performMatching();
       await this.cleanupExpiredMatches();
@@ -178,6 +185,9 @@ class ScheduledService {
     // Use setTimeout to not block the current operation
     setTimeout(async () => {
       try {
+        // ✅ First check for expired matches
+        await this.checkExpiredPendingMatches();
+        
         await this.performMatching();
         await this.cleanupExpiredMatches();
         console.log(`✅ [TRIGGER] Immediate matching completed for: ${triggeredBy}`);
@@ -185,6 +195,107 @@ class ScheduledService {
         console.error(`❌ [TRIGGER] Error in immediate matching:`, error.message);
       }
     }, 500); // Small delay to ensure the new user data is saved
+  }
+
+  // ========== CHECK EXPIRED PENDING MATCHES ==========
+  
+  /**
+   * Check for expired pending matches and reset them
+   * This prevents users from getting stuck in pending states
+   */
+  async checkExpiredPendingMatches() {
+    try {
+      const now = new Date().toISOString();
+      const expiryTime = new Date(Date.now() - this.PENDING_EXPIRY).toISOString(); // 15 minutes ago
+      
+      console.log('⏰ Checking for expired pending matches...');
+      
+      // Find passengers stuck in pending_driver_approval for too long
+      const pendingPassengers = await this.firestoreService.queryCollection(
+        'scheduled_searches_passenger',
+        [
+          { field: 'status', operator: '==', value: 'pending_driver_approval' },
+          { field: 'updatedAt', operator: '<', value: expiryTime }
+        ],
+        20
+      );
+      
+      if (pendingPassengers.length > 0) {
+        console.log(`⏰ Found ${pendingPassengers.length} expired pending passengers`);
+        
+        for (const passenger of pendingPassengers) {
+          console.log(`⏰ Resetting expired pending passenger: ${passenger.id}`);
+          
+          // Reset passenger to actively_matching
+          await this.firestoreService.updateDocument('scheduled_searches_passenger', passenger.id, {
+            status: 'actively_matching',
+            matchId: null,
+            matchedWith: null,
+            matchStatus: null,
+            updatedAt: new Date().toISOString()
+          });
+          
+          // Invalidate cache
+          this.userCache.delete(`passenger_${passenger.id}`);
+        }
+      }
+      
+      // Also check for expired matches and reset both parties
+      const expiredMatches = await this.firestoreService.queryCollection(
+        'scheduled_matches',
+        [
+          { field: 'status', operator: '==', value: 'awaiting_driver_approval' },
+          { field: 'proposedAt', operator: '<', value: expiryTime }
+        ],
+        20
+      );
+      
+      if (expiredMatches.length > 0) {
+        console.log(`⏰ Found ${expiredMatches.length} expired matches`);
+        
+        for (const match of expiredMatches) {
+          console.log(`⏰ Expiring match: ${match.id}`);
+          
+          // Update match status
+          await this.firestoreService.updateDocument('scheduled_matches', match.id, {
+            status: 'expired',
+            expiredAt: new Date().toISOString()
+          });
+          
+          // Reset passenger
+          if (match.passengerPhone) {
+            const sanitizedPassengerPhone = this.sanitizePhoneNumber(match.passengerPhone);
+            await this.firestoreService.updateDocument('scheduled_searches_passenger', sanitizedPassengerPhone, {
+              status: 'actively_matching',
+              matchId: null,
+              matchedWith: null,
+              matchStatus: null,
+              updatedAt: new Date().toISOString()
+            });
+            
+            // Invalidate cache
+            this.userCache.delete(`passenger_${sanitizedPassengerPhone}`);
+          }
+          
+          // Reset driver (remove pending match)
+          if (match.driverPhone) {
+            const sanitizedDriverPhone = this.sanitizePhoneNumber(match.driverPhone);
+            await this.firestoreService.updateDocument('scheduled_searches_driver', sanitizedDriverPhone, {
+              pendingMatchId: null,
+              pendingMatchWith: null,
+              pendingMatchStatus: null,
+              updatedAt: new Date().toISOString()
+            });
+            
+            // Invalidate cache
+            this.userCache.delete(`driver_${sanitizedDriverPhone}`);
+          }
+        }
+      }
+      
+    } catch (error) {
+      console.error('❌ Error checking expired matches:', error.message);
+    }
   }
 
   // ========== DEBUG METHODS ==========
@@ -545,6 +656,9 @@ class ScheduledService {
   async performMatching() {
     console.log('🤝 [SCHEDULED] ========== ULTRA SIMPLE MATCHING ==========');
     
+    // ✅ FIRST: Clean up expired pending matches (already called in start() but double-check)
+    await this.checkExpiredPendingMatches();
+    
     try {
       // DEBUG: Check status of known users
       await this.debugUserStatus('+251911240957', 'driver');
@@ -567,8 +681,8 @@ class ScheduledService {
       });
       
       // Filter manually for actively_matching
-      const activeDrivers = driversSnapshot.filter(d => d.status === 'actively_matching' || d.status === 'actively_matching');
-      const activePassengers = passengersSnapshot.filter(p => p.status === 'actively_matching' || p.status === 'actively_matching');
+      const activeDrivers = driversSnapshot.filter(d => d.status === 'actively_matching');
+      const activePassengers = passengersSnapshot.filter(p => p.status === 'actively_matching');
       
       console.log(`📊 Active drivers: ${activeDrivers.length}, Active passengers: ${activePassengers.length}`);
       
@@ -759,6 +873,25 @@ class ScheduledService {
             vehicleInfo: driverDoc.vehicleInfo
           }
         });
+
+        // ========== CREATE RIDE HISTORY RECORD ==========
+        if (this.rideHistory) {
+          try {
+            // Get passenger document for complete details
+            const passengerDoc = await this.getUserScheduledSearch('passenger', matchData.passengerPhone);
+            
+            await this.rideHistory.createRideFromMatch(
+              matchId,
+              matchData,
+              driverDoc,
+              passengerDoc || { passengerName: matchData.passengerName, passengerPhone: matchData.passengerPhone }
+            );
+            console.log(`✅ [RIDE_HISTORY] Created ride history for match ${matchId}`);
+          } catch (rideHistoryError) {
+            console.error('❌ [RIDE_HISTORY] Error creating ride history:', rideHistoryError.message);
+            // Don't fail the whole operation if ride history creation fails
+          }
+        }
         
         // Send confirmations
         await Promise.all([
