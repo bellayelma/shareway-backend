@@ -2,6 +2,7 @@
 // ULTRA OPTIMIZED - Matches all users, minimal CPU/RAM, minimal Firestore reads/writes
 // WITH REAL-TIME TRIGGER MATCHING AND STATUS DEBUGGING
 // ADDED: Timeout for expired pending matches (15 min)
+// ADDED: Ultra optimized matching - quick count check first, zero CPU when no users
 
 const logger = require('../utils/Logger');
 
@@ -165,19 +166,14 @@ class ScheduledService {
    * This bypasses the 2-minute waiting cycle
    */
   async triggerMatching(triggeredBy = 'new_user') {
-    console.log(`⚡ [TRIGGER] Matching triggered immediately by: ${triggeredBy}`);
+    console.log(`⚡ [TRIGGER] New user detected: ${triggeredBy}`);
     
-    // Run matching immediately (not waiting for interval)
-    // Use setTimeout to not block the current operation
+    // Run matching immediately (but with quick check)
     setTimeout(async () => {
       try {
-        // ✅ First check for expired matches
-        await this.checkExpiredPendingMatches();
-        
-        // Then run matching
+        // ✅ This will now do the quick count check first
         await this.performMatching();
-        await this.cleanupExpiredMatches();
-        console.log(`✅ [TRIGGER] Immediate matching completed for: ${triggeredBy}`);
+        console.log(`✅ [TRIGGER] Matching check completed for: ${triggeredBy}`);
       } catch (error) {
         console.error(`❌ [TRIGGER] Error:`, error.message);
       }
@@ -640,59 +636,105 @@ class ScheduledService {
     }
   }
 
-  // ========== ULTRA SIMPLE MATCHING ==========
-  // This is a simplified version that WILL work
+  // ========== ULTRA OPTIMIZED MATCHING - ZERO CPU WHEN NO USERS ==========
 
   async performMatching() {
-    console.log('🤝 [SCHEDULED] ========== ULTRA SIMPLE MATCHING ==========');
+    console.log('🤝 [SCHEDULED] ========== CHECKING FOR MATCH OPPORTUNITIES ==========');
     
     // ✅ FIRST: Clean up expired pending matches
     await this.checkExpiredPendingMatches();
     
     try {
-      // DEBUG: Check status of known users
-      await this.debugUserStatus('+251911240957', 'driver');
-      await this.debugUserStatus('+251920121197', 'passenger');
-      
-      // Get ALL drivers and passengers (no filtering)
-      const driversSnapshot = await this.firestoreService.getCollection('scheduled_searches_driver');
-      const passengersSnapshot = await this.firestoreService.getCollection('scheduled_searches_passenger');
-      
-      console.log(`📊 Raw drivers: ${driversSnapshot.length}, Raw passengers: ${passengersSnapshot.length}`);
-      
-      // Log all driver statuses
-      driversSnapshot.forEach(d => {
-        console.log(`📊 Driver ${d.id} status: ${d.status}`);
+      // ✅ STEP 1: QUICK CHECK - Get counts only (minimal reads)
+      const driversCount = await this.getCollectionCount('scheduled_searches_driver', {
+        status: 'actively_matching'
       });
       
-      // Log all passenger statuses
-      passengersSnapshot.forEach(p => {
-        console.log(`📊 Passenger ${p.id} status: ${p.status}`);
+      const passengersCount = await this.getCollectionCount('scheduled_searches_passenger', {
+        status: 'actively_matching'
       });
       
-      // Filter manually - ONLY actively_matching users
-      const activeDrivers = driversSnapshot.filter(d => d.status === 'actively_matching');
-      const activePassengers = passengersSnapshot.filter(p => p.status === 'actively_matching');
+      console.log(`📊 Quick check: ${driversCount} active drivers, ${passengersCount} active passengers`);
       
-      console.log(`📊 Active drivers: ${activeDrivers.length}, Active passengers: ${activePassengers.length}`);
-      
-      if (activeDrivers.length === 0) {
-        console.log('ℹ️ No active drivers found');
-        return;
+      // ✅ STEP 2: ZERO CPU if not both present
+      if (driversCount === 0 || passengersCount === 0) {
+        console.log('💤 No match possible - sleeping (ZERO CPU usage)');
+        return; // Exit immediately - no CPU used
       }
       
-      if (activePassengers.length === 0) {
-        console.log('ℹ️ No active passengers found');
-        return;
+      // ✅ STEP 3: ONLY NOW do full matching (both users present)
+      console.log('🎯 Both users present! Performing full matching...');
+      
+      // Get all active users (only now that we know both exist)
+      const [drivers, passengers] = await Promise.all([
+        this.firestoreService.queryCollection('scheduled_searches_driver', [
+          { field: 'status', operator: '==', value: 'actively_matching' }
+        ]),
+        this.firestoreService.queryCollection('scheduled_searches_passenger', [
+          { field: 'status', operator: '==', value: 'actively_matching' }
+        ])
+      ]);
+      
+      console.log(`📊 Found ${drivers.length} drivers, ${passengers.length} passengers ready to match`);
+      
+      // ✅ STEP 4: MATCH EVERYONE - no filters, match all pairs
+      let matchesCreated = 0;
+      
+      for (const driver of drivers) {
+        for (const passenger of passengers) {
+          // Skip if already matched in this cycle
+          const pairKey = `${driver.id}:${passenger.id}`;
+          if (this.recentMatches.has(pairKey)) continue;
+          
+          console.log(`🤝 Creating match: ${driver.id} ↔ ${passenger.id}`);
+          
+          // Create match
+          const matchId = await this.createMatch(driver, passenger);
+          
+          if (matchId) {
+            matchesCreated++;
+            this.recentMatches.set(pairKey, Date.now());
+          }
+          
+          // Limit matches per cycle to prevent overload
+          if (matchesCreated >= this.MAX_MATCHES_PER_CYCLE) break;
+        }
+        if (matchesCreated >= this.MAX_MATCHES_PER_CYCLE) break;
       }
       
-      // Take the first driver and first passenger
-      const driver = activeDrivers[0];
-      const passenger = activePassengers[0];
+      console.log(`✅ Created ${matchesCreated} matches this cycle`);
       
-      console.log(`🎯 Creating match between driver ${driver.id} and passenger ${passenger.id}`);
+    } catch (error) {
+      console.error('❌ Matching error:', error.message);
+    }
+  }
+
+  /**
+   * Helper method to get collection count with filter
+   */
+  async getCollectionCount(collection, filters = {}) {
+    try {
+      let query = this.firestoreService.db.collection(collection);
       
-      // Create match data
+      // Apply filters
+      for (const [field, value] of Object.entries(filters)) {
+        query = query.where(field, '==', value);
+      }
+      
+      const snapshot = await query.limit(1000).get();
+      return snapshot.size;
+    } catch (error) {
+      console.error(`❌ Error counting ${collection}:`, error.message);
+      return 0;
+    }
+  }
+
+  /**
+   * Create a match between driver and passenger
+   */
+  async createMatch(driver, passenger) {
+    try {
+      // Prepare match data
       const matchData = {
         driverId: driver.id,
         passengerId: passenger.id,
@@ -708,7 +750,7 @@ class ScheduledService {
         availableSeats: driver.availableSeats || 4
       };
       
-      // Add additional details if available
+      // Add location data if available
       if (driver.pickupLocation) matchData.pickupLocation = driver.pickupLocation;
       if (driver.destinationLocation) matchData.destinationLocation = driver.destinationLocation;
       if (passenger.pickupName) matchData.pickupName = passenger.pickupName;
@@ -718,16 +760,14 @@ class ScheduledService {
       
       // Save match
       const matchId = await this.firestoreService.addDocument('scheduled_matches', matchData);
-      console.log(`✅ Match created: ${matchId}`);
       
-      // Update driver - KEEP status as actively_matching to continue matching
+      // Update driver
       await this.firestoreService.updateDocument('scheduled_searches_driver', driver.id, {
         pendingMatchId: matchId,
         pendingMatchWith: passenger.id,
         pendingMatchStatus: 'awaiting_driver_approval',
         updatedAt: new Date().toISOString()
       });
-      console.log(`✅ Driver ${driver.id} updated with pending match`);
       
       // Update passenger
       await this.firestoreService.updateDocument('scheduled_searches_passenger', passenger.id, {
@@ -737,7 +777,6 @@ class ScheduledService {
         matchStatus: 'awaiting_driver_approval',
         updatedAt: new Date().toISOString()
       });
-      console.log(`✅ Passenger ${passenger.id} updated to pending_driver_approval`);
       
       // Send notification to driver
       await this.notification.sendNotification(matchData.driverPhone, {
@@ -755,14 +794,12 @@ class ScheduledService {
         }
       }, { important: true });
       
-      console.log('✅ Match created and notifications sent!');
-      
-      // DEBUG: Check updated statuses
-      await this.debugUserStatus(matchData.driverPhone, 'driver');
-      await this.debugUserStatus(matchData.passengerPhone, 'passenger');
+      console.log(`✅ Match created: ${matchId}`);
+      return matchId;
       
     } catch (error) {
-      console.error('❌ Matching error:', error.message);
+      console.error('❌ Error creating match:', error.message);
+      return null;
     }
   }
 
