@@ -1,11 +1,12 @@
 // services/ScheduledService.js
 // ULTRA OPTIMIZED - Matches all users, minimal CPU/RAM, minimal Firestore reads/writes
+// WITH REAL-TIME TRIGGER MATCHING
 
 const logger = require('../utils/Logger');
 
 class ScheduledService {
   constructor(firestoreService, websocketServer, admin, notificationService) {
-    console.log('🚀 [SCHEDULED] Initializing ULTRA OPTIMIZED version...');
+    console.log('🚀 [SCHEDULED] Initializing ULTRA OPTIMIZED version with REAL-TIME triggers...');
     
     this.firestoreService = firestoreService;
     this.websocketServer = websocketServer;
@@ -36,6 +37,10 @@ class ScheduledService {
     // OPTIMIZATION: Batch processing
     this.matchQueue = [];
     this.processingMatches = false;
+    
+    // Real-time trigger tracking to prevent spam
+    this.lastTriggerTime = 0;
+    this.MIN_TRIGGER_INTERVAL = 5000; // Minimum 5 seconds between manual triggers
     
     logger.info('SCHEDULED_SERVICE', '🚀 ULTRA OPTIMIZED mode - Matches ALL users, minimal resource usage');
   }
@@ -149,6 +154,37 @@ class ScheduledService {
 
   sanitizePhoneNumber(phoneNumber) {
     return this.notification.sanitizePhoneNumber(phoneNumber);
+  }
+
+  // ========== REAL-TIME TRIGGER MATCHING ==========
+  
+  /**
+   * TRIGGER MATCHING IMMEDIATELY when a new user joins or status changes
+   * This bypasses the 2-minute waiting cycle
+   */
+  async triggerMatching(triggeredBy = 'new_user') {
+    const now = Date.now();
+    
+    // Prevent trigger spam - minimum interval between manual triggers
+    if (now - this.lastTriggerTime < this.MIN_TRIGGER_INTERVAL) {
+      console.log(`⏱️ [TRIGGER] Trigger throttled (${now - this.lastTriggerTime}ms since last)`);
+      return;
+    }
+    
+    this.lastTriggerTime = now;
+    console.log(`⚡ [TRIGGER] Matching triggered immediately by: ${triggeredBy}`);
+    
+    // Run matching immediately (not waiting for interval)
+    // Use setTimeout to not block the current operation
+    setTimeout(async () => {
+      try {
+        await this.performMatching();
+        await this.cleanupExpiredMatches();
+        console.log(`✅ [TRIGGER] Immediate matching completed for: ${triggeredBy}`);
+      } catch (error) {
+        console.error(`❌ [TRIGGER] Error in immediate matching:`, error.message);
+      }
+    }, 500); // Small delay to ensure the new user data is saved
   }
 
   // ========== CREATE SCHEDULED SEARCH ==========
@@ -316,6 +352,12 @@ class ScheduledService {
         });
       }
       
+      // ✅ TRIGGER IMMEDIATE MATCHING for the new user!
+      console.log(`⚡ Triggering immediate matching for new ${userType}`);
+      this.triggerMatching(`new_${userType}_${userId}`).catch(err => 
+        console.error('Background matching error:', err.message)
+      );
+      
       return {
         success: true,
         userId,
@@ -451,6 +493,12 @@ class ScheduledService {
       
       // Invalidate cache
       this.userCache.delete(`${userType}_${sanitizedPhone}`);
+      
+      // ✅ TRIGGER MATCHING when status changes (e.g., after rejection)
+      if (updates.status === 'actively_matching') {
+        console.log(`⚡ User ${phoneNumber} is now actively matching, triggering immediate match`);
+        this.triggerMatching(`status_change_${userType}_${phoneNumber}`).catch(() => {});
+      }
       
       return true;
     } catch (error) {
@@ -1433,6 +1481,7 @@ class ScheduledService {
           userCacheSize: this.userCache.size,
           matchQueueLength: this.matchQueue.length,
           firestore: firestoreStats,
+          lastTriggerTime: this.lastTriggerTime,
           timestamp: new Date().toISOString()
         }
       };
