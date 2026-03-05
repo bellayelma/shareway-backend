@@ -3,6 +3,8 @@
 // FIXED: Properly tracks accepted passengers in driver's collection
 // FIXED: Handles same phone number re-creating schedule (updates existing)
 // FIXED: All data fields (fare, distance, name, photo) correctly extracted
+// FIXED: MATCHES EVERYONE regardless of location - removed all location filters
+// FIXED: Re-creating schedule triggers immediate matching for existing users
 // OPTIMIZED: Reduced reads/writes by 70% with caching and batch operations
 // OPTIMIZED: 3-minute matching interval, zero CPU when no users
 
@@ -59,12 +61,12 @@ class ScheduledService {
     this.MATCHING_INTERVAL = 180000; // 180 seconds (3 minutes)
     this.MATCH_EXPIRY = 30 * 60 * 1000; // 30 minutes
     this.PENDING_EXPIRY = 15 * 60 * 1000; // 15 minutes
-    this.MAX_MATCHES_PER_CYCLE = 3; // Process up to 3 matches per cycle
+    this.MAX_MATCHES_PER_CYCLE = 5; // Process up to 5 matches per cycle
     
-    // THRESHOLDS - Set very high to match everyone
-    this.DISTANCE_THRESHOLD = 999999999;
-    this.DESTINATION_THRESHOLD = 999999999;
-    this.MIN_MATCH_SCORE = 1;
+    // THRESHOLDS - Set to match everyone regardless of location
+    this.DISTANCE_THRESHOLD = 999999999; // Effectively unlimited
+    this.DESTINATION_THRESHOLD = 999999999; // Effectively unlimited
+    this.MIN_MATCH_SCORE = 1; // Match anyone
     
     this.matchingInterval = null;
     this.cycleCount = 0;
@@ -90,6 +92,7 @@ class ScheduledService {
   async start() {
     console.log('🚀 [SCHEDULED] start() called');
     console.log('📊 Settings: Interval=180s, Cache TTL=20min, Match expiry=30min');
+    console.log('📍 [SCHEDULED] LOCATION CHECKS DISABLED - Matching everyone regardless of distance');
     
     // Test Firestore connection
     console.log('🔍 [SCHEDULED] Testing Firestore connection...');
@@ -416,6 +419,7 @@ class ScheduledService {
   // ========== CREATE/UPDATE SCHEDULED SEARCH ==========
   // FIXED: Properly handles same phone number (updates existing)
   // FIXED: Extracts all fields correctly
+  // FIXED: Always triggers immediate matching for existing users
 
   async handleCreateScheduledSearch(data, userId, userType) {
     console.log('📝 [SCHEDULED] handleCreateScheduledSearch called');
@@ -718,9 +722,9 @@ class ScheduledService {
         }
       }
       
-      // Trigger immediate matching
-      console.log(`⚡ Triggering immediate matching for new ${userType}`);
-      this.triggerMatching(`new_${userType}_${userId}`).catch(err => 
+      // Trigger immediate matching - ALWAYS trigger for both new and existing users
+      console.log(`⚡ Triggering immediate matching for ${userType} ${userId} (${exists ? 'existing' : 'new'})`);
+      this.triggerMatching(`${exists ? 'updated' : 'new'}_${userType}_${userId}`).catch(err => 
         console.error('Background matching error:', err.message)
       );
       
@@ -730,7 +734,7 @@ class ScheduledService {
         userType: userType,
         searchId: sanitizedPhone,
         scheduledTime: timeString,
-        message: 'Scheduled search created successfully',
+        message: exists ? 'Scheduled search updated successfully' : 'Scheduled search created successfully',
         data: {
           id: sanitizedPhone,
           ...scheduledSearchData
@@ -829,7 +833,8 @@ class ScheduledService {
     }
   }
 
-  // ========== GET ACTIVE SCHEDULED SEARCHES (OPTIMIZED) ==========
+  // ========== GET ACTIVE SCHEDULED SEARCHES (OPTIMIZED & LENIENT) ==========
+  // FIXED: Accepts ALL users regardless of location data
   
   async getActiveScheduledSearches(userType) {
     const collectionName = userType === 'driver' 
@@ -837,9 +842,9 @@ class ScheduledService {
       : 'scheduled_searches_passenger';
     
     try {
-      // Use optimized query instead of getting all documents
+      // Get ALL actively_matching users - no location filters
       const constraints = [
-        { field: 'status', operator: 'in', value: ['actively_matching', 'scheduled'] }
+        { field: 'status', operator: '==', value: 'actively_matching' }
       ];
       
       const results = await this.queryCollection(collectionName, constraints, 100);
@@ -847,27 +852,27 @@ class ScheduledService {
       const activeUsers = [];
       
       for (const item of results) {
-        const data = item;
-        
-        // For drivers, check available seats
+        // For drivers, only check seats - ignore location completely
         if (userType === 'driver') {
-          const availableSeats = this.extractCapacity(data);
+          const availableSeats = this.extractCapacity(item);
           if (availableSeats <= 0) {
-            console.log(`ℹ️ [SCHEDULED] Driver ${item.id} has no seats available (${availableSeats}), skipping`);
+            console.log(`ℹ️ Driver ${item.id} has no seats, skipping`);
             continue;
           }
         }
         
+        // Accept ALL passengers regardless of location data
+        // No location checks at all!
         activeUsers.push({
           id: item.id,
           data: {
-            ...data,
-            userId: data.userId || data.passengerPhone || data.driverPhone || item.id
+            ...item,
+            userId: item.userId || item.passengerPhone || item.driverPhone || item.id
           }
         });
       }
       
-      console.log(`📊 [SCHEDULED] Found ${activeUsers.length} active ${userType}s for matching`);
+      console.log(`📊 Found ${activeUsers.length} active ${userType}s (location checks disabled)`);
       return activeUsers;
       
     } catch (error) {
@@ -963,10 +968,12 @@ class ScheduledService {
     }
   }
 
-  // ========== PERFORM MATCHING (OPTIMIZED) ==========
+  // ========== PERFORM MATCHING (OPTIMIZED & LOCATION-FREE) ==========
+  // FIXED: Matches everyone regardless of location
   
   async performMatching() {
     console.log('🤝 [SCHEDULED] ========== CHECKING FOR MATCH OPPORTUNITIES ==========');
+    console.log('📍 [SCHEDULED] LOCATION CHECKS DISABLED - Matching everyone');
     
     // Clean up expired pending matches first
     await this.checkExpiredPendingMatches();
@@ -994,21 +1001,19 @@ class ScheduledService {
       
       console.log(`📊 Found ${drivers.length} drivers, ${passengers.length} passengers ready to match`);
       
-      // STEP 4: Find matches
+      // STEP 4: Find matches - NO LOCATION CHECKS!
       const matches = [];
       const processedPairs = new Set();
+      let matchesCreated = 0;
       
       for (const driver of drivers) {
         const driverData = driver.data;
         if (!driverData) continue;
         
-        const driverLocation = this.extractLocation(driverData, 'pickupLocation');
-        const driverTime = this.extractTime(driverData);
-        const driverDestination = this.extractLocation(driverData, 'destinationLocation');
         const availableSeats = this.extractCapacity(driverData);
-        
-        if (!driverTime) continue;
         if (availableSeats <= 0) continue;
+        
+        console.log(`👨‍✈️ Driver ${driver.id} has ${availableSeats} seats`);
         
         for (const passenger of passengers) {
           const passengerData = passenger.data;
@@ -1016,29 +1021,30 @@ class ScheduledService {
           
           const pairKey = `${driver.id}:${passenger.id}`;
           if (processedPairs.has(pairKey)) continue;
-          if (this.recentMatches.has(pairKey)) continue;
+          if (this.recentMatches.has(pairKey)) {
+            console.log(`  ⏱️ Recently matched: ${pairKey}, skipping`);
+            continue;
+          }
           
           processedPairs.add(pairKey);
           
-          if (passengerData.status !== 'actively_matching' && passengerData.status !== 'scheduled') continue;
-          
-          const passengerTime = this.extractTime(passengerData);
-          const passengerLocation = this.extractLocation(passengerData, 'pickupLocation');
-          const passengerDestination = this.extractLocation(passengerData, 'destinationLocation');
           const passengerCount = passengerData.passengerCount || 1;
           
-          if (!passengerTime || !passengerLocation) continue;
-          if (passengerCount > availableSeats) continue;
+          // ONLY CHECK SEAT AVAILABILITY - REMOVE ALL LOCATION CHECKS!
+          if (passengerCount > availableSeats) {
+            console.log(`  ❌ Passenger needs ${passengerCount} seats, driver only has ${availableSeats}`);
+            continue;
+          }
           
-          // Simple match - no distance restrictions
-          const score = 70; // Default score
+          // No location checks, no distance calculations - just match!
+          console.log(`✅ MATCHING: Driver ${driver.id} ↔ Passenger ${passenger.id} (${passengerCount} pax)`);
           
           matches.push({
             driverId: driver.id,
             passengerId: passenger.id,
             driverPhone: driverData.userId || driverData.driverPhone || driver.id,
             passengerPhone: passengerData.userId || passengerData.passengerPhone || passenger.id,
-            score: score,
+            score: 70, // Default score
             driverData: driverData,
             passengerData: passengerData,
             passengerCount: passengerCount,
@@ -1046,10 +1052,14 @@ class ScheduledService {
           });
           
           this.recentMatches.set(pairKey, Date.now());
+          
+          matchesCreated++;
+          if (matchesCreated >= this.MAX_MATCHES_PER_CYCLE) break;
         }
+        if (matchesCreated >= this.MAX_MATCHES_PER_CYCLE) break;
       }
       
-      console.log(`🎯 [SCHEDULED] Found ${matches.length} potential matches`);
+      console.log(`🎯 [SCHEDULED] Created ${matchesCreated} potential matches`);
       
       // Process matches
       for (const match of matches.slice(0, this.MAX_MATCHES_PER_CYCLE)) {
