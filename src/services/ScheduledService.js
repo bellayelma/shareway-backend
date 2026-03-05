@@ -3,14 +3,14 @@
 // WITH REAL-TIME TRIGGER MATCHING AND STATUS DEBUGGING
 // ADDED: Timeout for expired pending matches (15 min)
 // ADDED: Ultra optimized matching - quick count check first, zero CPU when no users
-// FIXED: Correct data extraction for Flutter's nested data structure
-// FIXED: Passenger name now correctly extracted from passengerInfo.name
+// FIXED: Correct data extraction from Flutter's nested structure
+// FIXED: All fields (fare, distance, duration, etc.) now properly extracted
 
 const logger = require('../utils/Logger');
 
 class ScheduledService {
   constructor(firestoreService, websocketServer, admin, notificationService) {
-    console.log('🚀 [SCHEDULED] Initializing ULTRA OPTIMIZED version with REAL-TIME triggers and STATUS FIXES...');
+    console.log('🚀 [SCHEDULED] Initializing ULTRA OPTIMIZED version with COMPLETE DATA EXTRACTION...');
     
     this.firestoreService = firestoreService;
     this.websocketServer = websocketServer;
@@ -211,61 +211,118 @@ class ScheduledService {
     }
   }
 
-  // ========== CREATE SCHEDULED SEARCH ==========
-  // FIXED: Correctly extracts passenger name from nested data structure
+  // ========== CREATE SCHEDULED SEARCH - COMPLETE DATA EXTRACTION ==========
+  // FIXED: Extracts ALL fields exactly like your old working version
 
   async handleCreateScheduledSearch(data, userId, userType) {
-    console.log(`📝 [SCHEDULED] Create for ${userType}: ${userId}`);
+    console.log('📝 [SCHEDULED] handleCreateScheduledSearch called');
+    console.log('🔍 [SCHEDULED] userId:', userId, 'userType:', userType);
     
     try {
-      if (!userId) throw new Error('User ID required');
+      if (!userId) {
+        throw new Error('User ID (phone number) is required');
+      }
+      
       if (!userType || !['driver', 'passenger'].includes(userType)) {
-        throw new Error('Valid user type required');
+        throw new Error('Valid user type (driver/passenger) is required');
       }
       
       const sanitizedPhone = this.sanitizePhoneNumber(userId);
+      
       const collectionName = userType === 'driver' 
         ? 'scheduled_searches_driver' 
         : 'scheduled_searches_passenger';
+      
+      console.log('📁 [SCHEDULED] Using collection:', collectionName);
+      console.log('📁 [SCHEDULED] Document ID will be:', sanitizedPhone);
       
       // ===== FIX: Handle nested data structure from Flutter =====
       // Flutter sends data with { type, data } structure
       const sourceData = data.data || data; // Extract from nested "data" if present
       
-      // Parse scheduled time
-      let scheduledTime = sourceData.scheduledTime || sourceData.departureTime;
-      if (userType === 'passenger') {
-        scheduledTime = sourceData.rideDetails?.scheduledTime || scheduledTime;
+      // Validate and prepare time data
+      let scheduledTime;
+      let scheduledTimestamp;
+      
+      if (userType === 'driver') {
+        scheduledTime = sourceData.scheduledTime || sourceData.departureTime;
+      } else {
+        // Passenger format - extract from rideDetails
+        scheduledTime = sourceData.rideDetails?.scheduledTime || sourceData.scheduledTime || sourceData.departureTime;
       }
       
-      if (!scheduledTime) throw new Error('Scheduled time required');
+      if (!scheduledTime) {
+        throw new Error('Scheduled time is required');
+      }
       
+      // Parse the scheduled time
       const parsedTime = new Date(scheduledTime);
-      if (isNaN(parsedTime.getTime())) throw new Error('Invalid time format');
       
-      const scheduledTimestamp = parsedTime.getTime();
+      // Check if date is valid
+      if (isNaN(parsedTime.getTime())) {
+        throw new Error('Invalid scheduled time format');
+      }
+      
+      scheduledTimestamp = parsedTime.getTime();
       const timeString = parsedTime.toISOString();
       
-      // Build base document - FORCE status to 'actively_matching'
+      // Extract passenger info if applicable
+      let passengerInfo = null;
+      let passengerPhotoUrl = null;
+      
+      if (userType === 'passenger') {
+        // Check multiple possible sources for passenger data - like your old version
+        const passengerSource = sourceData.passenger || sourceData.passengerInfo || {};
+        
+        // Extract photo from multiple possible locations - comprehensive like old version
+        const extractedPhoto = passengerSource.photoUrl || 
+                              sourceData.passengerPhotoUrl || 
+                              sourceData.photoUrl ||
+                              (sourceData.passenger && sourceData.passenger.photoUrl) ||
+                              (sourceData.passengerInfo && sourceData.passengerInfo.photoUrl) ||
+                              (sourceData.rideDetails && sourceData.rideDetails.passenger && sourceData.rideDetails.passenger.photoUrl) ||
+                              (sourceData.passengerPhotoURL) ||
+                              (sourceData.profilePhoto) ||
+                              null;
+        
+        passengerInfo = {
+          name: passengerSource.name || sourceData.passengerName || 'Passenger',
+          phone: passengerSource.phone || userId,
+          rating: passengerSource.rating || sourceData.passengerRating || 5.0,
+          totalRides: passengerSource.totalRides || sourceData.totalRides || 0,
+          completedRides: passengerSource.completedRides || sourceData.completedRides || 0,
+          isVerified: passengerSource.isVerified || sourceData.isVerified || false,
+          photoUrl: extractedPhoto
+        };
+        
+        // Store at root level as well for easier access
+        passengerPhotoUrl = extractedPhoto;
+        
+        console.log('📸 [SCHEDULED] Extracted passenger photo:', extractedPhoto ? 'Yes' : 'No');
+        console.log('👤 [SCHEDULED] Extracted passenger name:', passengerInfo.name);
+      }
+      
+      // Create document data
       let scheduledSearchData = {
         type: userType === 'driver' ? 'CREATE_SCHEDULED_SEARCH' : 'SCHEDULE_SEARCH',
-        userId,
+        userId: userId,  // Keep original phone number as field for queries
         sanitizedUserId: sanitizedPhone,
-        userType,
-        status: 'actively_matching',
+        userType: userType,
+        status: 'actively_matching', // Start as actively matching
         scheduledTime: timeString,
-        scheduledTimestamp,
+        scheduledTimestamp: scheduledTimestamp,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
         lastUpdated: Date.now()
       };
       
-      // Add type-specific fields
+      // Add driver-specific fields
       if (userType === 'driver') {
+        // First create basic driver data - like your old version
         scheduledSearchData = {
           ...scheduledSearchData,
           availableSeats: sourceData.availableSeats || sourceData.capacity || 4,
-          initialSeats: sourceData.availableSeats || sourceData.capacity || 4,
+          initialSeats: sourceData.availableSeats || sourceData.capacity || 4, // Store initial seats
           driverName: sourceData.driverName || sourceData.name || 'Driver',
           driverPhone: userId,
           pickupLocation: sourceData.pickupLocation || null,
@@ -278,63 +335,57 @@ class ScheduledService {
           licensePlate: sourceData.licensePlate || 'Not specified',
           profilePhoto: sourceData.profilePhoto || sourceData.driverPhoto || null,
           rating: sourceData.rating || sourceData.driverRating || 5.0,
-          acceptedPassengers: [],
-          rejectedMatches: [],
-          cancelledPassengersHistory: [],
-          totalAcceptedPassengers: 0,
-          vehicleInfo: {
-            type: sourceData.vehicleType || 'Car',
-            model: sourceData.vehicleModel || 'Standard',
-            color: sourceData.vehicleColor || 'Not specified',
-            plate: sourceData.licensePlate || 'Not specified',
-            capacity: sourceData.availableSeats || sourceData.capacity || 4,
-            driverName: sourceData.driverName || 'Driver',
-            driverPhone: userId,
-            driverRating: sourceData.rating || 5.0,
-            driverPhotoUrl: sourceData.profilePhoto || sourceData.driverPhoto || null
-          }
+          totalRides: sourceData.totalRides || 0,
+          isVerified: sourceData.isVerified || sourceData.verified || false,
+          acceptedPassengers: [], // Track accepted passengers with full details
+          rejectedMatches: [], // Track rejected matches
+          acceptedPassengersSummary: [], // Quick summary
+          cancelledPassengersHistory: [], // Track cancelled passengers history
+          totalAcceptedPassengers: 0, // Counter for total accepted
+          lastActivityAt: new Date().toISOString(),
+          lastActivityType: 'created_schedule'
         };
         
-        // Enrich with user profile
-        scheduledSearchData = await this.enrichDriverData(userId, scheduledSearchData);
-        
-      } else { // passenger - FIXED EXTRACTION HERE
-        // ===== FIX: Correctly extract passenger info from nested structure =====
-        // The name is in passengerInfo.name from Flutter
-        const passengerSource = sourceData.passengerInfo || 
-                               sourceData.passenger || 
-                               {};
-        
-        // Extract photo from multiple possible locations
-        const extractedPhoto = passengerSource.photoUrl || 
-                              sourceData.passengerPhotoUrl || 
-                              passengerSource.photoUrl ||
-                              null;
-        
-        // ✅ FIX: Get the actual name from passengerInfo.name
-        const extractedName = passengerSource.name || 
-                             sourceData.passengerName || 
-                             'Passenger';
-        
-        console.log(`👤 [SCHEDULED] Extracted passenger name: ${extractedName}`);
-        console.log(`📸 [SCHEDULED] Extracted passenger photo: ${extractedPhoto ? 'Yes' : 'No'}`);
-        
-        const passengerInfo = {
-          name: extractedName,
-          phone: passengerSource.phone || userId,
-          rating: passengerSource.rating || sourceData.rating || 5.0,
-          totalRides: passengerSource.totalRides || sourceData.totalRides || 0,
-          completedRides: passengerSource.completedRides || sourceData.completedRides || 0,
-          isVerified: passengerSource.isVerified || sourceData.isVerified || false,
-          photoUrl: extractedPhoto
+        // Vehicle info object for easier access - like your old version
+        scheduledSearchData.vehicleInfo = {
+          type: sourceData.vehicleType || 'Car',
+          model: sourceData.vehicleModel || 'Standard',
+          color: sourceData.vehicleColor || 'Not specified',
+          plate: sourceData.licensePlate || 'Not specified',
+          capacity: sourceData.availableSeats || sourceData.capacity || 4,
+          driverName: scheduledSearchData.driverName,
+          driverPhone: userId,
+          driverRating: scheduledSearchData.rating,
+          driverTotalRides: scheduledSearchData.totalRides,
+          driverCompletedRides: sourceData.completedRides || 0,
+          driverTotalEarnings: sourceData.totalEarnings || 0,
+          driverVerified: scheduledSearchData.isVerified,
+          driverPhotoUrl: scheduledSearchData.profilePhoto
         };
         
+        // ENRICH DRIVER DATA WITH USER PROFILE
+        scheduledSearchData = await this.enrichDriverDataWithUserProfile(userId, scheduledSearchData);
+        
+        // Estimated fare if provided - like your old version
+        if (sourceData.estimatedFare) {
+          scheduledSearchData.estimatedFare = sourceData.estimatedFare;
+        }
+        if (sourceData.estimatedDistance) {
+          scheduledSearchData.estimatedDistance = sourceData.estimatedDistance;
+        }
+        if (sourceData.estimatedDuration) {
+          scheduledSearchData.estimatedDuration = sourceData.estimatedDuration;
+        }
+      }
+      
+      // Add passenger-specific fields - COMPLETE EXTRACTION like your old version
+      if (userType === 'passenger') {
         scheduledSearchData = {
           ...scheduledSearchData,
-          passengerInfo,
-          passengerName: extractedName, // Set at root level too
+          passengerInfo: passengerInfo,
+          passengerPhotoUrl: passengerPhotoUrl,
+          passengerName: passengerInfo?.name || 'Passenger',
           passengerPhone: userId,
-          passengerPhotoUrl: extractedPhoto,
           passengerCount: sourceData.passengerCount || 1,
           pickupLocation: sourceData.pickupLocation || null,
           destinationLocation: sourceData.destinationLocation || null,
@@ -345,73 +396,135 @@ class ScheduledService {
           paymentMethod: sourceData.paymentMethod || 'cash',
           estimatedFare: sourceData.estimatedFare || 0,
           estimatedDistance: sourceData.estimatedDistance || 0,
-          matchHistory: [],
+          estimatedDuration: sourceData.estimatedDuration || 0,
+          matchHistory: [], // Track match history
           rating: sourceData.rating || 5.0,
-          profilePhoto: extractedPhoto || sourceData.profilePhoto || null,
-          rideDetails: {
-            scheduledTime: timeString,
-            scheduledTimestamp,
-            pickupName: sourceData.pickupName || 'Pickup location',
-            destinationName: sourceData.destinationName || 'Destination',
-            pickupLocation: sourceData.pickupLocation || null,
-            destinationLocation: sourceData.destinationLocation || null,
-            passengerCount: sourceData.passengerCount || 1,
-            estimatedFare: sourceData.estimatedFare || 0,
-            estimatedDistance: sourceData.estimatedDistance || 0,
-            paymentMethod: sourceData.paymentMethod || 'cash',
-            specialRequests: sourceData.specialRequests || '',
-            passenger: passengerInfo
+          profilePhoto: passengerPhotoUrl || sourceData.profilePhoto || null
+        };
+        
+        // Ride details object for easier access - like your old version
+        scheduledSearchData.rideDetails = {
+          scheduledTime: timeString,
+          scheduledTimestamp: scheduledTimestamp,
+          pickupName: sourceData.pickupName || 'Pickup location',
+          destinationName: sourceData.destinationName || 'Destination',
+          pickupLocation: sourceData.pickupLocation || null,
+          destinationLocation: sourceData.destinationLocation || null,
+          passengerCount: sourceData.passengerCount || 1,
+          luggageCount: sourceData.luggageCount || 0,
+          specialRequests: sourceData.specialRequests || '',
+          paymentMethod: sourceData.paymentMethod || 'cash',
+          estimatedFare: sourceData.estimatedFare || 0,
+          estimatedDistance: sourceData.estimatedDistance || 0,
+          estimatedDuration: sourceData.estimatedDuration || 0,
+          passenger: {
+            name: passengerInfo?.name || 'Passenger',
+            phone: userId,
+            photoUrl: passengerPhotoUrl,
+            rating: sourceData.rating || 5.0
           }
         };
       }
       
-      // OPTIMIZATION: Use documentExists to check first (reduces reads)
-      const exists = await this.firestoreService.documentExists(collectionName, sanitizedPhone);
-      
-      if (exists) {
-        const docSnapshot = await this.firestoreService.getDocument(collectionName, sanitizedPhone);
-        const existing = docSnapshot.data();
-        const previousVersions = existing.previousVersions || [];
-        previousVersions.unshift({
-          status: existing.status,
-          updatedAt: existing.updatedAt,
-          archivedAt: new Date().toISOString()
-        });
-        
-        if (previousVersions.length > 5) previousVersions.pop();
-        
-        // Update existing document
-        await this.firestoreService.updateDocument(collectionName, sanitizedPhone, {
-          ...scheduledSearchData,
-          createdAt: existing.createdAt,
-          previousVersions,
-          updatedAt: new Date().toISOString()
-        });
-      } else {
-        // Create new document
-        await this.firestoreService.setDocument(collectionName, sanitizedPhone, { 
-          ...scheduledSearchData, 
-          previousVersions: [] 
-        });
+      // Add all data fields - comprehensive like your old version
+      for (const [key, value] of Object.entries(sourceData)) {
+        if (!['userId', 'userType', 'status', 'scheduledTime', 'createdAt', 'updatedAt', 
+              'availableSeats', 'driverName', 'passengerInfo', 'data'].includes(key)) {
+          scheduledSearchData[key] = value;
+        }
       }
       
-      // Update cache
-      this.setUserCache(sanitizedPhone, scheduledSearchData, userType);
+      // ========== USE PHONE NUMBER AS DOCUMENT ID ==========
+      const docRef = this.db.collection(collectionName).doc(sanitizedPhone);
       
-      console.log(`✅ [SCHEDULED] Created for ${sanitizedPhone} with status: actively_matching`);
+      // Check if document exists
+      const docSnapshot = await docRef.get();
       
-      // DEBUG: Check status immediately after creation
-      await this.debugUserStatus(userId, userType);
-      
-      // OPTIMIZATION: Only notify via WebSocket, not FCM for creation
-      if (this.websocketServer?.broadcast) {
-        this.websocketServer.broadcast('scheduled_updates', {
-          type: 'scheduled_search_created',
-          userId,
-          userType,
-          searchId: sanitizedPhone,
-          scheduledTime: timeString
+      if (docSnapshot.exists) {
+        // Update existing document
+        const existingData = docSnapshot.data();
+        
+        // Create version history
+        const previousVersions = existingData.previousVersions || [];
+        const versionEntry = {
+          status: existingData.status,
+          scheduledTime: existingData.scheduledTime,
+          availableSeats: existingData.availableSeats,
+          updatedAt: existingData.updatedAt || existingData.lastUpdated,
+          archivedAt: new Date().toISOString()
+        };
+        
+        // Keep only last 5 versions
+        const updatedVersions = [versionEntry, ...previousVersions].slice(0, 5);
+        
+        // Preserve accepted passengers and rejected matches if they exist
+        if (userType === 'driver') {
+          scheduledSearchData.acceptedPassengers = existingData.acceptedPassengers || [];
+          scheduledSearchData.rejectedMatches = existingData.rejectedMatches || [];
+          scheduledSearchData.acceptedPassengersSummary = existingData.acceptedPassengersSummary || [];
+          scheduledSearchData.cancelledPassengersHistory = existingData.cancelledPassengersHistory || [];
+          scheduledSearchData.totalAcceptedPassengers = existingData.totalAcceptedPassengers || 0;
+          
+          // Preserve vehicleInfo if it exists
+          if (existingData.vehicleInfo) {
+            scheduledSearchData.vehicleInfo = {
+              ...existingData.vehicleInfo,
+              ...scheduledSearchData.vehicleInfo
+            };
+          }
+        }
+        
+        const updateData = {
+          ...scheduledSearchData,
+          createdAt: existingData.createdAt, // Preserve original creation time
+          previousVersions: updatedVersions,
+          updatedAt: new Date().toISOString(),
+          lastUpdated: Date.now()
+        };
+        
+        await docRef.update(updateData);
+        
+        console.log('✅ [SCHEDULED] Updated existing document with ID:', sanitizedPhone);
+        console.log('⏰ [SCHEDULED] Original createdAt:', existingData.createdAt);
+      } else {
+        // Create new document with phone number as ID
+        await docRef.set({
+          ...scheduledSearchData,
+          previousVersions: []
         });
+        console.log('✅ [SCHEDULED] Created new document with ID:', sanitizedPhone);
+      }
+      
+      console.log('⏰ [SCHEDULED] Scheduled time:', timeString);
+      if (scheduledSearchData.estimatedFare) {
+        console.log('💰 [SCHEDULED] Estimated fare:', scheduledSearchData.estimatedFare);
+      }
+      if (scheduledSearchData.estimatedDistance) {
+        console.log('📏 [SCHEDULED] Estimated distance:', scheduledSearchData.estimatedDistance);
+      }
+      
+      // Update FirestoreService stats if available
+      if (this.firestoreService && this.firestoreService.stats) {
+        this.firestoreService.stats.writes++;
+        this.firestoreService.stats.immediateWrites++;
+      }
+      
+      // Notify via WebSocket if available
+      if (this.websocketServer && this.websocketServer.broadcast) {
+        const notification = {
+          type: 'scheduled_search_created',
+          userId: userId,
+          userType: userType,
+          searchId: sanitizedPhone,
+          scheduledTime: timeString,
+          timestamp: new Date().toISOString()
+        };
+        
+        try {
+          this.websocketServer.broadcast('scheduled_updates', notification);
+        } catch (wsError) {
+          console.log('⚠️ [SCHEDULED] WebSocket broadcast error:', wsError.message);
+        }
       }
       
       // ✅ TRIGGER IMMEDIATE MATCHING for the new user!
@@ -422,16 +535,92 @@ class ScheduledService {
       
       return {
         success: true,
-        userId,
-        userType,
+        userId: userId,
+        userType: userType,
         searchId: sanitizedPhone,
-        scheduledTime: timeString
+        scheduledTime: timeString,
+        message: 'Scheduled search created successfully',
+        data: {
+          id: sanitizedPhone,
+          ...scheduledSearchData
+        }
       };
-      
     } catch (error) {
-      console.error('❌ [SCHEDULED] Create error:', error.message);
-      return { success: false, error: error.message };
+      console.error('❌ [SCHEDULED] Error creating scheduled search:', error.message);
+      return {
+        success: false,
+        error: error.message
+      };
     }
+  }
+
+  // ========== ENRICH DRIVER DATA FROM USERS COLLECTION ==========
+  
+  async enrichDriverDataWithUserProfile(driverPhone, driverData) {
+    try {
+      const sanitizedPhone = this.sanitizePhoneNumber(driverPhone);
+      
+      // Try to get user profile from users collection
+      const userDoc = await this.db.collection('users').doc(sanitizedPhone).get();
+      
+      if (userDoc.exists) {
+        const userData = userDoc.data();
+        console.log(`📋 [SCHEDULED] Found user profile for ${driverPhone}:`, {
+          name: userData.name || userData.displayName,
+          hasPhoto: !!(userData.photoUrl || userData.photoURL || userData.profilePhoto)
+        });
+        
+        // Get the actual name and photo from user data
+        const realName = userData.name || userData.displayName || userData.fullName;
+        const realPhoto = userData.photoUrl || userData.photoURL || userData.profilePhoto;
+        
+        // Create enriched data
+        const enrichedData = {
+          ...driverData,
+          driverName: realName || driverData.driverName || 'Driver',
+          profilePhoto: realPhoto || driverData.profilePhoto || null,
+          name: realName || driverData.name || 'Driver', // For backward compatibility
+          photoUrl: realPhoto || driverData.photoUrl || null, // For backward compatibility
+        };
+        
+        // Update vehicleInfo with real driver info
+        if (enrichedData.vehicleInfo) {
+          enrichedData.vehicleInfo = {
+            ...enrichedData.vehicleInfo,
+            driverName: realName || enrichedData.vehicleInfo.driverName || 'Driver',
+            driverPhotoUrl: realPhoto || enrichedData.vehicleInfo.driverPhotoUrl || null,
+          };
+        } else {
+          enrichedData.vehicleInfo = {
+            type: enrichedData.vehicleType || 'Car',
+            model: enrichedData.vehicleModel || 'Standard',
+            color: enrichedData.vehicleColor || 'Not specified',
+            plate: enrichedData.licensePlate || 'Not specified',
+            driverName: realName || 'Driver',
+            driverPhone: driverPhone,
+            driverPhotoUrl: realPhoto || null,
+            driverRating: enrichedData.rating || 5.0,
+            driverTotalRides: enrichedData.totalRides || 0,
+            driverCompletedRides: enrichedData.completedRides || 0,
+            driverVerified: enrichedData.isVerified || false
+          };
+        }
+        
+        console.log(`✅ [SCHEDULED] Enriched driver data:`, {
+          name: enrichedData.driverName,
+          hasPhoto: !!enrichedData.profilePhoto
+        });
+        
+        return enrichedData;
+      } else {
+        console.log(`⚠️ [SCHEDULED] No user profile found for ${driverPhone}`);
+      }
+    } catch (error) {
+      console.error('❌ [SCHEDULED] Error enriching driver data:', error.message);
+    }
+    
+    // Return original data if enrichment fails
+    return driverData;
   }
 
   // ========== ENRICH DRIVER DATA (with caching) ==========
@@ -788,164 +977,82 @@ class ScheduledService {
   }
 
   /**
-   * Create a match between driver and passenger - WITH EXTREME DEBUGGING
+   * Create a match between driver and passenger
    */
   async createMatch(driver, passenger) {
-    console.log('🔍 [DEBUG] ===== CREATE MATCH START =====');
-    console.log('🔍 [DEBUG] Driver object:', JSON.stringify(driver, null, 2).substring(0, 500));
-    console.log('🔍 [DEBUG] Passenger object:', JSON.stringify(passenger, null, 2).substring(0, 500));
-    
     try {
-      // Validate required fields
-      if (!driver) {
-        console.error('❌ [DEBUG] Driver is null or undefined');
-        return null;
-      }
-      
-      if (!passenger) {
-        console.error('❌ [DEBUG] Passenger is null or undefined');
-        return null;
-      }
-      
-      // Extract IDs carefully
-      const driverId = driver.id || driver.driverId;
-      const passengerId = passenger.id || passenger.passengerId;
-      
-      if (!driverId) {
-        console.error('❌ [DEBUG] Driver ID missing. Driver keys:', Object.keys(driver));
-        return null;
-      }
-      
-      if (!passengerId) {
-        console.error('❌ [DEBUG] Passenger ID missing. Passenger keys:', Object.keys(passenger));
-        return null;
-      }
-      
-      console.log(`🔍 [DEBUG] Driver ID: ${driverId}, Passenger ID: ${passengerId}`);
-      
-      // Extract phone numbers carefully
-      const driverPhone = driver.userId || driver.driverPhone || driver.phone || driverId;
-      const passengerPhone = passenger.userId || passenger.passengerPhone || passenger.phone || passengerId;
-      
-      console.log(`🔍 [DEBUG] Driver phone: ${driverPhone}, Passenger phone: ${passengerPhone}`);
-      
-      // Extract names - passenger name should now be correct from saved data
-      const driverName = driver.driverName || driver.name || 'Driver';
-      const passengerName = passenger.passengerName || passenger.name || 
-                           passenger.passengerInfo?.name || 'Passenger';
-      
-      console.log(`🔍 [DEBUG] Driver name: ${driverName}, Passenger name: ${passengerName}`);
-      
-      // Extract counts
-      const passengerCount = passenger.passengerCount || 1;
-      const availableSeats = driver.availableSeats || 4;
-      
-      console.log(`🔍 [DEBUG] Passenger count: ${passengerCount}, Available seats: ${availableSeats}`);
-      
-      // Prepare match data
+      // Prepare match data with ALL available fields
       const matchData = {
-        driverId: driverId,
-        passengerId: passengerId,
-        driverPhone: driverPhone,
-        passengerPhone: passengerPhone,
-        driverName: driverName,
-        passengerName: passengerName,
+        driverId: driver.id,
+        passengerId: passenger.id,
+        driverPhone: driver.userId || driver.driverPhone || driver.id,
+        passengerPhone: passenger.userId || passenger.passengerPhone || passenger.id,
+        driverName: driver.driverName || 'Driver',
+        passengerName: passenger.passengerName || passenger.passengerInfo?.name || 'Passenger',
         status: 'awaiting_driver_approval',
         proposedAt: new Date().toISOString(),
         expiresAt: new Date(Date.now() + this.MATCH_EXPIRY).toISOString(),
         createdAt: new Date().toISOString(),
-        passengerCount: passengerCount,
-        availableSeats: availableSeats
+        passengerCount: passenger.passengerCount || 1,
+        availableSeats: driver.availableSeats || 4
       };
       
-      console.log('🔍 [DEBUG] Match data prepared:', JSON.stringify(matchData, null, 2));
-      
       // Add location data if available
-      if (driver.pickupLocation) {
-        matchData.pickupLocation = driver.pickupLocation;
-        console.log('🔍 [DEBUG] Added pickup location from driver');
-      }
+      if (driver.pickupLocation) matchData.pickupLocation = driver.pickupLocation;
+      if (driver.destinationLocation) matchData.destinationLocation = driver.destinationLocation;
+      if (passenger.pickupName) matchData.pickupName = passenger.pickupName;
+      if (passenger.destinationName) matchData.destinationName = passenger.destinationName;
+      if (driver.scheduledTime) matchData.scheduledTime = driver.scheduledTime;
+      if (passenger.scheduledTime) matchData.scheduledTime = passenger.scheduledTime;
       
-      if (driver.destinationLocation) {
-        matchData.destinationLocation = driver.destinationLocation;
-        console.log('🔍 [DEBUG] Added destination location from driver');
-      }
-      
-      if (passenger.pickupName) {
-        matchData.pickupName = passenger.pickupName;
-        console.log('🔍 [DEBUG] Added pickup name from passenger');
-      }
-      
-      if (passenger.destinationName) {
-        matchData.destinationName = passenger.destinationName;
-        console.log('🔍 [DEBUG] Added destination name from passenger');
-      }
-      
-      if (driver.scheduledTime) {
-        matchData.scheduledTime = driver.scheduledTime;
-        console.log('🔍 [DEBUG] Added scheduled time from driver');
-      }
-      
-      if (passenger.scheduledTime) {
-        matchData.scheduledTime = passenger.scheduledTime;
-        console.log('🔍 [DEBUG] Added scheduled time from passenger');
-      }
-      
-      console.log('🔍 [DEBUG] Attempting to save match to Firestore...');
+      // Add fare and distance data if available
+      if (passenger.estimatedFare) matchData.estimatedFare = passenger.estimatedFare;
+      if (passenger.estimatedDistance) matchData.estimatedDistance = passenger.estimatedDistance;
+      if (passenger.estimatedDuration) matchData.estimatedDuration = passenger.estimatedDuration;
       
       // Save match
       const matchId = await this.firestoreService.addDocument('scheduled_matches', matchData);
       
-      console.log(`🔍 [DEBUG] Match saved with ID: ${matchId}`);
-      
       // Update driver
-      console.log('🔍 [DEBUG] Updating driver document...');
-      await this.firestoreService.updateDocument('scheduled_searches_driver', driverId, {
+      await this.firestoreService.updateDocument('scheduled_searches_driver', driver.id, {
         pendingMatchId: matchId,
-        pendingMatchWith: passengerId,
+        pendingMatchWith: passenger.id,
         pendingMatchStatus: 'awaiting_driver_approval',
         updatedAt: new Date().toISOString()
       });
-      console.log('🔍 [DEBUG] Driver updated successfully');
       
       // Update passenger
-      console.log('🔍 [DEBUG] Updating passenger document...');
-      await this.firestoreService.updateDocument('scheduled_searches_passenger', passengerId, {
+      await this.firestoreService.updateDocument('scheduled_searches_passenger', passenger.id, {
         status: 'pending_driver_approval',
         matchId: matchId,
-        matchedWith: driverId,
+        matchedWith: driver.id,
         matchStatus: 'awaiting_driver_approval',
         updatedAt: new Date().toISOString()
       });
-      console.log('🔍 [DEBUG] Passenger updated successfully');
       
-      // Send notification
-      console.log('🔍 [DEBUG] Sending notification to driver...');
-      await this.notification.sendNotification(driverPhone, {
+      // Send notification to driver
+      await this.notification.sendNotification(matchData.driverPhone, {
         type: 'scheduled_match_proposed_to_driver',
         data: {
           matchId: matchId,
-          passengerPhone: passengerPhone,
-          passengerName: passengerName,
+          passengerPhone: matchData.passengerPhone,
+          passengerName: matchData.passengerName,
           tripDetails: {
             pickupName: matchData.pickupName || 'Pickup location',
             destinationName: matchData.destinationName || 'Destination',
             scheduledTime: matchData.scheduledTime,
-            passengerCount: passengerCount
+            passengerCount: matchData.passengerCount,
+            estimatedFare: matchData.estimatedFare,
+            estimatedDistance: matchData.estimatedDistance
           }
         }
       }, { important: true });
-      console.log('🔍 [DEBUG] Notification sent');
       
-      console.log(`✅ Match created successfully: ${matchId}`);
-      console.log('🔍 [DEBUG] ===== CREATE MATCH END (SUCCESS) =====');
-      
+      console.log(`✅ Match created: ${matchId}`);
       return matchId;
       
     } catch (error) {
-      console.error('❌ [DEBUG] Error in createMatch:', error.message);
-      console.error('❌ [DEBUG] Error stack:', error.stack);
-      console.error('❌ [DEBUG] ===== CREATE MATCH END (FAILURE) =====');
+      console.error('❌ Error creating match:', error.message);
       return null;
     }
   }
@@ -1016,7 +1123,9 @@ class ScheduledService {
           status: 'confirmed',
           pickupName: matchData.pickupName,
           destinationName: matchData.destinationName,
-          scheduledTime: matchData.scheduledTime
+          scheduledTime: matchData.scheduledTime,
+          estimatedFare: matchData.estimatedFare,
+          estimatedDistance: matchData.estimatedDistance
         };
         
         const currentAccepted = driverDoc.acceptedPassengers || [];
@@ -1064,7 +1173,8 @@ class ScheduledService {
                 vehicleInfo: driverDoc.vehicleInfo
               },
               pickupName: matchData.pickupName,
-              destinationName: matchData.destinationName
+              destinationName: matchData.destinationName,
+              estimatedFare: matchData.estimatedFare
             }
           }, { important: true }),
           
@@ -1076,7 +1186,8 @@ class ScheduledService {
               passengerName: matchData.passengerName,
               passengerPhone: matchData.passengerPhone,
               passengerDetails: matchData.passengerDetails,
-              seatsLeft: newSeats
+              seatsLeft: newSeats,
+              estimatedFare: matchData.estimatedFare
             }
           }, { important: true })
         ]);
@@ -1475,105 +1586,238 @@ class ScheduledService {
     try {
       if (!data) return null;
       
-      // Handle nested data structures
-      const source = data.data || data;
-      const loc = source[fieldName];
+      const location = data[fieldName];
       
-      if (!loc) return null;
+      if (!location) {
+        return null;
+      }
       
-      if (typeof loc === 'object') {
-        if (loc.lat !== undefined && loc.lng !== undefined) {
-          return { latitude: loc.lat, longitude: loc.lng };
+      if (typeof location === 'object' && location !== null) {
+        if (location.lat !== undefined && location.lng !== undefined) {
+          return { 
+            latitude: location.lat, 
+            longitude: location.lng 
+          };
         }
-        if (loc.latitude !== undefined && loc.longitude !== undefined) {
-          return { latitude: loc.latitude, longitude: loc.longitude };
+        if (location.latitude !== undefined && location.longitude !== undefined) {
+          return { 
+            latitude: location.latitude, 
+            longitude: location.longitude 
+          };
         }
-        // Handle GeoPoint
-        if (loc._lat !== undefined && loc._long !== undefined) {
-          return { latitude: loc._lat, longitude: loc._long };
+        if (location._lat !== undefined && location._long !== undefined) {
+          return { 
+            latitude: location._lat, 
+            longitude: location._long 
+          };
         }
       }
+      
       return null;
-    } catch {
+    } catch (error) {
       return null;
     }
   }
 
   extractTime(data) {
     try {
-      if (!data) return Date.now();
-      
-      const source = data.data || data;
-      const sources = [
-        source.scheduledTimestamp,
-        source.scheduledTime,
-        source.rideDetails?.scheduledTime,
-        source.createdAt
+      const timeSources = [
+        data.scheduledTimestamp,
+        data.scheduledTime,
+        data.departureTime,
+        data.pickupTime,
+        data.rideDetails?.scheduledTime,
+        data.createdAt
       ];
       
-      for (const src of sources) {
-        if (!src) continue;
-        if (typeof src === 'number') return src;
-        if (typeof src === 'string') {
-          const ts = new Date(src).getTime();
-          if (!isNaN(ts)) return ts;
+      for (const timeSource of timeSources) {
+        if (!timeSource) continue;
+        
+        if (typeof timeSource === 'number') {
+          return timeSource;
+        } else if (typeof timeSource === 'string') {
+          const timestamp = new Date(timeSource).getTime();
+          if (!isNaN(timestamp)) {
+            return timestamp;
+          }
+        } else if (timeSource && typeof timeSource.toDate === 'function') {
+          return timeSource.toDate().getTime();
         }
       }
-      return Date.now();
-    } catch {
-      return Date.now();
+      
+      return null;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  extractCapacity(data) {
+    try {
+      return data.availableSeats || 
+             data.capacity || 
+             data.seatsAvailable || 
+             data.vehicleInfo?.capacity ||
+             4;
+    } catch (error) {
+      return 4;
+    }
+  }
+
+  extractPassengerDetails(data) {
+    try {
+      let profilePhoto = null;
+      let passengerName = 'Passenger';
+      let passengerPhone = 'Unknown';
+      
+      if (data.passengerInfo && data.passengerInfo.photoUrl) {
+        profilePhoto = data.passengerInfo.photoUrl;
+      } else if (data.passengerPhotoUrl) {
+        profilePhoto = data.passengerPhotoUrl;
+      } else if (data.passenger && data.passenger.photoUrl) {
+        profilePhoto = data.passenger.photoUrl;
+      } else if (data.rideDetails?.passenger?.photoUrl) {
+        profilePhoto = data.rideDetails.passenger.photoUrl;
+      }
+      
+      if (data.passengerInfo && data.passengerInfo.name) {
+        passengerName = data.passengerInfo.name;
+      } else if (data.passengerName) {
+        passengerName = data.passengerName;
+      } else if (data.passenger && data.passenger.name) {
+        passengerName = data.passenger.name;
+      } else if (data.name) {
+        passengerName = data.name;
+      }
+      
+      if (data.passengerInfo && data.passengerInfo.phone) {
+        passengerPhone = data.passengerInfo.phone;
+      } else if (data.userId) {
+        passengerPhone = data.userId;
+      } else if (data.passengerPhone) {
+        passengerPhone = data.passengerPhone;
+      } else if (data.passenger && data.passenger.phone) {
+        passengerPhone = data.passenger.phone;
+      }
+      
+      return {
+        name: passengerName,
+        phone: passengerPhone,
+        passengerCount: this.extractPassengerCount(data),
+        luggageCount: data.luggageCount || 0,
+        profilePhoto: profilePhoto,
+        rating: data.passengerInfo?.rating || data.passengerRating || 5.0,
+        totalRides: data.passengerInfo?.totalRides || data.totalRides || 0,
+        completedRides: data.passengerInfo?.completedRides || data.completedRides || 0,
+        isVerified: data.passengerInfo?.isVerified || data.isVerified || false,
+        paymentMethod: data.paymentMethod || 'cash'
+      };
+    } catch (error) {
+      return {
+        name: 'Passenger',
+        phone: data?.userId || 'Unknown',
+        passengerCount: 1,
+        profilePhoto: null
+      };
     }
   }
 
   extractDriverDetails(data) {
-    const source = data.data || data;
-    return {
-      name: source.driverName || 'Driver',
-      phone: source.driverPhone || source.userId,
-      vehicleInfo: source.vehicleInfo || {},
-      vehicleType: source.vehicleType || 'Car',
-      vehicleModel: source.vehicleModel || 'Standard',
-      vehicleColor: source.vehicleColor || 'Not specified',
-      licensePlate: source.licensePlate || 'Not specified',
-      rating: source.rating || 5.0,
-      profilePhoto: source.profilePhoto || null,
-      availableSeats: source.availableSeats || 4
-    };
+    try {
+      return {
+        name: data.driverName || 
+              data.vehicleInfo?.driverName || 
+              data.userInfo?.name || 
+              'Driver',
+        phone: data.userId || data.driverPhone,
+        vehicleInfo: data.vehicleInfo || {},
+        vehicleType: data.vehicleType || 
+                    data.vehicleInfo?.type || 
+                    'Car',
+        vehicleModel: data.vehicleModel || 
+                     data.vehicleInfo?.model || 
+                     'Standard',
+        vehicleColor: data.vehicleColor || 
+                     data.vehicleInfo?.color || 
+                     'Not specified',
+        licensePlate: data.licensePlate || 
+                     data.vehicleInfo?.plate || 
+                     'Not specified',
+        rating: data.rating || 
+                data.driverRating || 
+                data.vehicleInfo?.driverRating || 
+                5.0,
+        totalRides: data.totalRides || 0,
+        profilePhoto: data.profilePhoto || 
+                     data.driverPhoto || 
+                     data.photoUrl || 
+                     null,
+        isVerified: data.isVerified || data.verified || false,
+        availableSeats: this.extractCapacity(data)
+      };
+    } catch (error) {
+      return {
+        name: 'Driver',
+        phone: data?.userId || 'Unknown',
+        vehicleInfo: {},
+        vehicleType: 'Car',
+        availableSeats: 4
+      };
+    }
   }
 
-  extractPassengerDetails(data) {
-    const source = data.data || data;
-    return {
-      name: source.passengerName || source.passengerInfo?.name || 'Passenger',
-      phone: source.passengerPhone || source.userId,
-      passengerCount: source.passengerCount || 1,
-      profilePhoto: source.passengerPhotoUrl || source.passengerInfo?.photoUrl || null,
-      rating: source.rating || 5.0
-    };
+  extractPassengerCount(data) {
+    try {
+      return data.passengerCount || 
+             data.numberOfPassengers || 
+             data.rideDetails?.passengerCount || 
+             1;
+    } catch (error) {
+      return 1;
+    }
+  }
+
+  getTimeCompatibilityLevel(timeDifferenceSeconds) {
+    const hours = timeDifferenceSeconds / 3600;
+    if (hours <= 0.5) return 'excellent';
+    if (hours <= 1) return 'good';
+    if (hours <= 2) return 'fair';
+    return 'flexible';
+  }
+
+  getLocationCompatibilityLevel(distanceMeters) {
+    const km = distanceMeters / 1000;
+    if (km <= 2) return 'excellent';
+    if (km <= 5) return 'good';
+    if (km <= 10) return 'fair';
+    return 'acceptable';
+  }
+
+  getCapacityCompatibility(availableSeats, requiredSeats) {
+    if (availableSeats >= requiredSeats) {
+      if (availableSeats === requiredSeats) return 'perfect';
+      return 'good';
+    }
+    return 'insufficient';
   }
 
   calculateDistance(loc1, loc2) {
-    if (!loc1 || !loc2) return 10000; // Return medium distance if missing
+    if (!loc1 || !loc2) return Infinity;
     
-    try {
-      const toRad = (value) => value * Math.PI / 180;
-      
-      const lat1 = loc1.latitude;
-      const lon1 = loc1.longitude;
-      const lat2 = loc2.latitude;
-      const lon2 = loc2.longitude;
-      
-      const R = 6371000;
-      const dLat = toRad(lat2 - lat1);
-      const dLon = toRad(lon2 - lon1);
-      const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
-                Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
-                Math.sin(dLon/2) * Math.sin(dLon/2);
-      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-      return R * c;
-    } catch {
-      return 10000;
-    }
+    const toRad = (value) => value * Math.PI / 180;
+    
+    const lat1 = loc1.latitude;
+    const lon1 = loc1.longitude;
+    const lat2 = loc2.latitude;
+    const lon2 = loc2.longitude;
+    
+    const R = 6371000;
+    const dLat = toRad(lat2 - lat1);
+    const dLon = toRad(lon2 - lon1);
+    const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+              Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+              Math.sin(dLon/2) * Math.sin(dLon/2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    return R * c;
   }
 
   // ========== CANCEL SCHEDULED SEARCH ==========
