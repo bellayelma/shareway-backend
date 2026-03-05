@@ -1,12 +1,13 @@
 // services/ScheduledService.js
 // COMPLETE MERGED VERSION - Combines old working logic with new optimizations
-// FIXED: Properly tracks accepted passengers in driver's collection
+// FIXED: Properly tracks accepted passengers in driver's collection with FULL DETAILS
 // FIXED: Handles same phone number re-creating schedule (updates existing)
 // FIXED: All data fields (fare, distance, name, photo) correctly extracted
 // FIXED: MATCHES EVERYONE regardless of location - removed all location filters
 // FIXED: Re-creating schedule triggers immediate matching for existing users
 // OPTIMIZED: Reduced reads/writes by 70% with caching and batch operations
 // OPTIMIZED: 3-minute matching interval, zero CPU when no users
+// UPDATED: EXACT Firestore document structure as specified in documentation
 
 const logger = require('../utils/Logger');
 
@@ -313,6 +314,7 @@ class ScheduledService {
             model: enrichedData.vehicleModel || 'Standard',
             color: enrichedData.vehicleColor || 'Not specified',
             plate: enrichedData.licensePlate || 'Not specified',
+            capacity: enrichedData.availableSeats || 4,
             driverName: realName || 'Driver',
             driverPhone: driverPhone,
             driverPhotoUrl: realPhoto || null,
@@ -517,7 +519,7 @@ class ScheduledService {
         lastUpdated: Date.now()
       };
       
-      // Add driver-specific fields
+      // Add driver-specific fields with EXACT structure from documentation
       if (userType === 'driver') {
         scheduledSearchData = {
           ...scheduledSearchData,
@@ -537,15 +539,16 @@ class ScheduledService {
           rating: sourceData.rating || sourceData.driverRating || 5.0,
           totalRides: sourceData.totalRides || 0,
           isVerified: sourceData.isVerified || sourceData.verified || false,
-          acceptedPassengers: [],
-          rejectedMatches: [],
-          acceptedPassengersSummary: [],
-          cancelledPassengersHistory: [],
-          totalAcceptedPassengers: 0,
+          acceptedPassengers: [], // Will store FULL passenger details when accepted
+          rejectedMatches: [], // Track rejected matches
+          acceptedPassengersSummary: [], // Quick summary for listing
+          cancelledPassengersHistory: [], // Track cancelled passengers
+          totalAcceptedPassengers: 0, // Running total
           lastActivityAt: new Date().toISOString(),
           lastActivityType: 'created_schedule'
         };
         
+        // EXACT vehicleInfo structure from documentation
         scheduledSearchData.vehicleInfo = {
           type: sourceData.vehicleType || 'Car',
           model: sourceData.vehicleModel || 'Standard',
@@ -575,7 +578,7 @@ class ScheduledService {
         }
       }
       
-      // Add passenger-specific fields
+      // Add passenger-specific fields with EXACT structure from documentation
       if (userType === 'passenger') {
         scheduledSearchData = {
           ...scheduledSearchData,
@@ -594,11 +597,12 @@ class ScheduledService {
           estimatedFare: sourceData.estimatedFare || 0,
           estimatedDistance: sourceData.estimatedDistance || 0,
           estimatedDuration: sourceData.estimatedDuration || 0,
-          matchHistory: [],
+          matchHistory: [], // Track match history
           rating: sourceData.rating || 5.0,
           profilePhoto: passengerPhotoUrl || sourceData.profilePhoto || null
         };
         
+        // EXACT rideDetails structure from documentation
         scheduledSearchData.rideDetails = {
           scheduledTime: timeString,
           scheduledTimestamp: scheduledTimestamp,
@@ -723,7 +727,7 @@ class ScheduledService {
       }
       
       // Trigger immediate matching - ALWAYS trigger for both new and existing users
-      console.log(`⚡ Triggering immediate matching for ${userType} ${userId} (${exists ? 'existing' : 'new'})`);
+      console.log(`⚡ Triggering immediate matching for ${userType} ${userId} (${exists ? 'updated' : 'new'})`);
       this.triggerMatching(`${exists ? 'updated' : 'new'}_${userType}_${userId}`).catch(err => 
         console.error('Background matching error:', err.message)
       );
@@ -1116,7 +1120,7 @@ class ScheduledService {
                               match.passengerData.rideDetails?.destinationName || 
                               'Destination';
       
-      // Create match document
+      // Create match document with EXACT structure from documentation
       const matchData = {
         driverId: match.driverId,
         passengerId: match.passengerId,
@@ -1128,8 +1132,11 @@ class ScheduledService {
         passengerDetails: passengerDetails,
         score: match.score,
         status: 'awaiting_driver_approval',
+        approvalStep: 1,
         proposedAt: new Date().toISOString(),
         expiresAt: new Date(Date.now() + this.MATCH_EXPIRY).toISOString(),
+        driverDecision: null,
+        passengerDecision: null,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
         
@@ -1140,6 +1147,7 @@ class ScheduledService {
         pickupName: pickupName,
         destinationName: destinationName,
         scheduledTime: match.driverData.scheduledTime || match.passengerData.scheduledTime,
+        scheduledTimestamp: match.driverData.scheduledTimestamp || match.passengerData.scheduledTimestamp,
         
         passengerData: match.passengerData,
         driverData: match.driverData,
@@ -1171,7 +1179,9 @@ class ScheduledService {
         matchId: matchId,
         matchedWith: match.driverPhone,
         matchStatus: 'awaiting_driver_approval',
-        matchScore: match.score
+        matchScore: match.score,
+        lastActivityAt: new Date().toISOString(),
+        lastActivityType: 'match_proposed'
       });
       
       // Send notification
@@ -1188,7 +1198,16 @@ class ScheduledService {
             destinationName: destinationName,
             scheduledTime: match.passengerData.scheduledTime,
             passengerCount: match.passengerCount,
-            estimatedFare: match.passengerData.estimatedFare
+            estimatedFare: match.passengerData.estimatedFare,
+            paymentMethod: match.passengerData.paymentMethod || 'cash'
+          },
+          expiresAt: new Date(Date.now() + this.MATCH_EXPIRY).toISOString(),
+          approvalDeadline: new Date(Date.now() + this.PENDING_EXPIRY).toISOString(),
+          timestamp: new Date().toISOString(),
+          driverCurrentStatus: {
+            availableSeats: match.availableSeats,
+            vehicleType: match.driverData.vehicleType || 'Car',
+            vehicleModel: match.driverData.vehicleModel || 'Standard'
           }
         }
       }, { important: true });
@@ -1199,7 +1218,7 @@ class ScheduledService {
   }
 
   // ========== ONE-STEP APPROVAL: DRIVER ACCEPTANCE ==========
-  // FIXED: Properly adds passenger to driver's acceptedPassengers array
+  // FIXED: Properly adds passenger to driver's acceptedPassengers array with FULL details
   
   async handleDriverMatchDecision(matchId, driverPhone, decision) {
     try {
@@ -1229,54 +1248,137 @@ class ScheduledService {
         let driverDoc = await this.getUserScheduledSearch('driver', driverPhone);
         if (!driverDoc) throw new Error('Driver scheduled search not found');
         
+        // Enrich driver data again to ensure latest profile info
+        driverDoc = await this.enrichDriverDataWithUserProfile(driverPhone, driverDoc);
+        
         const currentAvailableSeats = this.extractCapacity(driverDoc);
         const passengerCount = matchData.matchDetails?.passengerCount || 1;
         const newAvailableSeats = currentAvailableSeats - passengerCount;
         
         // Update match status to confirmed
         updateData.status = 'confirmed';
+        updateData.finalStatus = 'accepted';
         updateData.confirmedAt = new Date().toISOString();
         updateData.passengerDecision = 'accept';
+        updateData.passengerDecisionAt = new Date().toISOString();
+        updateData.passengerCount = passengerCount;
+        updateData.remainingSeatsAfterThisMatch = Math.max(0, newAvailableSeats);
         
         await matchRef.update(updateData);
         
-        // ✅ Create passenger record with FULL details
+        // ✅ Create passenger record with FULL details (EXACT structure from documentation)
         const passengerFullDetails = {
+          // Basic info
           passengerPhone: matchData.passengerPhone,
           passengerName: matchData.passengerName,
           passengerCount: passengerCount,
+          
+          // Profile details from passengerData
           profilePhoto: matchData.passengerDetails?.profilePhoto || 
-                        matchData.passengerData?.passengerPhotoUrl || null,
+                        matchData.passengerData?.passengerPhotoUrl ||
+                        matchData.passengerData?.passengerInfo?.photoUrl ||
+                        null,
+          
           photoUrl: matchData.passengerDetails?.profilePhoto || 
-                    matchData.passengerData?.passengerPhotoUrl || null,
-          rating: matchData.passengerDetails?.rating || 5.0,
-          totalRides: matchData.passengerDetails?.totalRides || 0,
-          completedRides: matchData.passengerDetails?.completedRides || 0,
-          isVerified: matchData.passengerDetails?.isVerified || false,
-          pickupLocation: matchData.pickupLocation || null,
-          destinationLocation: matchData.destinationLocation || null,
-          pickupName: matchData.pickupName || 'Pickup location',
-          destinationName: matchData.destinationName || 'Destination',
-          scheduledTime: matchData.scheduledTime || null,
-          paymentMethod: matchData.passengerDetails?.paymentMethod || 'cash',
+                    matchData.passengerData?.passengerPhotoUrl ||
+                    matchData.passengerData?.passengerInfo?.photoUrl ||
+                    null,
+          
+          rating: matchData.passengerDetails?.rating || 
+                  matchData.passengerData?.passengerInfo?.rating || 
+                  5.0,
+          
+          totalRides: matchData.passengerDetails?.totalRides || 
+                      matchData.passengerData?.passengerInfo?.totalRides || 
+                      0,
+          
+          completedRides: matchData.passengerDetails?.completedRides || 
+                          matchData.passengerData?.passengerInfo?.completedRides || 
+                          0,
+          
+          isVerified: matchData.passengerDetails?.isVerified || 
+                      matchData.passengerData?.passengerInfo?.isVerified || 
+                      false,
+          
+          // Trip details
+          pickupLocation: matchData.pickupLocation || 
+                          matchData.passengerData?.pickupLocation || 
+                          null,
+          
+          destinationLocation: matchData.destinationLocation || 
+                               matchData.passengerData?.destinationLocation || 
+                               null,
+          
+          pickupName: matchData.pickupName || 
+                      matchData.passengerData?.pickupName || 
+                      'Pickup location',
+          
+          destinationName: matchData.destinationName || 
+                           matchData.passengerData?.destinationName || 
+                           'Destination',
+          
+          scheduledTime: matchData.scheduledTime || 
+                         matchData.passengerData?.scheduledTime || 
+                         null,
+          
+          scheduledTimestamp: matchData.passengerData?.scheduledTimestamp || 
+                              this.extractTime(matchData.passengerData) || 
+                              null,
+          
+          // Payment and special requests
+          paymentMethod: matchData.passengerDetails?.paymentMethod || 
+                         matchData.passengerData?.paymentMethod || 
+                         'cash',
+          
           luggageCount: matchData.passengerData?.luggageCount || 0,
+          
           specialRequests: matchData.passengerData?.specialRequests || '',
+          
+          // Match metadata
           matchId: matchId,
           acceptedAt: new Date().toISOString(),
           confirmedAt: new Date().toISOString(),
           status: 'confirmed',
-          estimatedFare: matchData.matchDetails?.estimatedFare || 0,
+          
+          // Additional passenger info if available
+          passengerInfo: matchData.passengerData?.passengerInfo || 
+                         matchData.passengerDetails || 
+                         null,
+          
+          // Contact info (for quick access)
           contactInfo: {
             phone: matchData.passengerPhone,
             name: matchData.passengerName,
-            photoUrl: matchData.passengerDetails?.profilePhoto || null
+            photoUrl: matchData.passengerDetails?.profilePhoto || 
+                      matchData.passengerData?.passengerPhotoUrl ||
+                      null
+          },
+          
+          // Location coordinates for mapping
+          locationCoordinates: {
+            pickup: matchData.pickupLocation || matchData.passengerData?.pickupLocation,
+            destination: matchData.destinationLocation || matchData.passengerData?.destinationLocation
+          },
+          
+          // Fare information
+          estimatedFare: matchData.matchDetails?.estimatedFare || 
+                         matchData.passengerData?.estimatedFare || 
+                         0,
+          
+          // Driver's vehicle info at time of acceptance (for reference)
+          driverVehicleAtAcceptance: {
+            type: driverDoc.vehicleType || 'Car',
+            model: driverDoc.vehicleModel || 'Standard',
+            color: driverDoc.vehicleColor || 'Not specified',
+            plate: driverDoc.licensePlate || 'Not specified'
           }
         };
         
-        // Update driver's accepted passengers list
+        // Update driver's accepted passengers list with FULL details
         const currentAccepted = driverDoc.acceptedPassengers || [];
         const updatedAccepted = [...currentAccepted, passengerFullDetails];
         
+        // Create summary for quick access (EXACT structure from documentation)
         const acceptedSummary = updatedAccepted.map(p => ({
           phone: p.passengerPhone,
           name: p.passengerName,
@@ -1285,6 +1387,7 @@ class ScheduledService {
           photoUrl: p.profilePhoto,
           matchId: p.matchId,
           acceptedAt: p.acceptedAt,
+          confirmedAt: p.confirmedAt,
           pickupName: p.pickupName,
           destinationName: p.destinationName,
           estimatedFare: p.estimatedFare
@@ -1292,12 +1395,12 @@ class ScheduledService {
         
         const driverNewStatus = newAvailableSeats <= 0 ? 'fully_booked' : 'actively_matching';
         
-        // Update driver document
+        // Update driver document (EXACT structure from documentation)
         const driverUpdateData = {
           status: driverNewStatus,
           availableSeats: Math.max(0, newAvailableSeats),
-          acceptedPassengers: updatedAccepted,
-          acceptedPassengersSummary: acceptedSummary,
+          acceptedPassengers: updatedAccepted, // FULL passenger details
+          acceptedPassengersSummary: acceptedSummary, // Quick summary
           lastAcceptedAt: new Date().toISOString(),
           lastConfirmedAt: new Date().toISOString(),
           pendingMatchId: null,
@@ -1310,13 +1413,15 @@ class ScheduledService {
         
         await this.updateSearchStatus('driver', driverPhone, driverUpdateData);
         
-        // Build driver details for passenger
+        // Build driver details for passenger with COMPLETE vehicleInfo (EXACT structure)
         const driverDetailsForPassenger = {
           name: driverDoc.driverName || 'Driver',
           phone: driverPhone,
           photoUrl: driverDoc.profilePhoto || null,
           rating: driverDoc.rating || 5.0,
           availableSeats: newAvailableSeats,
+          
+          // COMPLETE vehicleInfo with ALL driver data
           vehicleInfo: driverDoc.vehicleInfo || {
             type: driverDoc.vehicleType || 'Car',
             model: driverDoc.vehicleModel || 'Standard',
@@ -1326,11 +1431,19 @@ class ScheduledService {
             driverPhone: driverPhone,
             driverPhotoUrl: driverDoc.profilePhoto || null,
             driverRating: driverDoc.rating || 5.0,
+            driverTotalRides: driverDoc.totalRides || 0,
+            driverCompletedRides: driverDoc.completedRides || 0,
             driverVerified: driverDoc.isVerified || false
           }
         };
         
-        // Update passenger status
+        console.log(`✅ [SCHEDULED] Driver details for passenger:`, {
+          name: driverDetailsForPassenger.name,
+          hasPhoto: !!driverDetailsForPassenger.photoUrl,
+          vehicleDriverName: driverDetailsForPassenger.vehicleInfo?.driverName
+        });
+        
+        // Update passenger status with COMPLETE driver details (EXACT structure)
         await this.updateSearchStatus('passenger', matchData.passengerPhone, {
           status: 'matched_confirmed',
           matchId: matchId,
@@ -1338,7 +1451,13 @@ class ScheduledService {
           matchStatus: 'confirmed',
           confirmedAt: new Date().toISOString(),
           driverAccepted: true,
-          driverDetails: driverDetailsForPassenger
+          driverAcceptedAt: new Date().toISOString(),
+          
+          // COMPLETE driver details with nested vehicleInfo
+          driverDetails: driverDetailsForPassenger,
+          
+          // Keep for backward compatibility
+          driverDetailsAtConfirmation: driverDetailsForPassenger
         });
         
         // Send confirmations
@@ -1347,6 +1466,11 @@ class ScheduledService {
         console.log(`✅ [SCHEDULED] Match ${matchId} confirmed by driver!`);
         console.log(`💺 [SCHEDULED] Seats left: ${newAvailableSeats}`);
         console.log(`👥 [SCHEDULED] Driver now has ${updatedAccepted.length} accepted passengers`);
+        console.log(`📸 [SCHEDULED] Passenger photo stored: ${passengerFullDetails.profilePhoto ? 'Yes' : 'No'}`);
+        console.log(`📸 [SCHEDULED] Driver photo stored: ${driverDetailsForPassenger.photoUrl ? 'Yes' : 'No'}`);
+        console.log(`📊 [SCHEDULED] Total accepted passengers: ${updatedAccepted.length}`);
+        console.log(`🚗 [SCHEDULED] Driver vehicleInfo saved to passenger document:`, 
+          driverDetailsForPassenger.vehicleInfo ? 'Yes' : 'No');
         
         return { success: true, matchId, decision };
         
@@ -1408,12 +1532,15 @@ class ScheduledService {
       }
       
       const acceptedPassengers = driverDoc.acceptedPassengers || [];
+      const summary = driverDoc.acceptedPassengersSummary || [];
       
+      // Enhance passenger data with any additional info
       const enhancedPassengers = acceptedPassengers.map(passenger => ({
         ...passenger,
-        displayName: passenger.passengerName || 'Passenger',
-        photoUrl: passenger.profilePhoto || passenger.photoUrl || null,
+        displayName: passenger.passengerName || passenger.name || 'Passenger',
+        photoUrl: passenger.profilePhoto || passenger.photoUrl || passenger.passengerInfo?.photoUrl,
         timeUntilPickup: this.calculateTimeUntilPickup(passenger.scheduledTime),
+        // Format for Flutter display
         passengerName: passenger.passengerName,
         passengerPhone: passenger.passengerPhone,
         passengerCount: passenger.passengerCount,
@@ -1427,10 +1554,13 @@ class ScheduledService {
       return {
         success: true,
         passengers: enhancedPassengers,
+        summary: summary,
         totalPassengers: enhancedPassengers.length,
         availableSeats: driverDoc.availableSeats || 0,
         driverStatus: driverDoc.status,
         driverName: driverDoc.driverName,
+        driverPhone: driverPhone,
+        // Include full driver document for Flutter screen
         driverDoc: {
           id: driverDoc.id,
           driverName: driverDoc.driverName,
@@ -1440,6 +1570,16 @@ class ScheduledService {
           scheduledTime: driverDoc.scheduledTime,
           pickupName: driverDoc.pickupName,
           destinationName: driverDoc.destinationName,
+          pickupLocation: driverDoc.pickupLocation,
+          destinationLocation: driverDoc.destinationLocation,
+          vehicleType: driverDoc.vehicleType,
+          vehicleModel: driverDoc.vehicleModel,
+          vehicleColor: driverDoc.vehicleColor,
+          licensePlate: driverDoc.licensePlate,
+          profilePhoto: driverDoc.profilePhoto,
+          rating: driverDoc.rating,
+          totalRides: driverDoc.totalRides,
+          isVerified: driverDoc.isVerified,
           vehicleInfo: driverDoc.vehicleInfo
         }
       };
@@ -1509,29 +1649,83 @@ class ScheduledService {
   }
   
   async notifyMatchConfirmed(matchData, matchId, confirmingUserId, decision) {
+    // Build driver notification
+    const driverNotification = {
+      type: 'scheduled_match_confirmed',
+      data: {
+        matchId: matchId,
+        confirmedBy: confirmingUserId,
+        confirmedByType: 'driver',
+        passengerPhone: matchData.passengerPhone,
+        passengerName: matchData.passengerName,
+        passengerDetails: matchData.passengerDetails,
+        confirmedAt: new Date().toISOString(),
+        timestamp: new Date().toISOString(),
+        contactInfo: {
+          passengerPhone: matchData.passengerPhone,
+          passengerName: matchData.passengerName,
+          passengerPhoto: matchData.passengerDetails?.profilePhoto
+        },
+        matchDetails: matchData.matchDetails,
+        pickupName: matchData.pickupName || 'Pickup location',
+        destinationName: matchData.destinationName || 'Destination'
+      }
+    };
+    
+    // Build passenger notification with COMPLETE vehicleInfo
+    const passengerNotification = {
+      type: 'scheduled_match_confirmed',
+      data: {
+        matchId: matchId,
+        confirmedBy: confirmingUserId,
+        confirmedByType: 'driver',
+        driverPhone: matchData.driverPhone,
+        driverName: matchData.driverName,
+        driverDetails: {
+          name: matchData.driverName,
+          phone: matchData.driverPhone,
+          photoUrl: matchData.driverDetails?.profilePhoto || matchData.driverData?.profilePhoto,
+          rating: matchData.driverDetails?.rating || 5.0,
+          availableSeats: matchData.matchDetails?.driverCapacity || 0,
+          // Include the ENTIRE vehicleInfo object
+          vehicleInfo: matchData.driverData?.vehicleInfo || {
+            type: matchData.driverData?.vehicleType || 'Car',
+            model: matchData.driverData?.vehicleModel || 'Standard',
+            color: matchData.driverData?.vehicleColor || 'Not specified',
+            plate: matchData.driverData?.licensePlate || 'Not specified',
+            driverName: matchData.driverName,
+            driverPhone: matchData.driverPhone,
+            driverPhotoUrl: matchData.driverDetails?.profilePhoto || matchData.driverData?.profilePhoto,
+            driverRating: matchData.driverDetails?.rating || 5.0,
+            driverTotalRides: matchData.driverDetails?.totalRides || 0,
+            driverCompletedRides: matchData.driverDetails?.completedRides || 0,
+            driverVerified: matchData.driverDetails?.isVerified || false
+          }
+        },
+        confirmedAt: new Date().toISOString(),
+        timestamp: new Date().toISOString(),
+        contactInfo: {
+          driverPhone: matchData.driverPhone,
+          driverName: matchData.driverName,
+          vehicleInfo: matchData.driverData?.vehicleInfo || {
+            type: matchData.driverData?.vehicleType || 'Car',
+            model: matchData.driverData?.vehicleModel || 'Standard',
+            color: matchData.driverData?.vehicleColor || 'Not specified',
+            plate: matchData.driverData?.licensePlate || 'Not specified'
+          },
+          driverPhoto: matchData.driverDetails?.profilePhoto || matchData.driverData?.profilePhoto
+        },
+        matchDetails: matchData.matchDetails,
+        pickupName: matchData.pickupName || 'Pickup location',
+        destinationName: matchData.destinationName || 'Destination',
+        scheduledTime: matchData.scheduledTime
+      }
+    };
+    
     // Send notifications to both parties
     await Promise.all([
-      this.sendNotification(matchData.driverPhone, {
-        type: 'scheduled_match_confirmed',
-        data: {
-          matchId: matchId,
-          confirmedBy: confirmingUserId,
-          passengerName: matchData.passengerName,
-          passengerPhone: matchData.passengerPhone,
-          passengerDetails: matchData.passengerDetails
-        }
-      }, { important: true }),
-      
-      this.sendNotification(matchData.passengerPhone, {
-        type: 'scheduled_match_confirmed',
-        data: {
-          matchId: matchId,
-          confirmedBy: confirmingUserId,
-          driverName: matchData.driverName,
-          driverPhone: matchData.driverPhone,
-          driverDetails: matchData.driverDetails
-        }
-      }, { important: true })
+      this.sendNotification(matchData.driverPhone, driverNotification, { important: true }),
+      this.sendNotification(matchData.passengerPhone, passengerNotification, { important: true })
     ]);
     
     console.log(`🎉 [SCHEDULED] Match ${matchId} confirmed!`);
@@ -1550,6 +1744,9 @@ class ScheduledService {
         }
         if (location.latitude !== undefined && location.longitude !== undefined) {
           return { latitude: location.latitude, longitude: location.longitude };
+        }
+        if (location._lat !== undefined && location._long !== undefined) {
+          return { latitude: location._lat, longitude: location._long };
         }
       }
       return null;
@@ -1574,6 +1771,9 @@ class ScheduledService {
           const ts = new Date(source).getTime();
           if (!isNaN(ts)) return ts;
         }
+        if (source && typeof source.toDate === 'function') {
+          return source.toDate().getTime();
+        }
       }
       return Date.now();
     } catch {
@@ -1583,7 +1783,11 @@ class ScheduledService {
   
   extractCapacity(data) {
     try {
-      return data.availableSeats || data.capacity || 4;
+      return data.availableSeats || 
+             data.capacity || 
+             data.seatsAvailable || 
+             data.vehicleInfo?.capacity ||
+             4;
     } catch {
       return 4;
     }
@@ -1591,12 +1795,27 @@ class ScheduledService {
   
   extractPassengerDetails(data) {
     try {
+      let profilePhoto = null;
+      
+      if (data.passengerInfo && data.passengerInfo.photoUrl) {
+        profilePhoto = data.passengerInfo.photoUrl;
+      } else if (data.passengerPhotoUrl) {
+        profilePhoto = data.passengerPhotoUrl;
+      } else if (data.passenger && data.passenger.photoUrl) {
+        profilePhoto = data.passenger.photoUrl;
+      } else if (data.rideDetails?.passenger?.photoUrl) {
+        profilePhoto = data.rideDetails.passenger.photoUrl;
+      }
+      
       return {
         name: data.passengerInfo?.name || data.passengerName || 'Passenger',
         phone: data.passengerInfo?.phone || data.passengerPhone || data.userId,
         passengerCount: data.passengerCount || 1,
-        profilePhoto: data.passengerInfo?.photoUrl || data.passengerPhotoUrl || null,
-        rating: data.rating || 5.0,
+        profilePhoto: profilePhoto,
+        rating: data.passengerInfo?.rating || data.rating || 5.0,
+        totalRides: data.passengerInfo?.totalRides || data.totalRides || 0,
+        completedRides: data.passengerInfo?.completedRides || data.completedRides || 0,
+        isVerified: data.passengerInfo?.isVerified || data.isVerified || false,
         paymentMethod: data.paymentMethod || 'cash'
       };
     } catch {
@@ -1614,16 +1833,35 @@ class ScheduledService {
   extractDriverDetails(data) {
     try {
       return {
-        name: data.driverName || 'Driver',
-        phone: data.driverPhone || data.userId,
+        name: data.driverName || 
+              data.vehicleInfo?.driverName || 
+              data.userInfo?.name || 
+              'Driver',
+        phone: data.userId || data.driverPhone,
         vehicleInfo: data.vehicleInfo || {},
-        vehicleType: data.vehicleType || 'Car',
-        vehicleModel: data.vehicleModel || 'Standard',
-        vehicleColor: data.vehicleColor || 'Not specified',
-        licensePlate: data.licensePlate || 'Not specified',
-        rating: data.rating || 5.0,
-        profilePhoto: data.profilePhoto || null,
-        availableSeats: data.availableSeats || 4
+        vehicleType: data.vehicleType || 
+                    data.vehicleInfo?.type || 
+                    'Car',
+        vehicleModel: data.vehicleModel || 
+                     data.vehicleInfo?.model || 
+                     'Standard',
+        vehicleColor: data.vehicleColor || 
+                     data.vehicleInfo?.color || 
+                     'Not specified',
+        licensePlate: data.licensePlate || 
+                     data.vehicleInfo?.plate || 
+                     'Not specified',
+        rating: data.rating || 
+                data.driverRating || 
+                data.vehicleInfo?.driverRating || 
+                5.0,
+        totalRides: data.totalRides || 0,
+        profilePhoto: data.profilePhoto || 
+                     data.driverPhoto || 
+                     data.photoUrl || 
+                     null,
+        isVerified: data.isVerified || data.verified || false,
+        availableSeats: this.extractCapacity(data)
       };
     } catch {
       return {
@@ -1649,9 +1887,14 @@ class ScheduledService {
       const diffHours = Math.floor(diffMins / 60);
       const remainingMins = diffMins % 60;
       
-      if (diffHours > 24) return `${Math.floor(diffHours / 24)}d`;
-      if (diffHours > 0) return `${diffHours}h ${remainingMins}m`;
-      return `${diffMins}m`;
+      if (diffHours > 24) {
+        const days = Math.floor(diffHours / 24);
+        return `${days} day${days > 1 ? 's' : ''}`;
+      } else if (diffHours > 0) {
+        return `${diffHours}h ${remainingMins}m`;
+      } else {
+        return `${diffMins} min`;
+      }
     } catch {
       return 'Unknown';
     }
