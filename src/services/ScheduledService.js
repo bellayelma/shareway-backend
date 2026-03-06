@@ -1,15 +1,14 @@
 // services/ScheduledService.js
-// COMPLETE FIXED VERSION - Matches every time, zero CPU when idle, minimal reads/writes
-// FIXED: Removes recent match cache blocking - always matches when users are present
-// FIXED: Only triggers matching when users actually join (no polling)
-// OPTIMIZED: Event-driven architecture - zero CPU when no users
-// OPTIMIZED: Single read per user, minimal writes
+// COMPLETE FIXED VERSION - NO RECENT MATCHES CACHE, ALWAYS MATCHES
+// FIXED: Removed ALL recent matches cache references
+// FIXED: Always matches when users are present
+// OPTIMIZED: Event-driven, zero CPU when idle
 
 const logger = require('../utils/Logger');
 
 class ScheduledService {
   constructor(firestoreService, websocketServer, admin, notificationService) {
-    console.log('🚀 [SCHEDULED] Initializing EVENT-DRIVEN version with ZERO CPU when idle...');
+    console.log('🚀 [SCHEDULED] Initializing ALWAYS-MATCH version with NO BLOCKING CACHE...');
     
     this.firestoreService = firestoreService;
     this.websocketServer = websocketServer;
@@ -34,10 +33,12 @@ class ScheduledService {
     this.MATCH_EXPIRY = 30 * 60 * 1000; // 30 minutes
     this.PENDING_EXPIRY = 15 * 60 * 1000; // 15 minutes
     
-    // Match tracking - but NO BLOCKING
+    // NO RECENT MATCHES CACHE - removed completely
+    
+    // Active users in memory
     this.activeDrivers = new Map(); // phone -> { data, timestamp }
     this.activePassengers = new Map(); // phone -> { data, timestamp }
-    this.processingMatches = new Set(); // Currently processing matches
+    this.processingMatches = new Set(); // Currently processing matches (short-term only)
     this.userTTL = 30 * 60 * 1000; // 30 minutes
     
     // Throttling for triggers
@@ -47,12 +48,12 @@ class ScheduledService {
     // Start cleanup interval only (runs every 5 minutes, minimal reads)
     this.cleanupInterval = setInterval(() => this.cleanup(), 300000); // 5 minutes
     
-    logger.info('SCHEDULED_SERVICE', '🚀 Event-driven Scheduled Service initialized');
+    logger.info('SCHEDULED_SERVICE', '🚀 Always-Match Scheduled Service initialized');
   }
   
   async start() {
-    console.log('🚀 [SCHEDULED] Starting EVENT-DRIVEN service...');
-    console.log('📊 Settings: No polling, event-driven only, 5min cleanup');
+    console.log('🚀 [SCHEDULED] Starting ALWAYS-MATCH service...');
+    console.log('📊 Settings: Event-driven only, 5min cleanup, NO BLOCKING CACHE');
     console.log('📍 [SCHEDULED] LOCATION CHECKS DISABLED - Matching everyone');
     
     // Test connection
@@ -463,7 +464,6 @@ class ScheduledService {
   }
   
   // ========== EVENT-DRIVEN TRIGGER ==========
-  // FIXED: Only triggers when users are added, no polling
   
   async triggerMatching(triggeredByType, triggeredById) {
     const now = Date.now();
@@ -486,8 +486,7 @@ class ScheduledService {
   }
   
   // ========== PERFORM MATCHING ==========
-  // FIXED: Always matches, no blocking cache
-  // OPTIMIZED: Uses in-memory cache first, then falls back to Firestore
+  // FIXED: NO RECENT MATCHES CACHE - always matches when users are present
   
   async performMatching() {
     console.log('🤝 [SCHEDULED] ========== PERFORMING MATCHING ==========');
@@ -542,6 +541,8 @@ class ScheduledService {
           return;
         }
         
+        console.log(`📊 Firestore: ${dbDrivers.length} drivers, ${dbPassengers.length} passengers`);
+        
         // Update memory cache with fresh data
         for (const driver of dbDrivers) {
           this.activeDrivers.set(driver.id, {
@@ -562,9 +563,9 @@ class ScheduledService {
       
       console.log(`🎯 Final: ${drivers.length} drivers, ${passengers.length} passengers ready`);
       
-      // STEP 3: Find matches - NO BLOCKING CACHE!
+      // STEP 3: Find matches - NO RECENT MATCHES CACHE!
       let matchesCreated = 0;
-      const processedPairs = new Set();
+      const processedPairs = new Set(); // Only for this cycle, not persistent
       
       for (const driver of drivers) {
         const driverData = driver.data;
@@ -584,9 +585,9 @@ class ScheduledService {
           if (processedPairs.has(pairKey)) continue;
           processedPairs.add(pairKey);
           
-          // Check if this pair is currently being processed
+          // Check if this pair is currently being processed (short-term lock)
           if (this.processingMatches.has(pairKey)) {
-            console.log(`  ⚙️ Already processing: ${pairKey}, skipping`);
+            console.log(`  ⚙️ Already processing: ${pairKey}, skipping for now`);
             continue;
           }
           
@@ -598,10 +599,10 @@ class ScheduledService {
             continue;
           }
           
-          // ✅ MATCH FOUND - always match, no cache blocking!
+          // ✅ MATCH FOUND - ALWAYS MATCH, NO CACHE BLOCKING!
           console.log(`✅ MATCHING: Driver ${driver.id} ↔ Passenger ${passenger.id} (${passengerCount} pax)`);
           
-          // Mark as processing to prevent duplicates
+          // Mark as processing to prevent duplicates (short-term lock)
           this.processingMatches.add(pairKey);
           
           // Process the match
@@ -642,10 +643,11 @@ class ScheduledService {
       
       console.log(`🎯 [SCHEDULED] Created ${matchesCreated} matches this cycle`);
       
-      // Clean up processing markers (matches that are done)
+      // Clean up processing markers after a delay
       setTimeout(() => {
         this.processingMatches.clear();
-      }, 5000);
+        console.log('🧹 [SCHEDULED] Cleared processing locks');
+      }, 10000);
       
     } catch (error) {
       console.error('❌ [SCHEDULED] Matching error:', error.message);
@@ -684,6 +686,7 @@ class ScheduledService {
         });
       }
       
+      console.log(`📊 Found ${activeUsers.length} active ${userType}s (location checks disabled)`);
       return activeUsers;
       
     } catch (error) {
@@ -803,8 +806,9 @@ class ScheduledService {
       setTimeout(() => {
         if (match.pairKey) {
           this.processingMatches.delete(match.pairKey);
+          console.log(`🧹 [SCHEDULED] Removed processing lock for ${match.pairKey}`);
         }
-      }, 10000);
+      }, 15000);
       
     } catch (error) {
       console.error('❌ [SCHEDULED] Error processing match:', error.message);
