@@ -1,18 +1,16 @@
 // services/ScheduledService.js
-// COMPLETE FIXED VERSION - With full driver accepted passengers storage
-// FIXED: Added comprehensive null checks throughout
-// FIXED: Stores accepted passengers with FULL details in driver's document
-// FIXED: Includes getDriverAcceptedPassengers method
-// FIXED: Includes cancellation handlers (Cancel All, Cancel Single, Passenger Cancel)
-// FIXED: Creates cancellation records in trip_cancellations collection
-// FIXED: No recent matches cache - matches every time
-// FIXED: Event-driven - zero CPU when idle
+// COMPLETE FIXED VERSION - Properly updates Firestore structure
+// FIXED: Now correctly updates acceptedPassengers array in driver document
+// FIXED: Updates availableSeats in driver document
+// FIXED: Creates acceptedPassengersSummary
+// FIXED: Updates totalAcceptedPassengers counter
+// FIXED: Matches the EXACT Firestore structure from your logs
 
 const logger = require('../utils/Logger');
 
 class ScheduledService {
   constructor(firestoreService, websocketServer, admin, notificationService) {
-    console.log('🚀 [SCHEDULED] Initializing COMPLETE version with FULL passenger storage...');
+    console.log('🚀 [SCHEDULED] Initializing FIRESTORE-STRUCTURE-FIXED version...');
     
     this.firestoreService = firestoreService;
     this.websocketServer = websocketServer;
@@ -43,25 +41,24 @@ class ScheduledService {
     this.PENDING_EXPIRY = 15 * 60 * 1000; // 15 minutes
     
     // Active users in memory
-    this.activeDrivers = new Map(); // phone -> { data, timestamp }
-    this.activePassengers = new Map(); // phone -> { data, timestamp }
-    this.processingMatches = new Set(); // Currently processing matches (short-term only)
-    this.userTTL = 30 * 60 * 1000; // 30 minutes
+    this.activeDrivers = new Map();
+    this.activePassengers = new Map();
+    this.processingMatches = new Set();
+    this.userTTL = 30 * 60 * 1000;
     
     // Throttling for triggers
     this.lastTriggerTime = 0;
-    this.MIN_TRIGGER_INTERVAL = 2000; // 2 seconds minimum between triggers
+    this.MIN_TRIGGER_INTERVAL = 2000;
     
-    // Start cleanup interval only (runs every 5 minutes, minimal reads)
-    this.cleanupInterval = setInterval(() => this.cleanup(), 300000); // 5 minutes
+    // Start cleanup interval
+    this.cleanupInterval = setInterval(() => this.cleanup(), 300000);
     
-    logger.info('SCHEDULED_SERVICE', '🚀 Complete Scheduled Service initialized');
+    logger.info('SCHEDULED_SERVICE', '🚀 Firestore-Structure-Fixed Scheduled Service initialized');
   }
   
   async start() {
-    console.log('🚀 [SCHEDULED] Starting COMPLETE service...');
+    console.log('🚀 [SCHEDULED] Starting FIRESTORE-STRUCTURE-FIXED service...');
     console.log('📊 Settings: Event-driven only, 5min cleanup, NO BLOCKING CACHE');
-    console.log('📍 [SCHEDULED] LOCATION CHECKS DISABLED - Matching everyone');
     
     // Test connection
     try {
@@ -181,15 +178,8 @@ class ScheduledService {
   
   async enrichDriverDataWithUserProfile(driverPhone, driverData) {
     try {
-      if (!driverPhone) {
-        console.log('⚠️ [SCHEDULED] enrichDriverDataWithUserProfile: driverPhone is null');
-        return driverData || {};
-      }
-      
-      if (!driverData) {
-        console.log('⚠️ [SCHEDULED] enrichDriverDataWithUserProfile: driverData is null');
-        driverData = {};
-      }
+      if (!driverPhone) return driverData || {};
+      if (!driverData) driverData = {};
       
       const sanitizedPhone = this.sanitizePhoneNumber(driverPhone);
       
@@ -218,27 +208,22 @@ class ScheduledService {
         return driverData;
       }
       
-      const realName = userData.name || userData.displayName || userData.fullName || null;
-      const realPhoto = userData.photoUrl || userData.photoURL || userData.profilePhoto || null;
-      
-      console.log(`📋 [SCHEDULED] Found user profile for ${driverPhone}:`, {
-        name: realName,
-        hasPhoto: !!realPhoto
-      });
+      const realName = userData.name || userData.displayName || userData.fullName || driverData.driverName || 'Driver';
+      const realPhoto = userData.photoUrl || userData.photoURL || userData.profilePhoto || driverData.profilePhoto || null;
       
       const enrichedData = {
         ...driverData,
-        driverName: realName || driverData.driverName || 'Driver',
-        profilePhoto: realPhoto || driverData.profilePhoto || null,
-        name: realName || driverData.name || 'Driver',
-        photoUrl: realPhoto || driverData.photoUrl || null,
+        driverName: realName,
+        profilePhoto: realPhoto,
+        name: realName,
+        photoUrl: realPhoto,
       };
       
       if (enrichedData.vehicleInfo && typeof enrichedData.vehicleInfo === 'object') {
         enrichedData.vehicleInfo = {
           ...enrichedData.vehicleInfo,
-          driverName: realName || enrichedData.vehicleInfo.driverName || 'Driver',
-          driverPhotoUrl: realPhoto || enrichedData.vehicleInfo.driverPhotoUrl || null,
+          driverName: realName,
+          driverPhotoUrl: realPhoto,
         };
       } else {
         enrichedData.vehicleInfo = {
@@ -247,20 +232,15 @@ class ScheduledService {
           color: enrichedData.vehicleColor || 'Not specified',
           plate: enrichedData.licensePlate || 'Not specified',
           capacity: enrichedData.availableSeats || 4,
-          driverName: realName || 'Driver',
+          driverName: realName,
           driverPhone: driverPhone,
-          driverPhotoUrl: realPhoto || null,
+          driverPhotoUrl: realPhoto,
           driverRating: enrichedData.rating || 5.0,
           driverTotalRides: enrichedData.totalRides || 0,
           driverCompletedRides: enrichedData.completedRides || 0,
           driverVerified: enrichedData.isVerified || false
         };
       }
-      
-      console.log(`✅ [SCHEDULED] Enriched driver data:`, {
-        name: enrichedData.driverName,
-        hasPhoto: !!enrichedData.profilePhoto
-      });
       
       return enrichedData;
       
@@ -785,6 +765,7 @@ class ScheduledService {
       };
       
       await this.updateDocument(collectionName, sanitizedPhone, fullUpdates);
+      console.log(`✅ [FIRESTORE] Updated document ${collectionName}/${sanitizedPhone}`);
       
       if (userType === 'driver') {
         const cached = this.activeDrivers.get(sanitizedPhone);
@@ -872,13 +853,30 @@ class ScheduledService {
       
       const matchId = await this.addDocument('scheduled_matches', matchData);
       
-      console.log(`✅ [SCHEDULED] Match document created: ${matchId}`);
+      console.log(`✅ [FIRESTORE] Added document to scheduled_matches: ${matchId}`);
       
       await this.updateSearchStatus('driver', match.driverPhone, {
         status: 'actively_matching',
-        pendingMatchId: matchId,
+        pendingMatchId: {
+          approvalStep: 1,
+          createdAt: new Date().toISOString(),
+          destinationLocation: matchData.destinationLocation,
+          destinationName: destinationName,
+          driverData: match.driverData,
+          matchDetails: matchData.matchDetails,
+          passengerData: match.passengerData,
+          passengerId: match.passengerId,
+          passengerName: passengerDetails.name,
+          pickupLocation: matchData.pickupLocation,
+          pickupName: pickupName,
+          proposedAt: matchData.proposedAt,
+          scheduledTime: match.driverData?.scheduledTime || match.passengerData?.scheduledTime,
+          scheduledTimestamp: match.driverData?.scheduledTimestamp || match.passengerData?.scheduledTimestamp,
+          status: 'awaiting_driver_approval'
+        },
         pendingMatchWith: match.passengerPhone,
-        pendingMatchStatus: 'awaiting_driver_approval'
+        pendingMatchStatus: 'awaiting_driver_approval',
+        matchScore: 70
       });
       
       await this.updateSearchStatus('passenger', match.passengerPhone, {
@@ -914,7 +912,6 @@ class ScheduledService {
       setTimeout(() => {
         if (match.pairKey) {
           this.processingMatches.delete(match.pairKey);
-          console.log(`🧹 [SCHEDULED] Removed processing lock for ${match.pairKey}`);
         }
       }, 15000);
       
@@ -926,151 +923,110 @@ class ScheduledService {
     }
   }
   
-  // ========== DRIVER MATCH DECISION HANDLER ==========
-  // Stores accepted passenger with FULL details in driver's document
+  // ========== DRIVER MATCH DECISION HANDLER - FIXED VERSION ==========
+  // This now properly updates the Firestore structure
   
   async handleDriverMatchDecision(matchId, driverPhone, decision) {
     try {
-      console.log(`🤔 [SCHEDULED] Driver ${driverPhone} decision: ${decision}`);
+      console.log(`🤔 [SCHEDULED] Driver ${driverPhone} decision: ${decision} for match ${matchId}`);
       
       const matchRef = this.db.collection('scheduled_matches').doc(matchId);
       const matchDoc = await matchRef.get();
       
-      if (!matchDoc.exists) throw new Error('Match not found');
+      if (!matchDoc.exists) {
+        console.error(`❌ [SCHEDULED] Match ${matchId} not found`);
+        return { success: false, error: 'Match not found' };
+      }
       
       const matchData = matchDoc.data();
-      if (matchData.driverPhone !== driverPhone) throw new Error('Unauthorized');
+      if (matchData.driverPhone !== driverPhone) {
+        console.error(`❌ [SCHEDULED] Unauthorized: ${driverPhone} vs ${matchData.driverPhone}`);
+        return { success: false, error: 'Unauthorized' };
+      }
+      
       if (matchData.status === 'expired') {
         return { success: false, error: 'Match has expired', matchId };
       }
       
-      const updateData = {
-        driverDecision: decision,
-        driverDecisionAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString()
-      };
-      
       if (decision === 'accept') {
-        let driverDoc = await this.getDocument('scheduled_searches_driver', driverPhone);
-        driverDoc = driverDoc.data ? driverDoc.data() : driverDoc;
+        console.log(`✅ [SCHEDULED] Driver ${driverPhone} ACCEPTING match ${matchId}`);
         
-        driverDoc = await this.enrichDriverDataWithUserProfile(driverPhone, driverDoc);
+        // Get driver document using the correct phone format
+        const driverDocRef = this.db.collection('scheduled_searches_driver').doc(driverPhone);
+        const driverDocSnapshot = await driverDocRef.get();
         
-        const currentAvailableSeats = this.extractCapacity(driverDoc);
+        if (!driverDocSnapshot.exists) {
+          console.error(`❌ [SCHEDULED] Driver document not found for ${driverPhone}`);
+          return { success: false, error: 'Driver document not found' };
+        }
+        
+        const driverDoc = driverDocSnapshot.data();
+        console.log(`📄 [SCHEDULED] Driver current availableSeats: ${driverDoc.availableSeats}`);
+        
         const passengerCount = matchData.matchDetails?.passengerCount || 1;
-        const newAvailableSeats = currentAvailableSeats - passengerCount;
+        const currentAvailableSeats = driverDoc.availableSeats || 0;
+        const newAvailableSeats = Math.max(0, currentAvailableSeats - passengerCount);
         
-        updateData.status = 'confirmed';
-        updateData.finalStatus = 'accepted';
-        updateData.confirmedAt = new Date().toISOString();
-        updateData.passengerDecision = 'accept';
-        updateData.passengerDecisionAt = new Date().toISOString();
-        updateData.passengerCount = passengerCount;
-        updateData.remainingSeatsAfterThisMatch = Math.max(0, newAvailableSeats);
+        console.log(`💺 [SCHEDULED] Seats: current=${currentAvailableSeats}, needed=${passengerCount}, new=${newAvailableSeats}`);
         
-        await matchRef.update(updateData);
+        // Get passenger details from match data
+        const passengerPhone = matchData.passengerPhone;
+        const passengerName = matchData.passengerName || 'Passenger';
+        const passengerPhoto = matchData.passengerDetails?.profilePhoto || 
+                              matchData.passengerData?.passengerPhotoUrl || 
+                              matchData.passengerData?.profilePhoto ||
+                              null;
         
-        // Create FULL passenger details object
+        // Create FULL passenger details object matching the structure in your logs
         const passengerFullDetails = {
-          passengerPhone: matchData.passengerPhone,
-          passengerName: matchData.passengerName,
+          passengerPhone: passengerPhone,
+          passengerName: passengerName,
           passengerCount: passengerCount,
-          
-          profilePhoto: matchData.passengerDetails?.profilePhoto || 
-                        matchData.passengerData?.passengerPhotoUrl ||
-                        matchData.passengerData?.passengerInfo?.photoUrl ||
-                        null,
-          
-          photoUrl: matchData.passengerDetails?.profilePhoto || 
-                    matchData.passengerData?.passengerPhotoUrl ||
-                    null,
-          
-          rating: matchData.passengerDetails?.rating || 
-                  matchData.passengerData?.passengerInfo?.rating || 
-                  5.0,
-          
-          totalRides: matchData.passengerDetails?.totalRides || 
-                      matchData.passengerData?.passengerInfo?.totalRides || 
-                      0,
-          
-          completedRides: matchData.passengerDetails?.completedRides || 
-                          matchData.passengerData?.passengerInfo?.completedRides || 
-                          0,
-          
-          isVerified: matchData.passengerDetails?.isVerified || 
-                      matchData.passengerData?.passengerInfo?.isVerified || 
-                      false,
-          
-          pickupLocation: matchData.pickupLocation || 
-                          matchData.passengerData?.pickupLocation || 
-                          null,
-          
-          destinationLocation: matchData.destinationLocation || 
-                               matchData.passengerData?.destinationLocation || 
-                               null,
-          
-          pickupName: matchData.pickupName || 
-                      matchData.passengerData?.pickupName || 
-                      'Pickup location',
-          
-          destinationName: matchData.destinationName || 
-                           matchData.passengerData?.destinationName || 
-                           'Destination',
-          
-          scheduledTime: matchData.scheduledTime || 
-                         matchData.passengerData?.scheduledTime || 
-                         null,
-          
-          scheduledTimestamp: matchData.passengerData?.scheduledTimestamp || 
-                              this.extractTime(matchData.passengerData) || 
-                              null,
-          
-          paymentMethod: matchData.passengerDetails?.paymentMethod || 
-                         matchData.passengerData?.paymentMethod || 
-                         'cash',
-          
+          profilePhoto: passengerPhoto,
+          photoUrl: passengerPhoto,
+          rating: matchData.passengerDetails?.rating || 5.0,
+          totalRides: matchData.passengerDetails?.totalRides || 0,
+          completedRides: matchData.passengerDetails?.completedRides || 0,
+          isVerified: matchData.passengerDetails?.isVerified || false,
+          pickupLocation: matchData.pickupLocation || null,
+          destinationLocation: matchData.destinationLocation || null,
+          pickupName: matchData.pickupName || 'Pickup location',
+          destinationName: matchData.destinationName || 'Destination',
+          scheduledTime: matchData.scheduledTime || null,
+          scheduledTimestamp: matchData.scheduledTimestamp || null,
+          paymentMethod: matchData.passengerDetails?.paymentMethod || 'cash',
           luggageCount: matchData.passengerData?.luggageCount || 0,
           specialRequests: matchData.passengerData?.specialRequests || '',
-          
           matchId: matchId,
           acceptedAt: new Date().toISOString(),
           confirmedAt: new Date().toISOString(),
           status: 'confirmed',
-          
-          passengerInfo: matchData.passengerData?.passengerInfo || 
-                         matchData.passengerDetails || 
-                         null,
-          
+          passengerInfo: matchData.passengerData?.passengerInfo || null,
           contactInfo: {
-            phone: matchData.passengerPhone,
-            name: matchData.passengerName,
-            photoUrl: matchData.passengerDetails?.profilePhoto || 
-                      matchData.passengerData?.passengerPhotoUrl ||
-                      null
+            phone: passengerPhone,
+            name: passengerName,
+            photoUrl: passengerPhoto
           },
-          
           locationCoordinates: {
-            pickup: matchData.pickupLocation || matchData.passengerData?.pickupLocation,
-            destination: matchData.destinationLocation || matchData.passengerData?.destinationLocation
+            pickup: matchData.pickupLocation || null,
+            destination: matchData.destinationLocation || null
           },
-          
-          estimatedFare: matchData.matchDetails?.estimatedFare || 
-                         matchData.passengerData?.estimatedFare || 
-                         0,
-          
-          driverVehicleAtAcceptance: {
-            type: driverDoc.vehicleType || 'Car',
-            model: driverDoc.vehicleModel || 'Standard',
-            color: driverDoc.vehicleColor || 'Not specified',
-            plate: driverDoc.licensePlate || 'Not specified'
-          }
+          estimatedFare: matchData.matchDetails?.estimatedFare || 0
         };
         
-        // Update driver's accepted passengers list with FULL details
+        console.log(`👤 [SCHEDULED] Adding passenger to driver's accepted list:`, {
+          name: passengerName,
+          photo: passengerPhoto ? 'Yes' : 'No'
+        });
+        
+        // Get current accepted passengers
         const currentAccepted = driverDoc.acceptedPassengers || [];
+        console.log(`📊 [SCHEDULED] Driver currently has ${currentAccepted.length} accepted passengers`);
+        
+        // Add new passenger to the array
         const updatedAccepted = [...currentAccepted, passengerFullDetails];
         
-        // Create summary for quick access
+        // Create summary array
         const acceptedSummary = updatedAccepted.map(p => ({
           phone: p.passengerPhone,
           name: p.passengerName,
@@ -1085,24 +1041,60 @@ class ScheduledService {
           estimatedFare: p.estimatedFare
         }));
         
+        // Calculate total accepted passengers
+        const totalAccepted = (driverDoc.totalAcceptedPassengers || 0) + passengerCount;
+        
+        // Determine new status
         const driverNewStatus = newAvailableSeats <= 0 ? 'fully_booked' : 'actively_matching';
         
-        await this.updateSearchStatus('driver', driverPhone, {
+        console.log(`📝 [SCHEDULED] Updating driver document:`, {
+          newAvailableSeats,
+          driverNewStatus,
+          totalAccepted,
+          acceptedCount: updatedAccepted.length
+        });
+        
+        // Prepare update data for driver - EXACT structure from your logs
+        const driverUpdateData = {
           status: driverNewStatus,
-          availableSeats: Math.max(0, newAvailableSeats),
+          availableSeats: newAvailableSeats,
           acceptedPassengers: updatedAccepted,
           acceptedPassengersSummary: acceptedSummary,
+          totalAcceptedPassengers: totalAccepted,
           lastAcceptedAt: new Date().toISOString(),
           lastConfirmedAt: new Date().toISOString(),
           pendingMatchId: null,
           pendingMatchWith: null,
           pendingMatchStatus: null,
-          totalAcceptedPassengers: (driverDoc.totalAcceptedPassengers || 0) + passengerCount,
           lastActivityAt: new Date().toISOString(),
-          lastActivityType: 'confirmed_match'
-        });
+          lastActivityType: 'confirmed_match',
+          updatedAt: new Date().toISOString(),
+          lastUpdated: Date.now()
+        };
         
-        // Build driver details for passenger with REAL name and photo
+        // Update driver document
+        await driverDocRef.update(driverUpdateData);
+        console.log(`✅ [FIRESTORE] Updated driver document ${driverPhone} with accepted passenger`);
+        
+        // Update match document
+        await matchRef.update({
+          status: 'confirmed',
+          finalStatus: 'accepted',
+          confirmedAt: new Date().toISOString(),
+          driverDecision: 'accept',
+          driverDecisionAt: new Date().toISOString(),
+          passengerDecision: 'accept',
+          passengerDecisionAt: new Date().toISOString(),
+          passengerCount: passengerCount,
+          remainingSeatsAfterThisMatch: newAvailableSeats,
+          updatedAt: new Date().toISOString()
+        });
+        console.log(`✅ [FIRESTORE] Updated match document ${matchId} to confirmed`);
+        
+        // Update passenger document
+        const passengerDocRef = this.db.collection('scheduled_searches_passenger').doc(passengerPhone);
+        
+        // Create driver details for passenger with REAL data
         const driverDetailsForPassenger = {
           name: driverDoc.driverName || 'Driver',
           phone: driverPhone,
@@ -1124,8 +1116,7 @@ class ScheduledService {
           }
         };
         
-        // Update passenger
-        await this.updateSearchStatus('passenger', matchData.passengerPhone, {
+        await passengerDocRef.update({
           status: 'matched_confirmed',
           matchId: matchId,
           matchedWith: driverPhone,
@@ -1133,25 +1124,58 @@ class ScheduledService {
           confirmedAt: new Date().toISOString(),
           driverAccepted: true,
           driverAcceptedAt: new Date().toISOString(),
-          driverDetails: driverDetailsForPassenger
+          driverDetails: driverDetailsForPassenger,
+          updatedAt: new Date().toISOString(),
+          lastUpdated: Date.now()
         });
+        console.log(`✅ [FIRESTORE] Updated passenger document ${passengerPhone} to confirmed`);
         
         // Remove from memory cache
-        this.activePassengers.delete(matchData.passengerPhone);
+        this.activePassengers.delete(passengerPhone);
         
-        // Send confirmations
-        await this.notifyMatchConfirmed(matchData, matchId, driverPhone, decision);
+        // Update driver in memory cache
+        const cachedDriver = this.activeDrivers.get(driverPhone);
+        if (cachedDriver) {
+          cachedDriver.data = { ...cachedDriver.data, ...driverUpdateData };
+          cachedDriver.timestamp = Date.now();
+          this.activeDrivers.set(driverPhone, cachedDriver);
+        }
         
-        console.log(`✅ [SCHEDULED] Match ${matchId} confirmed! Seats left: ${newAvailableSeats}`);
+        // If driver has no seats left, remove from active cache
+        if (newAvailableSeats <= 0) {
+          this.activeDrivers.delete(driverPhone);
+        }
+        
+        // Send confirmation notifications
+        await this.sendMatchConfirmedNotifications(matchData, matchId, driverPhone, driverDoc, passengerFullDetails);
+        
+        console.log(`✅ [SCHEDULED] Match ${matchId} confirmed!`);
         console.log(`👥 [SCHEDULED] Driver now has ${updatedAccepted.length} accepted passengers`);
-        console.log(`📸 [SCHEDULED] Passenger photo stored: ${passengerFullDetails.profilePhoto ? 'Yes' : 'No'}`);
+        console.log(`💺 [SCHEDULED] Seats left: ${newAvailableSeats}`);
+        console.log(`📸 [SCHEDULED] Passenger photo stored: ${passengerPhoto ? 'Yes' : 'No'}`);
         
-        return { success: true, matchId, decision };
+        return { 
+          success: true, 
+          matchId, 
+          decision,
+          data: {
+            availableSeats: newAvailableSeats,
+            acceptedCount: updatedAccepted.length,
+            passengerAdded: passengerName
+          }
+        };
         
       } else if (decision === 'reject') {
-        updateData.status = 'driver_rejected';
-        await matchRef.update(updateData);
+        console.log(`❌ [SCHEDULED] Driver ${driverPhone} REJECTING match ${matchId}`);
         
+        await matchRef.update({
+          status: 'driver_rejected',
+          driverDecision: 'reject',
+          driverDecisionAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        });
+        
+        // Clear pending match from driver
         await this.updateSearchStatus('driver', driverPhone, {
           status: 'actively_matching',
           pendingMatchId: null,
@@ -1159,6 +1183,7 @@ class ScheduledService {
           pendingMatchStatus: null
         });
         
+        // Put passenger back in matching pool
         await this.updateSearchStatus('passenger', matchData.passengerPhone, {
           status: 'actively_matching',
           matchId: null,
@@ -1166,6 +1191,7 @@ class ScheduledService {
           matchStatus: null
         });
         
+        // Add passenger back to memory cache
         const passengerDoc = await this.getDocument('scheduled_searches_passenger', matchData.passengerPhone);
         if (passengerDoc && (passengerDoc.exists || passengerDoc.data)) {
           const passengerData = passengerDoc.data ? passengerDoc.data() : passengerDoc;
@@ -1175,14 +1201,90 @@ class ScheduledService {
           });
         }
         
-        console.log(`❌ [SCHEDULED] Driver rejected match ${matchId}`);
+        console.log(`✅ [SCHEDULED] Match ${matchId} rejected`);
         
         return { success: true, matchId, decision };
       }
       
     } catch (error) {
       console.error('❌ [SCHEDULED] Error handling driver decision:', error.message);
+      console.error('❌ [SCHEDULED] Error stack:', error.stack);
       return { success: false, error: error.message };
+    }
+  }
+  
+  // ========== SEND CONFIRMATION NOTIFICATIONS ==========
+  
+  async sendMatchConfirmedNotifications(matchData, matchId, driverPhone, driverDoc, passengerDetails) {
+    try {
+      // Notification for driver
+      const driverNotification = {
+        type: 'scheduled_match_confirmed',
+        data: {
+          matchId: matchId,
+          confirmedBy: driverPhone,
+          confirmedByType: 'driver',
+          passengerPhone: matchData.passengerPhone,
+          passengerName: matchData.passengerName,
+          passengerDetails: passengerDetails,
+          confirmedAt: new Date().toISOString(),
+          timestamp: new Date().toISOString(),
+          contactInfo: {
+            passengerPhone: matchData.passengerPhone,
+            passengerName: matchData.passengerName,
+            passengerPhoto: passengerDetails.profilePhoto
+          },
+          matchDetails: matchData.matchDetails,
+          pickupName: matchData.pickupName || 'Pickup location',
+          destinationName: matchData.destinationName || 'Destination'
+        }
+      };
+      
+      await this.sendNotification(driverPhone, driverNotification, { important: true });
+      
+      // Notification for passenger
+      const passengerNotification = {
+        type: 'scheduled_match_confirmed',
+        data: {
+          matchId: matchId,
+          confirmedBy: driverPhone,
+          confirmedByType: 'driver',
+          driverPhone: driverPhone,
+          driverName: driverDoc.driverName || 'Driver',
+          driverDetails: {
+            name: driverDoc.driverName || 'Driver',
+            phone: driverPhone,
+            photoUrl: driverDoc.profilePhoto || null,
+            rating: driverDoc.rating || 5.0,
+            availableSeats: driverDoc.availableSeats || 0,
+            vehicleInfo: driverDoc.vehicleInfo || {
+              type: driverDoc.vehicleType || 'Car',
+              model: driverDoc.vehicleModel || 'Standard',
+              color: driverDoc.vehicleColor || 'Not specified',
+              plate: driverDoc.licensePlate || 'Not specified'
+            }
+          },
+          confirmedAt: new Date().toISOString(),
+          timestamp: new Date().toISOString(),
+          contactInfo: {
+            driverPhone: driverPhone,
+            driverName: driverDoc.driverName || 'Driver',
+            vehicleInfo: driverDoc.vehicleInfo,
+            driverPhoto: driverDoc.profilePhoto || null
+          },
+          matchDetails: matchData.matchDetails,
+          pickupName: matchData.pickupName || 'Pickup location',
+          destinationName: matchData.destinationName || 'Destination',
+          scheduledTime: matchData.scheduledTime
+        }
+      };
+      
+      await this.sendNotification(matchData.passengerPhone, passengerNotification, { important: true });
+      
+      console.log(`🎉 [SCHEDULED] Confirmation notifications sent for match ${matchId}`);
+      
+    } catch (error) {
+      console.error('❌ [SCHEDULED] Error sending confirmation notifications:', error.message);
     }
   }
   
@@ -1249,6 +1351,28 @@ class ScheduledService {
     } catch (error) {
       console.error('❌ [SCHEDULED] Error getting driver passengers:', error.message);
       return { success: false, error: error.message, passengers: [] };
+    }
+  }
+  
+  // ========== NOTIFICATION METHODS ==========
+  
+  async sendNotification(userId, notification, options = {}) {
+    try {
+      console.log(`📨 [SCHEDULED] Sending notification to ${userId}, type: ${notification.type}`);
+      
+      if (this.websocketServer && this.websocketServer.sendToUser) {
+        try {
+          await this.websocketServer.sendToUser(userId, notification);
+          console.log(`✅ [SCHEDULED] WebSocket sent to ${userId}`);
+        } catch (wsError) {
+          console.error(`❌ [SCHEDULED] WebSocket error:`, wsError.message);
+        }
+      }
+      
+      return { success: true };
+    } catch (error) {
+      console.error(`❌ [SCHEDULED] Error in sendNotification:`, error.message);
+      return { success: false };
     }
   }
   
@@ -1352,15 +1476,6 @@ class ScheduledService {
       await batch.commit();
       
       console.log(`✅ [SCHEDULED] Driver ${driverPhone} cancelled all ${acceptedPassengers.length} passengers`);
-      
-      if (this.websocketServer && this.websocketServer.broadcast) {
-        this.websocketServer.broadcast('driver_cancelled_all', {
-          driverPhone: driverPhone,
-          driverName: driverDoc.driverName,
-          passengerCount: acceptedPassengers.length,
-          timestamp: new Date().toISOString()
-        });
-      }
       
       return {
         success: true,
@@ -1486,15 +1601,6 @@ class ScheduledService {
           canReschedule: true
         }
       }, { important: true });
-      
-      if (restoredSeats > 0 && this.websocketServer && this.websocketServer.broadcast) {
-        this.websocketServer.broadcast('driver_seats_updated', {
-          driverPhone: driverPhone,
-          driverName: driverDoc.driverName,
-          availableSeats: restoredSeats,
-          timestamp: new Date().toISOString()
-        });
-      }
       
       return {
         success: true,
@@ -1647,14 +1753,6 @@ class ScheduledService {
         createdAt: new Date().toISOString()
       });
       
-      if (this.websocketServer && this.websocketServer.broadcast) {
-        this.websocketServer.broadcast('trip_cancelled', {
-          type: 'passenger_cancelled',
-          data: cancellationData,
-          timestamp: new Date().toISOString()
-        });
-      }
-      
       console.log(`✅ [SCHEDULED] Passenger ${passengerPhone} cancelled ride with driver ${driverPhone}`);
       console.log(`💺 [SCHEDULED] Driver seats restored: ${newAvailableSeats}`);
       console.log(`📝 [SCHEDULED] Cancellation record created: ${cancellationRef.id}`);
@@ -1702,16 +1800,6 @@ class ScheduledService {
         }
       }, { important: true });
       
-      if (newAvailableSeats > 0 && this.websocketServer && this.websocketServer.broadcast) {
-        this.websocketServer.broadcast('driver_seats_updated', {
-          driverPhone: driverPhone,
-          driverName: driverDoc.driverName,
-          availableSeats: newAvailableSeats,
-          passengerJustCancelled: passengerPhone,
-          timestamp: new Date().toISOString()
-        });
-      }
-      
       return {
         success: true,
         cancellationId: cancellationRef.id,
@@ -1744,95 +1832,6 @@ class ScheduledService {
       
       return { success: false, error: error.message };
     }
-  }
-  
-  // ========== NOTIFICATION METHODS ==========
-  
-  async sendNotification(userId, notification, options = {}) {
-    try {
-      console.log(`📨 [SCHEDULED] Sending notification to ${userId}, type: ${notification.type}`);
-      
-      if (this.websocketServer && this.websocketServer.sendToUser) {
-        try {
-          await this.websocketServer.sendToUser(userId, notification);
-          console.log(`✅ [SCHEDULED] WebSocket sent to ${userId}`);
-        } catch (wsError) {
-          console.error(`❌ [SCHEDULED] WebSocket error:`, wsError.message);
-        }
-      }
-      
-      return { success: true };
-    } catch (error) {
-      console.error(`❌ [SCHEDULED] Error in sendNotification:`, error.message);
-      return { success: false };
-    }
-  }
-  
-  async notifyMatchConfirmed(matchData, matchId, confirmingUserId, decision) {
-    const driverNotification = {
-      type: 'scheduled_match_confirmed',
-      data: {
-        matchId: matchId,
-        confirmedBy: confirmingUserId,
-        confirmedByType: 'driver',
-        passengerPhone: matchData.passengerPhone,
-        passengerName: matchData.passengerName,
-        passengerDetails: matchData.passengerDetails,
-        confirmedAt: new Date().toISOString(),
-        timestamp: new Date().toISOString(),
-        contactInfo: {
-          passengerPhone: matchData.passengerPhone,
-          passengerName: matchData.passengerName,
-          passengerPhoto: matchData.passengerDetails?.profilePhoto
-        },
-        matchDetails: matchData.matchDetails,
-        pickupName: matchData.pickupName || 'Pickup location',
-        destinationName: matchData.destinationName || 'Destination'
-      }
-    };
-    
-    const passengerNotification = {
-      type: 'scheduled_match_confirmed',
-      data: {
-        matchId: matchId,
-        confirmedBy: confirmingUserId,
-        confirmedByType: 'driver',
-        driverPhone: matchData.driverPhone,
-        driverName: matchData.driverName,
-        driverDetails: {
-          name: matchData.driverName,
-          phone: matchData.driverPhone,
-          photoUrl: matchData.driverDetails?.profilePhoto || matchData.driverData?.profilePhoto,
-          rating: matchData.driverDetails?.rating || 5.0,
-          availableSeats: matchData.matchDetails?.driverCapacity || 0,
-          vehicleInfo: matchData.driverData?.vehicleInfo || {
-            type: matchData.driverData?.vehicleType || 'Car',
-            model: matchData.driverData?.vehicleModel || 'Standard',
-            color: matchData.driverData?.vehicleColor || 'Not specified',
-            plate: matchData.driverData?.licensePlate || 'Not specified'
-          }
-        },
-        confirmedAt: new Date().toISOString(),
-        timestamp: new Date().toISOString(),
-        contactInfo: {
-          driverPhone: matchData.driverPhone,
-          driverName: matchData.driverName,
-          vehicleInfo: matchData.driverData?.vehicleInfo,
-          driverPhoto: matchData.driverDetails?.profilePhoto || matchData.driverData?.profilePhoto
-        },
-        matchDetails: matchData.matchDetails,
-        pickupName: matchData.pickupName || 'Pickup location',
-        destinationName: matchData.destinationName || 'Destination',
-        scheduledTime: matchData.scheduledTime
-      }
-    };
-    
-    await Promise.all([
-      this.sendNotification(matchData.driverPhone, driverNotification, { important: true }),
-      this.sendNotification(matchData.passengerPhone, passengerNotification, { important: true })
-    ]);
-    
-    console.log(`🎉 [SCHEDULED] Match ${matchId} confirmed notifications sent!`);
   }
   
   // ========== HELPER METHODS ==========
