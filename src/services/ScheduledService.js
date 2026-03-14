@@ -949,14 +949,27 @@ class ScheduledService {
         lastActivityType: 'match_proposed'
       });
       
+      // UPDATED NOTIFICATION SECTION - Flat fields added for Android
       await this.sendNotification(match.driverPhone, {
         type: 'NEW_MATCH_PROPOSAL',
         title: 'New Passenger Match!',
         body: `${passengerDetails.name} wants to join your trip`,
         data: {
+          // Flat fields (what Android needs)
           matchId: matchId,
           passengerPhone: match.passengerPhone,
           passengerName: passengerDetails.name,
+          passengerPhoto: passengerDetails.profilePhoto || '',
+          pickupName: pickupName,
+          destinationName: destinationName,
+          estimatedFare: (match.passengerData?.estimatedFare || 0).toString(),
+          passengerCount: (match.passengerCount || 1).toString(),
+          scheduledTime: match.passengerData?.scheduledTime || '',
+          timestamp: new Date().toISOString(),
+          approvalDeadline: new Date(Date.now() + this.PENDING_EXPIRY).toISOString(),
+          expiresAt: new Date(Date.now() + this.MATCH_EXPIRY).toISOString(),
+          
+          // Keep nested for backward compatibility
           passengerDetails: passengerDetails,
           tripDetails: {
             pickupName: pickupName,
@@ -965,10 +978,7 @@ class ScheduledService {
             passengerCount: match.passengerCount,
             estimatedFare: match.passengerData?.estimatedFare,
             paymentMethod: match.passengerData?.paymentMethod || 'cash'
-          },
-          expiresAt: new Date(Date.now() + this.MATCH_EXPIRY).toISOString(),
-          approvalDeadline: new Date(Date.now() + this.PENDING_EXPIRY).toISOString(),
-          timestamp: new Date().toISOString()
+          }
         }
       }, { important: true });
       
